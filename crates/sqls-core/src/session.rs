@@ -185,6 +185,8 @@ enum Cmd {
     Commit { reply: Reply<()> },
     Rollback { reply: Reply<()> },
     Ping { reply: Reply<()> },
+    /// PL/SQL 호출 — OUT 바인드 값을 문자열로 돌려준다 (디버거·내부 도구용)
+    Call { sql: String, ins: Vec<(String, Option<String>)>, outs: Vec<String>, reply: Reply<Vec<Option<String>>> },
     Shutdown,
 }
 
@@ -328,6 +330,19 @@ impl Session {
         self.call(|reply| Cmd::Ping { reply }).await
     }
 
+    /// PL/SQL 블록을 실행하고 OUT 바인드(`outs` 이름 순서) 값을 문자열로 받는다.
+    /// 숫자·날짜는 블록 안에서 문자열로 바뀐다. 읽기 전용 세션에서는 쓸 수 없다.
+    pub async fn call_plsql(
+        &self,
+        sql: &str,
+        ins: Vec<(String, Option<String>)>,
+        outs: &[&str],
+    ) -> Result<Vec<Option<String>>> {
+        let sql = sql.to_string();
+        let outs = outs.iter().map(|s| s.to_string()).collect();
+        self.call(|reply| Cmd::Call { sql, ins, outs, reply }).await
+    }
+
     /// 세션을 닫는다. 커밋하지 않은 변경은 롤백된다 (OCI 기본 동작).
     pub fn close(&self) {
         let _ = self.tx.send(Cmd::Shutdown);
@@ -441,6 +456,9 @@ impl Worker {
             }
             Cmd::Ping { reply } => {
                 let _ = reply.send(self.conn.ping().map_err(Error::from));
+            }
+            Cmd::Call { sql, ins, outs, reply } => {
+                let _ = reply.send(self.call_plsql(&sql, &ins, &outs));
             }
             Cmd::Shutdown => {}
         }
@@ -596,6 +614,25 @@ impl Worker {
         })();
         let _ = self.conn.rollback();
         r
+    }
+
+    fn call_plsql(&mut self, sql_text: &str, ins: &[(String, Option<String>)], outs: &[String]) -> Result<Vec<Option<String>>> {
+        if self.spec.read_only {
+            return Err(Error::ReadOnly("PL/SQL 호출".into()));
+        }
+        let mut stmt = self.conn.statement(sql_text).build()?;
+        for (n, v) in ins {
+            let v: &dyn ToSql = v;
+            stmt.bind(n.as_str(), v)?;
+        }
+        // 4000 바이트를 넘는 VARCHAR2 바인드는 LONG 으로 바뀌어 숫자를 넣으면 PLS-00382 가 난다.
+        // 긴 값이 필요한 OUT 은 이름 앞에 `l_` 를 붙인다 (LONG 으로 받는다 — 블록에서 문자열만 넣을 것).
+        for n in outs {
+            let ty = if n.starts_with("l_") { OracleType::Long } else { OracleType::Varchar2(4000) };
+            stmt.bind(n.as_str(), &ty)?;
+        }
+        stmt.execute(&[])?;
+        outs.iter().map(|n| stmt.bind_value::<_, Option<String>>(n.as_str()).map_err(Error::from)).collect()
     }
 
     /// DBMS_OUTPUT 버퍼를 비운다. 무한 루프를 막으려고 상한을 둔다.

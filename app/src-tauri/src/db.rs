@@ -89,7 +89,12 @@ pub struct Connected {
 }
 
 #[tauri::command]
-pub async fn connect(st: State<'_, AppState>, profile: String, password: Option<String>) -> R<Connected> {
+pub async fn connect(
+    st: State<'_, AppState>,
+    app: tauri::AppHandle,
+    profile: String,
+    password: Option<String>,
+) -> R<Connected> {
     let p = st
         .cfg
         .read()
@@ -114,13 +119,16 @@ pub async fn connect(st: State<'_, AppState>, profile: String, password: Option<
             return Err(e.into());
         }
     };
-    st.passwords.write().unwrap().insert(key, pw);
+    st.passwords.write().unwrap().insert(key, pw.clone());
+    // 자동완성 캐시는 프로필마다 하나 — 처음 접속이면 백그라운드로 읽기 시작한다
+    crate::complete::ensure_hub(&st, &app, &p, &pw);
     let id = st.next_id();
     let info = session.info().clone();
     st.sessions.lock().unwrap().insert(
         id,
         OpenSession {
             session,
+            profile: p.name.clone(),
             txn_pending: Arc::new(AtomicBool::new(false)),
             stop_script: Arc::new(AtomicBool::new(false)),
         },
@@ -193,6 +201,9 @@ pub async fn execute(st: State<'_, AppState>, args: ExecArgs) -> R<ExecView> {
     }
     let r = s.execute(&args.sql, opts(args.page_size, args.binds)).await?;
     track_txn(r.kind, &r.outcome, &txn);
+    if matches!(r.kind, StmtKind::Ddl | StmtKind::PlsqlUnit) {
+        crate::complete::after_ddl(&st, args.id);
+    }
     let txn_pending = txn.load(Ordering::Relaxed);
     Ok(ExecView { result: r, txn_pending })
 }
@@ -251,6 +262,9 @@ pub async fn execute_script(
             Ok(r) => {
                 ok += 1;
                 track_txn(r.kind, &r.outcome, &txn);
+                if matches!(r.kind, StmtKind::Ddl | StmtKind::PlsqlUnit) {
+                    crate::complete::after_ddl(&st, id);
+                }
                 let summary = match &r.outcome {
                     ExecOutcome::Rows(p) => {
                         format!("{}행{}", p.rows.len(), if p.has_more { "+" } else { "" })

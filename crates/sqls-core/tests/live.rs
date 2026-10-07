@@ -249,3 +249,54 @@ async fn abandon_releases_stuck_call() {
     let fresh = Session::connect(spec(true)).await.unwrap();
     exec(&fresh, "select 1 from dual").await;
 }
+
+/// 자동완성 캐시: 실제 사전에서 읽고, FK 로 조인 조건을 추천하고, 공개 동의어 패키지를 채운다
+#[tokio::test]
+#[ignore]
+async fn completion_cache_from_dictionary() {
+    use sqls_core::complete::{self, load};
+    let s = Session::connect(spec(false)).await.unwrap();
+    for t in ["SQLS_C_ITEM", "SQLS_C_ORD"] {
+        let _ = s.execute(&format!("drop table {t} purge"), Default::default()).await;
+    }
+    exec(&s, "create table sqls_c_ord (ord_id number primary key, cust varchar2(20))").await;
+    exec(&s, "create table sqls_c_item (ord_id number references sqls_c_ord, line_no number, qty number, \
+              constraint sqls_c_item_pk primary key (ord_id, line_no))").await;
+    exec(&s, "comment on column sqls_c_item.qty is '수량'").await;
+
+    let started = Instant::now();
+    let shared = std::sync::RwLock::new(complete::SchemaCache::default());
+    let mut phases = Vec::new();
+    let mut cache = load::load_user_schema(&s, &shared, true, |p| phases.push((p, started.elapsed()))).await.unwrap();
+    let took = started.elapsed();
+    println!("단계: {phases:?}");
+    // 첫 단계(객체 이름)가 전체보다 훨씬 먼저 끝나야 한다
+    assert!(phases[0].1 < took / 2, "{phases:?}");
+    assert_eq!(shared.read().unwrap().stats(), cache.stats());
+    let (objs, cols) = cache.stats();
+    println!("캐시 적재 {took:?}: 객체 {objs}, 컬럼 {cols}");
+    assert!(cache.has_columns(&s.info().user, "SQLS_C_ITEM"));
+
+    let sql = "select * from sqls_c_item i join sqls_c_ord o on ";
+    let r = complete::complete(sql, sql.len(), &cache, 50);
+    assert_eq!(r.items[0].label, "o.ord_id = i.ord_id", "{:?}", r.items.iter().take(3).map(|i| &i.label).collect::<Vec<_>>());
+
+    let sql = "select i. from sqls_c_item i";
+    let r = complete::complete(sql, 9, &cache, 50);
+    let qty = r.items.iter().find(|i| i.label == "qty").unwrap();
+    assert_eq!(qty.info.as_deref(), Some("수량"));
+
+    // DBMS_OUTPUT 은 공개 동의어 → SYS 패키지. 처음엔 모자라다고 하고, 채우면 나온다
+    let sql = "begin dbms_output.";
+    let r = complete::complete(sql, sql.len(), &cache, 50);
+    assert_eq!(r.missing.len(), 1, "{:?}", r.missing);
+    for f in load::fill(&s, &r.missing[0]).await.unwrap() {
+        cache.apply(f);
+    }
+    let r = complete::complete(sql, sql.len(), &cache, 50);
+    assert!(r.items.iter().any(|i| i.label == "put_line"), "{:?}", r.items.iter().map(|i| &i.label).collect::<Vec<_>>());
+
+    for t in ["SQLS_C_ITEM", "SQLS_C_ORD"] {
+        let _ = s.execute(&format!("drop table {t} purge"), Default::default()).await;
+    }
+}

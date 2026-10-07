@@ -248,7 +248,7 @@ pub async fn describe(s: &Session, qualified: &str) -> Result<TableDesc> {
     })
 }
 
-fn format_type(t: &str, len: &str, prec: &str, scale: &str, char_used: &str, char_len: &str) -> String {
+pub(crate) fn format_type(t: &str, len: &str, prec: &str, scale: &str, char_used: &str, char_len: &str) -> String {
     match t {
         "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" => {
             if char_used == "C" {

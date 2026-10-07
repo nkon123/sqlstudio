@@ -106,8 +106,36 @@ allowed_connections = ["ERP-DEV"]     # 비어 있으면 아무것도 노출하�
 | Esc | 실행 중인 쿼리 취소 |
 | Ctrl+S | 저장 (원래 인코딩으로) |
 | Ctrl+/ | 주석 토글 |
+| Ctrl+Space | 자동완성 띄우기 |
 | 그리드 Ctrl+C / Ctrl+Shift+C | 선택 영역을 TSV 로 복사 (헤더 포함) |
 | 그리드 더블클릭 | 긴 값(CLOB) 보기 |
+
+## 자동완성 (구절 인식)
+
+키를 칠 때마다 커서가 있는 문장을 분석해 **그 구절에 맞는 것만** 띄운다. LLM 도 DB 왕복도 쓰지 않는다 —
+접속 때 백그라운드로 읽어 둔 사전 캐시만 본다. 한 번 부르는 데 0.002~0.15ms (릴리스, 11g 실측).
+
+| 어디서 | 무엇이 뜨나 |
+|---|---|
+| `FROM` / `JOIN` / `INTO` / `UPDATE` 뒤 | 테이블·뷰·동의어·CTE. JOIN 뒤에는 이미 쓴 테이블과 **FK 로 이어진 테이블이 먼저** |
+| `JOIN t2 b ON` 뒤 | **FK 로 만든 조인 조건** (`b.dept_id = a.dept_id`), FK 가 없으면 PK 와 이름이 같은 컬럼 |
+| `별칭.` / `테이블.` / `스키마.테이블.` | 그 테이블의 컬럼 (PK 먼저, 주석·형식 표시). FROM 이 커서 **뒤에** 있어도 된다 |
+| `SELECT` / `WHERE` / `GROUP BY` / `ORDER BY` / `SET` / `ON` | 범위 안 모든 테이블의 컬럼. 두 테이블에 같은 이름이 있으면 별칭을 붙여 넣는다. 별칭, 함수, 다음 구절 키워드 |
+| `INSERT INTO t (` | t 의 컬럼, 맨 앞에 "모든 컬럼" |
+| `WITH x AS (…)` / `(SELECT …) v` | CTE·인라인 뷰의 컬럼 (SELECT 목록의 별칭) |
+| 서브쿼리 안 | 안쪽 테이블 먼저, 바깥 테이블도 (상관 서브쿼리) |
+| `시퀀스.` / `패키지.` / `스키마.` | NEXTVAL·CURRVAL / 프로시저·함수 / 그 스키마의 객체 |
+| `EXEC` / `CALL` | 프로시저·패키지 |
+| 문자열·주석 안 | 아무것도 띄우지 않는다 |
+
+- 입력이 소문자면 소문자로, 대문자면 대문자로 넣는다.
+- `ord` 는 `CUST_ORD_ITEM` 에도(단어 경계), `coi` 는 머리글자로도 맞는다.
+- Ctrl+Space 로 직접 띄운다. 상태 표시줄에 캐시 상태(객체·컬럼 수)가 보인다.
+- 캐시는 프로필마다 하나이고 **별도의 읽기 전용 메타 세션**이 채운다. 작업 세션의 긴 쿼리가 자동완성을
+  막지 않고, 자동완성 조회가 사용자의 트랜잭션에 끼어들지 않는다.
+- 단계별로 채운다: 객체 이름(접속 0.2초 뒤) → 컬럼 → 동의어 → PK/FK. DDL 을 실행하면 다시 읽는다.
+- 다른 스키마의 컬럼, 공개 동의어 뒤의 패키지는 처음 쓸 때 그것만 읽는다 (300ms 까지 기다리고, 늦으면
+  있는 것으로 먼저 보여 준 뒤 다음 키부터 반영).
 
 ## AI 패널
 
@@ -165,7 +193,7 @@ Linux 는 `libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev` 가 필�
 ## 테스트
 
 ```bash
-cargo test --workspace                   # DB 없이 도는 테스트 (SQL 분리·판정, LLM 스트리밍, MCP 프로토콜)
+cargo test --workspace                   # DB 없이 도는 테스트 (SQL 분리·판정, 자동완성, LLM 스트리밍, MCP 프로토콜)
 cd app && npx tsc --noEmit               # 프런트엔드 타입 검사
 
 # 실제 Oracle 11g 통합 테스트
@@ -182,7 +210,7 @@ SQLS_TEST_DSN=system/oracle@$IP:1521/XE cargo test --workspace -- --ignored --te
 
 ```
 crates/
-  sqls-core/   Oracle 세션(접속당 스레드), SQL 분석, 데이터 사전, 설정
+  sqls-core/   Oracle 세션(접속당 스레드), SQL 분석, 구절 인식 자동완성, 데이터 사전, 설정
   sqls-llm/    LLM 공급자 (Ollama / OpenAI 호환 / Anthropic), 스트리밍, 프롬프트
   sqls-mcp/    MCP 서버 (sqlstudio-mcp) — 사전 조회만, SQL 실행 없음
 app/

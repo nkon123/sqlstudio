@@ -12,6 +12,8 @@ use sqls_llm::ProviderConfig;
 /// 화면에서 연 세션 하나 (에디터 탭 하나에 붙는다)
 pub struct OpenSession {
     pub session: Session,
+    /// 접속 프로필 이름 — 자동완성 캐시를 같은 프로필의 탭끼리 나눠 쓴다
+    pub profile: String,
     /// 커밋/롤백하지 않은 DML 이 있는지 — 탭을 닫을 때 묻는다
     pub txn_pending: Arc<AtomicBool>,
     /// 스크립트 실행을 멈추라는 신호
@@ -30,6 +32,8 @@ pub struct AppState {
     /// 프로필 이름(대문자) → 비밀번호. 같은 프로필로 새 탭을 열 때 다시 묻지 않는다. 메모리에만.
     pub passwords: RwLock<HashMap<String, String>>,
     pub ai_tasks: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
+    /// 프로필(대문자) → 자동완성 허브 (메타 세션 + 스키마 캐시)
+    pub hubs: Mutex<HashMap<String, Arc<crate::complete::MetaHub>>>,
 }
 
 impl AppState {
@@ -52,6 +56,7 @@ impl AppState {
             providers: RwLock::new(providers),
             api_keys: RwLock::new(HashMap::new()),
             passwords: RwLock::new(HashMap::new()),
+            hubs: Mutex::new(HashMap::new()),
             ai_tasks: Mutex::new(HashMap::new()),
         }
     }

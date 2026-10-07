@@ -173,3 +173,10 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .toast { padding: 8px 12px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 4px 16px rgba(0,0,0,.18); max-width: 420px; white-space: pre-wrap; }
 .toast.error { border-color: var(--danger); color: var(--danger); }
 .toast.ok { border-color: var(--ok); }
+
+.comp-badge { color: var(--dim); }
+.comp-badge.err { color: var(--warn); }
+.cm-tooltip-autocomplete .cm-completionDetail { color: var(--dim); font-style: normal; margin-left: 8px; }
+.cm-tooltip-autocomplete .cm-completionInfo { white-space: pre-wrap; }
+.cm-completionIcon-join::after { content: "⋈"; }
+.cm-tooltip-autocomplete li:not([aria-selected]):has(.cm-completionIcon-join) .cm-completionLabel { color: var(--accent); }

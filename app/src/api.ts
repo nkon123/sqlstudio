@@ -58,6 +58,11 @@ export interface AiAnswer {
   text: string; sql?: string | null; model?: string | null; stop_reason?: string | null;
   refused: boolean; truncated: boolean; input_tokens?: number | null; output_tokens?: number | null; user_message: string;
 }
+export interface CompletionItem {
+  label: string; kind: string; detail?: string | null; info?: string | null; apply?: string | null; boost: number;
+}
+export interface CompletionResultView { from: number; items: CompletionItem[]; context: string }
+export interface CompletionStatus { profile: string; phase: string; objects: number; columns: number; error?: string | null }
 export interface McpSettings { allowed_connections: string[]; call_timeout_secs: number; allow_explain: boolean }
 
 export const api = {
@@ -86,6 +91,9 @@ export const api = {
     invoke<ObjectEntry[]>("list_objects", { id, owner, objectType, nameLike }),
   describe: (id: number, name: string) => invoke<TableDesc>("describe", { id, name }),
   getDdl: (id: number, objectType: string, name: string) => invoke<string>("get_ddl", { id, objectType, name }),
+  complete: (id: number, text: string, cursor: number) => invoke<CompletionResultView>("complete", { id, text, cursor }),
+  completionStatus: (id: number) => invoke<CompletionStatus>("completion_status", { id }),
+  refreshCompletion: (id: number) => invoke<void>("refresh_completion", { id }),
   getMcp: () => invoke<McpSettings>("get_mcp_settings"),
   setMcp: (s: McpSettings) => invoke<void>("set_mcp_settings", { allowedConnections: s.allowed_connections, callTimeoutSecs: s.call_timeout_secs, allowExplain: s.allow_explain }),
   mcpSnippet: () => invoke<string>("mcp_snippet"),

@@ -9,6 +9,7 @@
 //! 세션 스레드에서 돌고, 결과는 채널로 돌아온다. 그래서 느린 쿼리가 화면을
 //! 멈추지 않고, 한 세션의 문제가 다른 세션으로 번지지 않는다.
 
+pub mod complete;
 pub mod config;
 pub mod error;
 pub mod meta;

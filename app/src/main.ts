@@ -10,7 +10,9 @@ import {
   type Connected, type ErrView, type ExecView, type ObjectEntry, type Profile, type Provider, type TableDesc,
 } from "./api";
 import { AiPanel } from "./ai";
-import { SqlEditor, type SchemaMap } from "./editor";
+import { listen } from "@tauri-apps/api/event";
+import { sqlCompletion } from "./completion";
+import { SqlEditor } from "./editor";
 import { ResultGrid } from "./grid";
 import { alertBox, bindBox, confirmBox, field, h, modal, passwordBox, toast } from "./ui";
 
@@ -39,7 +41,6 @@ class Tab {
   running = false;
   runStarted = 0;
   lastError: string | undefined;
-  schema: SchemaMap = {};
 
   constructor(app: App, text = "") {
     const editorHost = h("div", { class: "editor-host" });
@@ -66,7 +67,7 @@ class Tab {
       runScript: () => app.runScript(),
       explain: () => app.explain(),
       save: () => app.save(),
-    }, text);
+    }, text, sqlCompletion(() => this.conn?.id));
     this.editor.view.dom.addEventListener("input", () => this.setDirty(true));
     dragSplit(splitter, editorHost);
     this.show("result");
@@ -121,6 +122,7 @@ class App {
   private txnBadge = h("span", { class: "txn-badge", hidden: true }, "트랜잭션 진행 중");
   private statusLeft = h("span", {});
   private statusRight = h("span", {});
+  private compBadge = h("span", { class: "comp-badge", title: "자동완성 캐시 — Ctrl+Space 로 직접 띄운다" });
   private btn: Record<string, HTMLButtonElement> = {};
   private browserList = h("div", { class: "obj-list" });
   private browserOwner = h("select", { title: "스키마" });
@@ -167,7 +169,7 @@ class App {
     });
     const center = h("section", { class: "center" }, this.tabStrip, this.tabBodies);
     root.append(toolbar, h("main", { class: "layout" }, browser, center, this.ai.el),
-      h("footer", { class: "statusbar" }, this.statusLeft, h("span", { class: "spacer" }), this.statusRight));
+      h("footer", { class: "statusbar" }, this.statusLeft, h("span", { class: "spacer" }), this.compBadge, this.statusRight));
 
     this.browserOwner.addEventListener("change", () => this.loadObjects());
     this.browserType.addEventListener("change", () => this.loadObjects());
@@ -179,6 +181,11 @@ class App {
   }
 
   async start() {
+    // 자동완성 캐시 적재 진행 (프로필마다 백그라운드)
+    listen<{ profile: string; phase: string; objects: number; columns: number; error?: string | null }>("completion-status", (e) => {
+      if (this.active?.conn?.profile.toUpperCase() !== e.payload.profile.toUpperCase()) return;
+      this.showCompletionStatus(e.payload);
+    });
     const info = await api.appInfo();
     this.statusLeft.textContent = `SQLStudio ${info.version} · 설정: ${info.config_path}`;
     if (info.config_error) await alertBox("설정 파일 오류", `${info.config_error}\n\n기본 설정으로 시작합니다. 설정 화면에서 저장하면 파일을 다시 씁니다.`);
@@ -229,6 +236,8 @@ class App {
       x.tabEl.classList.toggle("active", x === t);
     }
     if (t.conn) this.profileSel.value = t.conn.profile;
+    this.compBadge.textContent = "";
+    if (t.conn) api.completionStatus(t.conn.id).then((s) => this.showCompletionStatus(s)).catch(() => {});
     this.refresh();
     if (t.conn) this.loadBrowser();
     else this.browserList.replaceChildren(h("div", { class: "empty" }, "접속하면 객체 목록이 나옵니다"));
@@ -276,8 +285,10 @@ class App {
         t.log(`접속: ${c.user}@${c.connect_string} — ${c.server_version}${c.read_only ? " (읽기 전용)" : ""}`, "ok");
         this.status(`${p.name} 접속됨`);
         this.refresh();
-        if (t === this.active) this.loadBrowser();
-        this.loadCompletion(t);
+        if (t === this.active) {
+          this.loadBrowser();
+          api.completionStatus(c.id).then((s) => this.showCompletionStatus(s)).catch(() => {});
+        }
         return;
       } catch (e) {
         const err = errOf(e);
@@ -632,8 +643,6 @@ class App {
       if (["TABLE", "VIEW", "MATERIALIZED VIEW"].includes(o.object_type)) {
         const d = await api.describe(t.conn.id, q);
         this.renderDesc(t, d);
-        t.schema[d.name] = d.columns.map((c) => c.name);
-        t.editor.setSchema(t.schema, t.conn.user);
       } else {
         const ddl = await api.getDdl(t.conn.id, o.object_type, q);
         t.desc.replaceChildren(h("div", { class: "desc-actions" },
@@ -662,18 +671,6 @@ class App {
       d.indexes.length ? h("div", { class: "desc-idx" }, h("strong", {}, "인덱스"),
         ...d.indexes.map((i) => h("div", {}, `${i.unique ? "UNIQUE " : ""}${i.name} (${i.columns.join(", ")})`))) : "",
     );
-  }
-
-  /** 자동완성: 접속 사용자의 테이블·뷰 이름 (컬럼은 구조를 볼 때 채운다) */
-  private async loadCompletion(t: Tab) {
-    if (!t.conn) return;
-    try {
-      const [tables, views] = await Promise.all([
-        api.listObjects(t.conn.id, undefined, "TABLE"), api.listObjects(t.conn.id, undefined, "VIEW"),
-      ]);
-      for (const o of [...tables, ...views]) t.schema[o.name] ??= [];
-      t.editor.setSchema(t.schema, t.conn.user);
-    } catch { /* 자동완성은 없어도 된다 */ }
   }
 
   // ── 파일 ─────────────────────────────────────────
@@ -716,6 +713,17 @@ class App {
   }
 
   // ── 상태 표시 ────────────────────────────────────
+
+  private showCompletionStatus(s: { phase: string; objects: number; columns: number; error?: string | null }) {
+    const label: Record<string, string> = {
+      connecting: "자동완성 준비 중…", objects: "자동완성: 객체 읽음", columns: "자동완성: 컬럼 읽음",
+      synonyms: "자동완성: 동의어 읽음", keys: "자동완성: 키 읽음", ready: "자동완성", error: "자동완성 꺼짐",
+    };
+    const n = s.objects ? ` · 객체 ${s.objects.toLocaleString()} · 컬럼 ${s.columns.toLocaleString()}` : "";
+    this.compBadge.textContent = `${label[s.phase] ?? s.phase}${n}`;
+    this.compBadge.title = s.error ? `메타 세션 오류: ${s.error}` : "자동완성 캐시 — Ctrl+Space 로 직접 띄운다";
+    this.compBadge.classList.toggle("err", s.phase === "error");
+  }
 
   status(text: string) {
     this.statusLeft.textContent = text;

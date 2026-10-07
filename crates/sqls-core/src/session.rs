@@ -556,7 +556,8 @@ impl Worker {
         if !sql::is_read_only(sql_text) {
             return Err(Error::ReadOnly("내부 조회는 SELECT 만 허용".into()));
         }
-        let mut stmt = self.conn.statement(sql_text).fetch_array_size(200).build()?;
+        let arr = max_rows.clamp(1, 1000) as u32;
+        let mut stmt = self.conn.statement(sql_text).fetch_array_size(arr).prefetch_rows(arr).build()?;
         bind_all(&mut stmt, binds)?;
         let mut rs = stmt.into_result_set::<Row>(&[])?;
         let columns = columns_of(rs.column_info());

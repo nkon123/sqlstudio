@@ -4,6 +4,7 @@
 //! 세션 스레드(sqls-core)나 async 작업으로 보낸다. 명령 처리기는 절대 블로킹하지 않는다.
 
 mod ai;
+mod complete;
 mod db;
 mod files;
 mod state;
@@ -44,6 +45,9 @@ pub fn run() {
             db::describe,
             db::get_ddl,
             db::get_mcp_settings,
+            complete::complete,
+            complete::completion_status,
+            complete::refresh_completion,
             db::set_mcp_settings,
             ai::list_providers,
             ai::save_provider,

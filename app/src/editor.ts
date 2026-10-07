@@ -6,12 +6,12 @@
 //   Ctrl+E           실행계획
 //   Ctrl+S           저장
 
-import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
+import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, startCompletion, type CompletionSource } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab, toggleComment } from "@codemirror/commands";
 import { PLSQL, sql } from "@codemirror/lang-sql";
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
-import { Compartment, EditorSelection, EditorState, StateEffect, StateField } from "@codemirror/state";
+import { EditorSelection, EditorState, StateEffect, StateField } from "@codemirror/state";
 import {
   Decoration, type DecorationSet, EditorView, drawSelection, highlightActiveLine, highlightActiveLineGutter,
   keymap, lineNumbers, rectangularSelection,
@@ -23,9 +23,6 @@ export interface EditorActions {
   explain: () => void;
   save: () => void;
 }
-
-/** 자동완성용 스키마: { "EMP": ["EMPNO", "ENAME"], ... } */
-export type SchemaMap = Record<string, string[]>;
 
 // 오류 위치 / 실행 중 문장 강조
 const setMarks = StateEffect.define<{ from: number; to: number; cls: string }[]>();
@@ -54,9 +51,8 @@ const marks = StateField.define<DecorationSet>({
 
 export class SqlEditor {
   readonly view: EditorView;
-  private lang = new Compartment();
 
-  constructor(parent: HTMLElement, actions: EditorActions, doc = "") {
+  constructor(parent: HTMLElement, actions: EditorActions, doc = "", complete?: CompletionSource) {
     const run = (f: () => void) => () => { f(); return true; };
     this.view = new EditorView({
       parent,
@@ -74,8 +70,15 @@ export class SqlEditor {
           highlightActiveLine(),
           highlightSelectionMatches(),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-          autocompletion({ activateOnTyping: true, maxRenderedOptions: 80 }),
-          this.lang.of(sql({ dialect: PLSQL, upperCaseKeywords: true })),
+          // 후보는 백엔드가 구절을 보고 만든다 (언어 기본 자동완성은 쓰지 않는다)
+          autocompletion({
+            override: complete ? [complete] : [],
+            activateOnTyping: true,
+            activateOnTypingDelay: 20,
+            maxRenderedOptions: 100,
+            closeOnBlur: true,
+          }),
+          sql({ dialect: PLSQL, upperCaseKeywords: true }),
           marks,
           keymap.of([
             { key: "Ctrl-Enter", mac: "Cmd-Enter", run: run(actions.runStatement), preventDefault: true },
@@ -84,6 +87,7 @@ export class SqlEditor {
             { key: "Ctrl-e", mac: "Cmd-e", run: run(actions.explain), preventDefault: true },
             { key: "Ctrl-s", mac: "Cmd-s", run: run(actions.save), preventDefault: true },
             { key: "Ctrl-/", mac: "Cmd-/", run: toggleComment },
+            { key: "Ctrl-Space", run: startCompletion },
             ...closeBracketsKeymap,
             ...completionKeymap,
             ...searchKeymap,
@@ -153,15 +157,6 @@ export class SqlEditor {
   /** 실행 중 표시만 지운다 (오류 표시는 남긴다) */
   clearRunning() {
     this.view.dispatch({ effects: clearRunning.of(null) });
-  }
-
-  /** 자동완성 스키마를 바꾼다 (접속 후 객체 목록을 읽으면) */
-  setSchema(schema: SchemaMap, defaultSchema?: string) {
-    this.view.dispatch({
-      effects: this.lang.reconfigure(
-        sql({ dialect: PLSQL, upperCaseKeywords: true, schema, defaultSchema }),
-      ),
-    });
   }
 
   focus() {

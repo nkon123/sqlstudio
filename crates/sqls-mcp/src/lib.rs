@@ -1,6 +1,11 @@
 //! SQLStudio MCP 서버 — AI 에이전트(Claude, Cursor, 로컬 에이전트)에 Oracle 을 읽기 전용으로 연다.
 //!
 //! 안전 원칙:
+//! - **AI 가 SQL 을 직접 실행하지 않는다.** 임의 SQL 을 받아 실행하는 툴은 없다.
+//!   툴은 전부 앱이 정해 둔 사전 조회(바인드 변수만 AI 입력)이고, 데이터 행을 돌려주지 않는다.
+//!   SQL 은 AI 가 제안하고, 사람이 에디터에서 읽고 실행한다.
+//! - `explain_plan` 은 AI 가 쓴 SQL 을 파서에 넘기므로(실행은 안 함) 기본으로 꺼 두고,
+//!   `[mcp] allow_explain = true` 로만 켠다.
 //! - `config.toml` 의 `[mcp].allowed_connections` 에 적은 프로필만 보인다. 기본은 아무것도 없음.
 //! - 프로필 설정과 상관없이 **항상 읽기 전용**이다. 앱 쪽 판정(SELECT/WITH, FOR UPDATE 제외)에
 //!   더해 서버에서 `SET TRANSACTION READ ONLY` 로 막는다.
@@ -21,7 +26,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 use sqls_core::config::{password_env_name, Config, McpConfig, Profile};
-use sqls_core::{meta, Error, ExecOptions, ExecOutcome, Session};
+use sqls_core::{meta, Error, Session};
 
 /// 접속을 여는 방법 — 테스트에서 바꿔 끼운다.
 pub type Connector = Arc<
@@ -66,20 +71,6 @@ pub struct SqlStudioMcp {
 pub struct ConnArg {
     /// Connection profile name (see list_connections)
     pub connection: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RunQueryArgs {
-    /// Connection profile name (see list_connections)
-    pub connection: String,
-    /// A single SELECT or WITH statement. No trailing semicolon needed. Use bind variables (:name) for literals.
-    pub sql: String,
-    /// Bind variable values by name without the colon, e.g. {"deptno": "10"}. Use null for NULL.
-    #[serde(default)]
-    pub binds: Option<HashMap<String, Option<String>>>,
-    /// Maximum rows to return (capped by server configuration)
-    #[serde(default)]
-    pub max_rows: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -145,7 +136,13 @@ impl SqlStudioMcp {
             limits: cfg.mcp.clone(),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             connector,
-            tool_router: Self::tool_router(),
+            tool_router: {
+                let mut r = Self::tool_router();
+                if !cfg.mcp.allow_explain {
+                    r.remove_route("explain_plan");
+                }
+                r
+            },
         }
     }
 
@@ -253,68 +250,13 @@ impl SqlStudioMcp {
         to_json(json!({
             "connections": list,
             "read_only": true,
-            "max_rows": self.limits.max_rows,
+            "executes_sql": false,
             "call_timeout_secs": self.limits.call_timeout_secs,
         }))
     }
 
     #[tool(
-        description = "Run a read-only SELECT/WITH query on Oracle and return rows as JSON. \
-                       Data-modifying statements and SELECT ... FOR UPDATE are rejected. \
-                       Check the server version (list_connections) before using newer syntax: \
-                       Oracle 11g has no FETCH FIRST/OFFSET — use ROWNUM. \
-                       Prefer describe_table first so column names are correct.",
-        annotations(read_only_hint = true, open_world_hint = false)
-    )]
-    async fn run_query(&self, Parameters(a): Parameters<RunQueryArgs>) -> Result<String, String> {
-        let cap = self.limits.max_rows.max(1);
-        let max_rows = a.max_rows.unwrap_or(cap).clamp(1, cap);
-        let binds: Vec<(String, Option<String>)> = a.binds.unwrap_or_default().into_iter().collect();
-        let sql = a.sql.trim().trim_end_matches(';').trim().to_string();
-        if !sqls_core::sql::is_read_only(&sql) {
-            return Err(format!(
-                "Only read-only SELECT/WITH statements are allowed (got {:?}).",
-                sqls_core::sql::classify(&sql)
-            ));
-        }
-        let r = self
-            .run(&a.connection, |s| {
-                let sql = sql.clone();
-                let binds = binds.clone();
-                async move {
-                    let r = s
-                        .execute(
-                            &sql,
-                            ExecOptions {
-                                first_page: max_rows,
-                                fetch_array_size: max_rows.min(500) as u32,
-                                binds,
-                                max_cell_chars: 2000,
-                            },
-                        )
-                        .await;
-                    s.close_cursor();
-                    r
-                }
-            })
-            .await?;
-        match r.outcome {
-            ExecOutcome::Rows(p) => {
-                let truncated = p.has_more && p.rows.len() >= max_rows;
-                Ok(to_json(json!({
-                    "columns": p.columns.iter().map(|c| json!({"name": c.name, "type": c.type_name})).collect::<Vec<_>>(),
-                    "rows": p.rows,
-                    "row_count": p.rows.len(),
-                    "truncated": truncated,
-                    "elapsed_ms": r.elapsed_ms,
-                })))
-            }
-            other => Ok(to_json(other)),
-        }
-    }
-
-    #[tool(
-        description = "Show the Oracle execution plan (EXPLAIN PLAN + DBMS_XPLAN.DISPLAY) for a statement without executing it. Use this to tune SQL.",
+        description = "Show the Oracle execution plan (EXPLAIN PLAN + DBMS_XPLAN.DISPLAY) for a statement. The statement is parsed but NOT executed and no rows are returned. Use this to tune SQL you propose to the user.",
         annotations(read_only_hint = true)
     )]
     async fn explain_plan(&self, Parameters(a): Parameters<SqlArgs>) -> Result<String, String> {
@@ -381,9 +323,10 @@ impl ServerHandler for SqlStudioMcp {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("sqlstudio", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Read-only access to Oracle databases configured in SQLStudio. \
-                 Start with list_connections, then list_objects / describe_table to learn the schema, \
-                 then run_query. Use explain_plan to analyze performance. \
+                "Schema information from Oracle databases configured in SQLStudio. \
+                 This server never executes your SQL and never returns table data: \
+                 learn the schema with list_connections, list_objects, describe_table and get_ddl, \
+                 then write SQL and give it to the user, who reviews and runs it in SQLStudio. \
                  Always respect the server version: Oracle 11g lacks FETCH FIRST, IDENTITY, LATERAL and JSON functions.",
             )
     }

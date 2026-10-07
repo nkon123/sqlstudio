@@ -472,7 +472,7 @@ impl Worker {
         }
         if self.spec.read_only {
             if !sql::is_read_only(sql_text) {
-                return Err(Error::ReadOnly(format!("{kind:?}")));
+                return Err(Error::ReadOnly(kind.label().to_string()));
             }
             self.begin_read_only()?;
         }

@@ -7,7 +7,8 @@ use serde::Serialize;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// 서버가 돌려준 ORA- 오류. `offset` 은 문장 안의 바이트 위치 (에디터 표시용).
-    #[error("ORA-{code:05}: {message}")]
+    /// `message` 는 서버 원문이다 (이미 "ORA-00904: ..." 로 시작한다).
+    #[error("{}", display_db(*code, message))]
     Db { code: i32, offset: u32, message: String },
 
     /// 사용자가 취소했다 (ORA-01013)
@@ -38,6 +39,14 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+fn display_db(code: i32, message: &str) -> String {
+    if message.starts_with("ORA-") || message.starts_with("PLS-") {
+        message.to_string()
+    } else {
+        format!("ORA-{code:05}: {message}")
+    }
+}
 
 /// 접속이 끊긴 것으로 보는 ORA 코드
 const LOST_CODES: &[i32] = &[3113, 3114, 3135, 28, 1012, 2396, 12570, 12571];
@@ -99,5 +108,18 @@ impl Error {
 
     pub fn is_connection_lost(&self) -> bool {
         matches!(self, Error::ConnectionLost(_) | Error::SessionClosed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ora_prefix_is_not_doubled() {
+        let e = Error::Db { code: 904, offset: 7, message: "ORA-00904: \"X\": invalid identifier".into() };
+        assert_eq!(e.to_string(), "ORA-00904: \"X\": invalid identifier");
+        let e = Error::Db { code: 1, offset: 0, message: "unique constraint".into() };
+        assert_eq!(e.to_string(), "ORA-00001: unique constraint");
     }
 }

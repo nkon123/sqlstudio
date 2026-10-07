@@ -3,3 +3,4 @@ node_modules/
 dist/
 *.toml.tmp
 .env
+app/src-tauri/gen/

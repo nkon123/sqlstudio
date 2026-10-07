@@ -1,0 +1,25 @@
+[package]
+name = "sqlstudio"
+version = "0.1.0"
+edition = "2021"
+description = "SQLStudio desktop app"
+
+[lib]
+name = "sqlstudio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+sqls-core = { path = "../../crates/sqls-core" }
+sqls-llm = { path = "../../crates/sqls-llm" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+toml = "0.8"
+encoding_rs = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

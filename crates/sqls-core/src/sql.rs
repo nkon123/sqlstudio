@@ -38,6 +38,24 @@ pub enum StmtKind {
     Other,
 }
 
+impl StmtKind {
+    /// 화면에 보일 이름
+    pub fn label(self) -> &'static str {
+        match self {
+            StmtKind::Query => "조회(SELECT)",
+            StmtKind::Dml => "데이터 변경(DML)",
+            StmtKind::Ddl => "구조 변경(DDL)",
+            StmtKind::Plsql => "PL/SQL 블록",
+            StmtKind::PlsqlUnit => "PL/SQL 컴파일",
+            StmtKind::Tcl => "트랜잭션 제어",
+            StmtKind::Session => "세션 설정",
+            StmtKind::Explain => "EXPLAIN PLAN",
+            StmtKind::SqlPlus => "SQL*Plus 명령",
+            StmtKind::Other => "기타",
+        }
+    }
+}
+
 /// 스크립트에서 잘라낸 문장 하나.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Statement {
@@ -278,6 +296,46 @@ pub fn is_read_only(stmt: &str) -> bool {
     !found
 }
 
+/// 실행 전에 사람에게 확인을 받아야 하는 문장이면 그 이유.
+///
+/// - WHERE 없는 UPDATE / DELETE (전체 행)
+/// - DROP / TRUNCATE (되돌릴 수 없음, 암묵적 커밋)
+/// - ALTER SYSTEM, SHUTDOWN 류
+pub fn needs_confirmation(stmt: &str) -> Option<&'static str> {
+    let words = code_words(stmt);
+    let first = words.first().map(String::as_str)?;
+    match first {
+        "UPDATE" | "DELETE" if !words.iter().any(|w| w == "WHERE") => {
+            Some("WHERE 절이 없습니다. 테이블의 모든 행이 바뀝니다.")
+        }
+        "DROP" => Some("DROP 은 되돌릴 수 없고, 진행 중인 트랜잭션을 커밋합니다."),
+        "TRUNCATE" => Some("TRUNCATE 는 되돌릴 수 없고, 진행 중인 트랜잭션을 커밋합니다."),
+        "ALTER" if words.get(1).map(String::as_str) == Some("SYSTEM") => {
+            Some("ALTER SYSTEM 은 인스턴스 전체에 영향을 줍니다.")
+        }
+        "SHUTDOWN" | "STARTUP" => Some("인스턴스를 멈추거나 띄웁니다."),
+        _ => None,
+    }
+}
+
+/// 코드 영역의 모든 단어 (대문자)
+fn code_words(src: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    scan_code(src, |_, ch| {
+        if is_ident_char(ch) {
+            cur.extend(ch.to_uppercase());
+        } else if !cur.is_empty() {
+            words.push(std::mem::take(&mut cur));
+        }
+        true
+    });
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
 /// 바인드 변수 이름 (등장 순서, 중복 제거, 대문자).
 ///
 /// `:=` 대입, PL/SQL 단위 안의 `:NEW`/`:OLD` 는 바인드가 아니다.
@@ -494,6 +552,19 @@ mod tests {
         assert!(is_read_only("select 'for update' from dual -- for update"));
         assert!(!is_read_only("delete from emp"));
         assert!(!is_read_only("begin delete from emp; end;"));
+    }
+
+    #[test]
+    fn confirmation() {
+        assert!(needs_confirmation("delete from emp").is_some());
+        assert!(needs_confirmation("update emp set sal = 0").is_some());
+        assert!(needs_confirmation("delete from emp where empno = 1").is_none());
+        // 문자열·주석 속 WHERE 는 WHERE 가 아니다
+        assert!(needs_confirmation("update emp set note = 'where' -- where").is_some());
+        assert!(needs_confirmation("drop table emp").is_some());
+        assert!(needs_confirmation("truncate table emp").is_some());
+        assert!(needs_confirmation("select * from emp").is_none());
+        assert!(needs_confirmation("insert into emp select * from emp2").is_none());
     }
 
     #[test]

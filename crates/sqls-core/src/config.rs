@@ -54,17 +54,14 @@ pub struct McpConfig {
     /// MCP 로 노출할 프로필 이름. 비어 있으면 아무것도 노출하지 않는다 (안전한 기본값).
     #[serde(default)]
     pub allowed_connections: Vec<String>,
-    /// 툴 결과 최대 행 수
-    #[serde(default = "default_mcp_rows")]
-    pub max_rows: usize,
     /// 쿼리 하나의 상한(초)
     #[serde(default = "default_mcp_timeout")]
     pub call_timeout_secs: u64,
+    /// explain_plan 툴을 켤지. AI 가 쓴 SQL 을 파서에 넘기므로(실행은 하지 않음) 기본은 끈다.
+    #[serde(default)]
+    pub allow_explain: bool,
 }
 
-fn default_mcp_rows() -> usize {
-    200
-}
 fn default_mcp_timeout() -> u64 {
     60
 }
@@ -73,8 +70,8 @@ impl Default for McpConfig {
     fn default() -> Self {
         Self {
             allowed_connections: Vec::new(),
-            max_rows: default_mcp_rows(),
             call_timeout_secs: default_mcp_timeout(),
+            allow_explain: false,
         }
     }
 }
@@ -187,7 +184,7 @@ allowed_connections = ["erp-dev"]
         let c = Config::parse(SAMPLE).unwrap();
         assert_eq!(c.connections.len(), 2);
         assert!(c.profile("erp-dev").unwrap().read_only);
-        assert_eq!(c.mcp.max_rows, 200);
+        assert!(!c.mcp.allow_explain);
         assert_eq!(c.mcp.allowed_connections, vec!["erp-dev"]);
     }
 
@@ -201,6 +198,14 @@ allowed_connections = ["erp-dev"]
     fn rejects_duplicate_names() {
         let bad = format!("{SAMPLE}\n[[connection]]\nname=\"erp-dev\"\nuser=\"x\"\nconnect_string=\"y\"\n");
         assert!(Config::parse(&bad).is_err());
+    }
+
+    #[test]
+    fn example_file_parses() {
+        let c = Config::parse(include_str!("../../../config.example.toml")).unwrap();
+        assert_eq!(c.connections.len(), 2);
+        assert_eq!(c.llm_providers.len(), 3);
+        assert!(!c.mcp.allow_explain);
     }
 
     #[test]

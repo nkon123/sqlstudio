@@ -70,7 +70,8 @@ async fn main() -> ExitCode {
 
     eprintln!("config       : {}", config_path().display());
     eprintln!("connections  : {}", cfg.mcp.allowed_connections.join(", "));
-    eprintln!("limits       : max_rows={} timeout={}s (항상 읽기 전용)", cfg.mcp.max_rows, cfg.mcp.call_timeout_secs);
+    eprintln!("limits       : timeout={}s · SQL 실행 툴 없음 · explain_plan {}", cfg.mcp.call_timeout_secs,
+        if cfg.mcp.allow_explain { "켜짐" } else { "꺼짐" });
     if cfg.mcp.allowed_connections.is_empty() {
         eprintln!("경고: [mcp] allowed_connections 가 비어 있어 노출되는 접속이 없습니다.");
     }

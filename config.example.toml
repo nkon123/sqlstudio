@@ -1,0 +1,50 @@
+# SQLStudio 설정 — %APPDATA%\sqlstudio\config.toml 에 둔다 (SQLSTUDIO_CONFIG 로 바꿀 수 있다).
+# 앱의 설정 화면에서 고치면 이 파일에 저장된다. 비밀번호·API 키는 여기에 쓰지 않는다.
+
+[oracle]
+# Instant Client 폴더. 비우면 PATH 에서 찾는다. 11g 서버에는 클라이언트가 꼭 필요하다 (19c 권장).
+client_lib_dir = 'C:\oracle\instantclient_19_25'
+
+[[connection]]
+name = "ERP-DEV"
+user = "erp_read"
+connect_string = "dbhost:1521/ORCL"   # host:port/서비스명 또는 TNS 별칭
+read_only = true                      # SELECT 만 (앱 판정 + SET TRANSACTION READ ONLY)
+color = "#1d8a4a"
+
+[[connection]]
+name = "ERP-PROD"
+user = "erp"
+connect_string = "ERPPROD"
+color = "#d33a3a"                     # 운영은 빨강
+call_timeout_secs = 600               # Oracle Client 18+ 에서만 동작
+
+# ── AI 공급자 ─────────────────────────────────────────
+[[llm]]
+name = "로컬 (Ollama)"
+kind = "ollama"
+base_url = "http://127.0.0.1:11434"   # 사내 GPU 서버 주소도 된다
+model = "qwen2.5-coder:14b"
+num_ctx = 16384                       # 기본값(2~4K)은 스키마 문맥을 조용히 잘라 버린다
+keep_alive = "30m"
+
+[[llm]]
+name = "LM Studio"
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+model = "qwen2.5-coder-14b-instruct"
+
+[[llm]]
+name = "Claude"
+kind = "anthropic"
+model = "claude-opus-5-5"
+api_key_env = "ANTHROPIC_API_KEY"
+effort = "medium"
+fallbacks = true                      # Claude API 직통일 때만. 사내 게이트웨이 경유면 false
+
+# ── MCP 서버 (sqlstudio-mcp) ───────────────────────────
+# AI 에이전트는 사전 정보(객체 목록·구조·DDL)만 본다. SQL 을 실행하는 툴은 없다.
+[mcp]
+allowed_connections = ["ERP-DEV"]     # 비어 있으면 아무것도 노출하지 않는다
+call_timeout_secs = 60
+allow_explain = false                 # true: explain_plan 툴 허용 (AI 가 쓴 SQL 을 파서에만 넘김)

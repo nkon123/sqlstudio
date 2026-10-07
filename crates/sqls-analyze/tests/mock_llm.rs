@@ -134,6 +134,21 @@ async fn end_to_end_with_messy_small_model() {
         assert!(user.contains("명세 주석"), "{user}");
     }
 
+    // 짧은 전역 커서 C_OPEN 은 NIGHTLY 가 쓴다 → 커서 뜻을 먼저 묻고, NIGHTLY 프롬프트에 넣는다
+    {
+        let b = mock.bodies.lock().unwrap();
+        let users: Vec<String> = b.iter().map(|x| x["messages"][1]["content"].as_str().unwrap().to_string()).collect();
+        let cur = users.iter().position(|m| m.contains("Describe what cursor C_OPEN")).expect("커서 뜻 요청");
+        assert!(users[cur].contains("SELECT ID FROM ORDERS WHERE STATUS = 'OPEN'"), "{}", users[cur]);
+        let nightly = users.iter().position(|m| m.starts_with("Unit:") && m.contains("Piece: NIGHTLY")).unwrap();
+        assert!(cur < nightly);
+        assert!(users[nightly].contains("Cursor meanings (analyzed first):\n- cursor C_OPEN: "), "{}", users[nightly]);
+        // 커서를 안 쓰는 조각에는 붙지 않는다
+        let calc = users.iter().find(|m| m.starts_with("Unit:") && m.contains("Piece: CALC_TOTAL")).unwrap();
+        assert!(!calc.contains("Cursor meanings"));
+    }
+    assert!(u.sql_summaries.iter().any(|q| q.cursor.as_deref() == Some("C_OPEN")));
+
     // 깨진 답을 고쳐 읽었다
     let close = u.subprograms.iter().find(|s| s.path == "CLOSE_ORDER").unwrap();
     let cid = &close.chunk_ids[0];
@@ -282,6 +297,13 @@ async fn long_cursor_with_small_model() {
     assert_eq!((q.cursor.as_deref(), q.line, q.end_line), (Some("C_REPORT"), 3, 92));
     assert!(q.chunk_ids.len() >= 3);
     assert!(q.summary.summary.starts_with("월별 활성 고객"));
+    // 순서: 커서 조각들 → 커서 요약 → 커서를 쓰는 BUILD (커서의 뜻을 알고 읽는다)
+    let pos = |pat: &str| users.iter().position(|m| m.contains(pat)).unwrap_or_else(|| panic!("{pat} 요청이 없다"));
+    let last_part = users.iter().rposition(|m| m.starts_with("Unit:") && m.contains("긴 SQL 의 일부: CURSOR C_REPORT")).unwrap();
+    let sql_req = pos("ONE SQL statement: cursor C_REPORT");
+    let build_req = pos("Piece: BUILD");
+    assert!(last_part < sql_req && sql_req < build_req, "순서 {last_part} {sql_req} {build_req}");
+    assert!(users[build_req].contains("Cursor meanings (analyzed first):\n- cursor C_REPORT: 월별 활성 고객"), "{}", users[build_req]);
     // 단위 요약은 SQL 요약을 입력으로 쓴다
     let unit_req = users.iter().find(|m| m.contains("Describe the whole unit")).unwrap();
     assert!(unit_req.contains("(global) CURSOR C_REPORT: 월별 활성 고객"), "{unit_req}");

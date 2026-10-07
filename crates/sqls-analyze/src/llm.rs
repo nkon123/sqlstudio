@@ -143,7 +143,7 @@ fn facts_text(f: &Facts) -> String {
 }
 
 /// 조각 → 사용자 메시지
-pub fn user_message(unit_label: &str, c: &Chunk) -> String {
+pub fn user_message(unit_label: &str, c: &Chunk, extra: &str) -> String {
     let what = match (&c.subprogram, c.kind) {
         (None, _) => format!("global declarations ({}/{})", c.part, c.parts),
         (Some(p), ChunkKind::Part) => format!("{p} part {}/{}", c.part, c.parts),
@@ -155,6 +155,9 @@ pub fn user_message(unit_label: &str, c: &Chunk) -> String {
     );
     if !c.context.is_empty() {
         m.push_str(&format!("Context:\n{}\n", c.context.trim_end()));
+    }
+    if !extra.is_empty() {
+        m.push_str(extra);
     }
     m.push_str(&format!("Known facts:\n{}Code:\n{}", facts_text(&c.facts), c.code));
     m
@@ -364,9 +367,23 @@ pub fn unit_label(unit_type: &str, owner: &str, name: &str) -> String {
 }
 
 /// 조각 하나 분석. 스키마를 거절하는 서버면 스키마 없이 다시 보낸다.
-pub async fn ask_chunk(client: &Client, cfg: &ProviderConfig, unit_label: &str, c: &Chunk, lang: Lang) -> Result<(Insight, CallMeta), AskError> {
-    let req = ChatRequest { system: system(lang), messages: vec![Message::user(user_message(unit_label, c))], json_schema: Some(schema()) };
+/// `extra` 는 프롬프트에 덧붙일 문맥 (먼저 분석한 커서의 뜻 등). 저장 키에도 들어가야 한다.
+pub async fn ask_chunk(client: &Client, cfg: &ProviderConfig, unit_label: &str, c: &Chunk, lang: Lang, extra: &str) -> Result<(Insight, CallMeta), AskError> {
+    let req = ChatRequest { system: system(lang), messages: vec![Message::user(user_message(unit_label, c, extra))], json_schema: Some(schema()) };
     ask(client, cfg, req, c.start_line, c.end_line).await
+}
+
+/// 커서 하나의 뜻 — 커서를 쓰는 조각을 분석하기 전에 묻는다 (작은 모델이 "이 루프가 무엇을 도는지" 알고 읽게)
+pub fn cursor_message(unit_label: &str, name: &str, line: u32, sql: &str, reads: &[String], feeds: &[String]) -> String {
+    let mut m = format!("Unit: {unit_label}\nDescribe what cursor {name} (line {line}) selects: which rows, from which tables, under which conditions, in what order.\n");
+    if !reads.is_empty() {
+        m.push_str(&format!("Tables it reads: {}\n", reads.join(", ")));
+    }
+    if !feeds.is_empty() {
+        m.push_str(&format!("Its rows are then written to: {}\n", feeds.join(", ")));
+    }
+    m.push_str(&format!("SQL:\n{sql}\n"));
+    m
 }
 
 /// 요약을 묻는 일반형 (서브프로그램·단위 요약에 쓴다). `body` 는 이미 만든 사용자 메시지.

@@ -63,11 +63,145 @@ pub struct Llm<'a> {
 /// 공급자 오류가 이만큼 이어지면 멈춘다 (서버가 죽었는데 수천 조각을 하나씩 실패하지 않게)
 const MAX_PROVIDER_ERRORS: u32 = 3;
 
-pub fn analysis_key(c: &chunk::Chunk, cfg: &ProviderConfig, lang: Lang) -> String {
-    fnv(&[&c.hash, &cfg.model, &PROMPT_VERSION.to_string(), &format!("{lang:?}")])
+/// 저장 키 — 조각 해시 + 모델 + 프롬프트 버전 + 언어 + 덧붙인 문맥(커서의 뜻). 하나라도 바뀌면 다시 묻는다.
+pub fn analysis_key(c: &chunk::Chunk, cfg: &ProviderConfig, lang: Lang, extra: &str) -> String {
+    if extra.is_empty() {
+        fnv(&[&c.hash, &cfg.model, &PROMPT_VERSION.to_string(), &format!("{lang:?}")])
+    } else {
+        fnv(&[&c.hash, &cfg.model, &PROMPT_VERSION.to_string(), &format!("{lang:?}"), extra])
+    }
+}
+
+/// 한 단위를 도는 동안 같이 쓰는 것
+struct RunCtx<'a> {
+    store: &'a Store,
+    key: String,
+    label: String,
+    total: u32,
+    llm: Option<(&'a Client, &'a ProviderConfig)>,
+    opts: &'a Options,
+    on: OnEvent,
+    cancel: Arc<AtomicBool>,
+    done: AtomicU32,
+    provider_errors: AtomicU32,
+    asked: AtomicU32,
+    cached: AtomicU32,
+    failed: AtomicU32,
+}
+
+/// 긴 SQL·커서 요약의 캐시 상태 (단위 결과를 만들기 전부터 쓴다)
+struct SumState {
+    keys: BTreeMap<String, String>,
+    prev: Vec<crate::store::SqlSummary>,
+    sums: Vec<crate::store::SqlSummary>,
+}
+
+/// 조각 하나: 저장된 결과가 맞으면 그대로, 아니면 모델에 묻고 바로 파일로
+async fn run_chunk(rc: &RunCtx<'_>, c: &chunk::Chunk, extra: &str) -> Result<ChunkResult, String> {
+    let report = |status: &'static str, ms: u64, msg: Option<String>| {
+        let n = rc.done.fetch_add(1, Ordering::Relaxed) + 1;
+        (rc.on)(Event::Chunk { key: rc.key.clone(), id: c.id.clone(), done: n, total: rc.total, status, elapsed_ms: ms, message: msg });
+    };
+    let base = ChunkResult {
+        format: FORMAT_VERSION,
+        unit: rc.key.clone(),
+        chunk: c.clone(),
+        analysis_key: None,
+        insight: None,
+        llm: None,
+        error: None,
+        raw: None,
+        analyzed_at: now(),
+    };
+    let Some((client, cfg)) = rc.llm else {
+        // 이전에 모델로 분석한 결과가 있고 조각이 같으면 그대로 둔다
+        let keep = rc.store.read_chunk(&rc.key, &c.id).filter(|o| o.chunk.hash == c.hash && o.insight.is_some());
+        let r = keep.unwrap_or(base);
+        rc.store.write_chunk(&r).map_err(|e| e.to_string())?;
+        report("static", 0, None);
+        return Ok(r);
+    };
+    let ak = analysis_key(c, cfg, rc.opts.lang, extra);
+    if !rc.opts.force {
+        if let Some(old) = rc.store.read_chunk(&rc.key, &c.id) {
+            if old.analysis_key.as_deref() == Some(ak.as_str()) && old.error.is_none() && old.insight.is_some() {
+                rc.cached.fetch_add(1, Ordering::Relaxed);
+                report("cached", 0, None);
+                return Ok(old);
+            }
+        }
+    }
+    if rc.cancel.load(Ordering::Relaxed) {
+        return Err("중지했습니다".into());
+    }
+    if rc.provider_errors.load(Ordering::Relaxed) >= MAX_PROVIDER_ERRORS {
+        return Err("모델 서버 오류가 이어져 멈췄습니다".into());
+    }
+    rc.asked.fetch_add(1, Ordering::Relaxed);
+    let mut r = ChunkResult { analysis_key: Some(ak), ..base };
+    match llm::ask_chunk(client, cfg, &rc.label, c, rc.opts.lang, extra).await {
+        Ok((ins, meta)) => {
+            rc.provider_errors.store(0, Ordering::Relaxed);
+            let ms = meta.elapsed_ms;
+            r.insight = Some(ins);
+            r.llm = Some(meta);
+            rc.store.write_chunk(&r).map_err(|e| e.to_string())?;
+            report("done", ms, None);
+        }
+        Err(AskError::Unreadable { raw, meta }) => {
+            rc.provider_errors.store(0, Ordering::Relaxed);
+            rc.failed.fetch_add(1, Ordering::Relaxed);
+            let ms = meta.elapsed_ms;
+            r.error = Some(format!("답을 JSON 으로 읽지 못했습니다 ({}번 시도)", meta.attempts));
+            r.raw = Some(raw);
+            r.llm = Some(meta);
+            rc.store.write_chunk(&r).map_err(|e| e.to_string())?;
+            report("failed", ms, r.error.clone());
+        }
+        Err(AskError::Provider(e)) => {
+            rc.provider_errors.fetch_add(1, Ordering::Relaxed);
+            rc.failed.fetch_add(1, Ordering::Relaxed);
+            r.error = Some(e.clone());
+            // 공급자 오류는 결과로 남기되 다음에 다시 묻는다 (error 가 있으면 재시도)
+            rc.store.write_chunk(&r).map_err(|e| e.to_string())?;
+            report("failed", 0, Some(e));
+        }
+    }
+    Ok(r)
+}
+
+async fn run_many(rc: &RunCtx<'_>, list: Vec<(&chunk::Chunk, String)>) -> Vec<Result<ChunkResult, String>> {
+    let jobs = if rc.llm.is_some() { rc.opts.jobs.max(1) } else { 8 };
+    // Vec 으로 모은다 — 이터레이터 채로 넘기면 tauri::spawn 의 Send 검사에서 수명 추론이 막힌다
+    let work: Vec<_> = list.into_iter().map(|(c, extra)| async move { run_chunk(rc, c, &extra).await }).collect();
+    stream::iter(work).buffered(jobs).collect().await
+}
+
+/// 조각이 쓰는 커서 이름들
+fn cursor_refs(c: &chunk::Chunk) -> Vec<String> {
+    let mut out: Vec<String> = c.facts.cursors.iter().map(|x| x.name.clone()).collect();
+    for s in &c.facts.statements {
+        out.extend(s.cursor.iter().cloned());
+        out.extend(s.fed_by.iter().map(|f| f.cursor.clone()));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// 커서 선언이 이 조각에서 보이는지 (전역 커서는 어디서나, 서브프로그램의 커서는 그 안과 중첩에서)
+fn in_scope(scope: &Option<String>, c: &chunk::Chunk) -> bool {
+    match (scope, &c.subprogram) {
+        (None, _) => true,
+        (Some(s), Some(p)) => p == s || p.starts_with(&format!("{s}.")),
+        (Some(_), None) => false,
+    }
 }
 
 /// 단위 하나 분석. `llm` 이 None 이면 정적 분석만 (모델 없이도 통합 분석은 된다).
+///
+/// 순서: ① 여러 조각에 걸친 긴 커서의 조각 → 커서마다 뜻(긴 커서는 조각 답을 모아, 짧은 커서는 SQL 만 보여 주고)
+///       ② 나머지 조각 — 그 조각이 쓰는 커서의 뜻을 프롬프트에 넣는다 → ③ 서브프로그램·단위 요약
 pub async fn analyze_unit(
     store: &Store,
     src: &UnitSource,
@@ -78,139 +212,194 @@ pub async fn analyze_unit(
     cancel: Arc<AtomicBool>,
 ) -> Result<UnitResult, String> {
     let plan = chunk::plan(src, spec, opts.limits);
-    let key = plan.key.clone();
-    let label = llm::unit_label(&plan.unit_type, &plan.owner, &plan.name);
-    let total = plan.chunks.len() as u32;
-    let prev = store.read_unit(&key);
+    let prev = store.read_unit(&plan.key);
+    let rc = RunCtx {
+        store,
+        key: plan.key.clone(),
+        label: llm::unit_label(&plan.unit_type, &plan.owner, &plan.name),
+        total: plan.chunks.len() as u32,
+        llm: llm.as_ref().map(|l| (l.client, l.cfg)),
+        opts,
+        on: on.clone(),
+        cancel: cancel.clone(),
+        done: AtomicU32::new(0),
+        provider_errors: AtomicU32::new(0),
+        asked: AtomicU32::new(0),
+        cached: AtomicU32::new(0),
+        failed: AtomicU32::new(0),
+    };
+    let mut ss = SumState {
+        keys: prev.as_ref().map(|p| p.rollup_keys.clone()).unwrap_or_default(),
+        prev: prev.as_ref().map(|p| p.sql_summaries.clone()).unwrap_or_default(),
+        sums: Vec::new(),
+    };
 
-    let done = AtomicU32::new(0);
-    let provider_errors = AtomicU32::new(0);
-    let asked = AtomicU32::new(0);
-    let cached = AtomicU32::new(0);
-    let failed = AtomicU32::new(0);
-
-    // Vec 으로 모은다 — 이터레이터 채로 넘기면 tauri::spawn 의 Send 검사에서 수명 추론이 막힌다
-    let work: Vec<_> = plan.chunks.iter().map(|c| {
-        let on = on.clone();
-        let cancel = cancel.clone();
-        let (done, provider_errors, asked, cached, failed) = (&done, &provider_errors, &asked, &cached, &failed);
-        let key = key.clone();
-        let label = label.clone();
-        let llm = llm.as_ref();
-        async move {
-            let report = |status: &'static str, ms: u64, msg: Option<String>| {
-                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                on(Event::Chunk { key: key.clone(), id: c.id.clone(), done: n, total, status, elapsed_ms: ms, message: msg });
-            };
-            let Some(llm) = llm else {
-                let r = ChunkResult {
-                    format: FORMAT_VERSION,
-                    unit: key.clone(),
-                    chunk: c.clone(),
-                    analysis_key: None,
-                    insight: None,
-                    llm: None,
-                    error: None,
-                    raw: None,
-                    analyzed_at: now(),
-                };
-                // 이전에 모델로 분석한 결과가 있고 조각이 같으면 그대로 둔다
-                let keep = store.read_chunk(&key, &c.id).filter(|o| o.chunk.hash == c.hash && o.insight.is_some());
-                let r = keep.unwrap_or(r);
-                store.write_chunk(&r).map_err(|e| e.to_string())?;
-                report("static", 0, None);
-                return Ok::<ChunkResult, String>(r);
-            };
-            let ak = analysis_key(c, llm.cfg, opts.lang);
-            if !opts.force {
-                if let Some(old) = store.read_chunk(&key, &c.id) {
-                    if old.analysis_key.as_deref() == Some(ak.as_str()) && old.error.is_none() && old.insight.is_some() {
-                        cached.fetch_add(1, Ordering::Relaxed);
-                        report("cached", 0, None);
-                        return Ok(old);
-                    }
-                }
+    // 커서 선언 (조각, 문장)
+    let decls: Vec<(&chunk::Chunk, &crate::flow::SqlStmt)> =
+        plan.chunks.iter().flat_map(|c| c.facts.statements.iter().filter(|s| s.kind == "CURSOR").map(move |s| (c, s))).collect();
+    let spans = |s: &crate::flow::SqlStmt, owner: &chunk::Chunk| -> Vec<&chunk::Chunk> {
+        plan.chunks.iter().filter(|c| c.start_line <= s.end_line && c.end_line >= s.line && c.subprogram == owner.subprogram).collect()
+    };
+    let mut first_ids: Vec<String> = Vec::new();
+    if rc.llm.is_some() {
+        for (owner, s) in &decls {
+            let parts = spans(s, owner);
+            if parts.len() > 1 {
+                first_ids.extend(parts.iter().map(|c| c.id.clone()));
             }
-            if cancel.load(Ordering::Relaxed) {
-                return Err("중지했습니다".into());
-            }
-            if provider_errors.load(Ordering::Relaxed) >= MAX_PROVIDER_ERRORS {
-                return Err("모델 서버 오류가 이어져 멈췄습니다".into());
-            }
-            asked.fetch_add(1, Ordering::Relaxed);
-            let mut r = ChunkResult {
-                format: FORMAT_VERSION,
-                unit: key.clone(),
-                chunk: c.clone(),
-                analysis_key: Some(ak),
-                insight: None,
-                llm: None,
-                error: None,
-                raw: None,
-                analyzed_at: now(),
-            };
-            match llm::ask_chunk(llm.client, llm.cfg, &label, c, opts.lang).await {
-                Ok((ins, meta)) => {
-                    provider_errors.store(0, Ordering::Relaxed);
-                    let ms = meta.elapsed_ms;
-                    r.insight = Some(ins);
-                    r.llm = Some(meta);
-                    store.write_chunk(&r).map_err(|e| e.to_string())?;
-                    report("done", ms, None);
-                }
-                Err(AskError::Unreadable { raw, meta }) => {
-                    provider_errors.store(0, Ordering::Relaxed);
-                    failed.fetch_add(1, Ordering::Relaxed);
-                    let ms = meta.elapsed_ms;
-                    r.error = Some(format!("답을 JSON 으로 읽지 못했습니다 ({}번 시도)", meta.attempts));
-                    r.raw = Some(raw);
-                    r.llm = Some(meta);
-                    store.write_chunk(&r).map_err(|e| e.to_string())?;
-                    report("failed", ms, r.error.clone());
-                }
-                Err(AskError::Provider(e)) => {
-                    provider_errors.fetch_add(1, Ordering::Relaxed);
-                    failed.fetch_add(1, Ordering::Relaxed);
-                    r.error = Some(e.clone());
-                    // 공급자 오류는 결과로 남기되 다음에 다시 묻는다 (analysis_key 는 남겨도 error 가 있으면 재시도)
-                    store.write_chunk(&r).map_err(|e| e.to_string())?;
-                    report("failed", 0, Some(e));
-                }
-            }
-            Ok(r)
         }
-    }).collect();
+    }
+    first_ids.sort();
+    first_ids.dedup();
 
-    let jobs = if llm.is_some() { opts.jobs.max(1) } else { 8 };
-    let results: Vec<Result<ChunkResult, String>> = stream::iter(work).buffered(jobs).collect().await;
-    let mut chunks = Vec::with_capacity(results.len());
-    let mut stop: Option<String> = None;
-    for r in results {
-        match r {
-            Ok(c) => chunks.push(c),
-            Err(e) => {
-                stop.get_or_insert(e);
+    let mut results: BTreeMap<String, Result<ChunkResult, String>> = BTreeMap::new();
+    // ① 긴 커서의 조각
+    let first: Vec<(&chunk::Chunk, String)> = plan.chunks.iter().filter(|c| first_ids.contains(&c.id)).map(|c| (c, String::new())).collect();
+    for r in run_many(&rc, first).await {
+        let id = match &r {
+            Ok(c) => c.chunk.id.clone(),
+            Err(_) => format!("~err{}", results.len()),
+        };
+        results.insert(id, r);
+    }
+    // ①' 커서의 뜻
+    let mut meanings: Vec<(Option<String>, String, String, Vec<String>)> = Vec::new(); // (범위, 이름, 뜻, 선언 조각)
+    if let Some(l) = llm.as_ref() {
+        let done_a: Vec<ChunkResult> = results.values().filter_map(|r| r.as_ref().ok().cloned()).collect();
+        sql_rollups(&mut ss, &done_a, |st| st.kind == "CURSOR", &rc.key, l, opts, &on, &cancel).await;
+        for (owner, s) in &decls {
+            let name = s.cursor.clone().unwrap_or_default();
+            if spans(s, owner).len() > 1 {
+                continue; // 위에서 모았다
             }
+            // 선언과 같은 조각에서만 쓰이면 모델이 둘 다 본다 — 따로 묻지 않는다
+            let used_elsewhere = plan.chunks.iter().any(|c| c.id != owner.id && in_scope(&owner.subprogram, c) && cursor_refs(c).contains(&name));
+            if !used_elsewhere || cancel.load(Ordering::Relaxed) {
+                continue;
+            }
+            cursor_meaning(&mut ss, owner, s, &plan, &rc.label, l, opts, &on).await;
+        }
+        for q in ss.sums.iter().filter(|q| q.kind == "CURSOR") {
+            if let Some(n) = &q.cursor {
+                if !q.summary.summary.is_empty() {
+                    meanings.push((q.subprogram.clone(), n.clone(), q.summary.summary.clone(), q.chunk_ids.clone()));
+                }
+            }
+        }
+    }
+    // ② 나머지 — 쓰는 커서의 뜻을 붙여서
+    let rest: Vec<(&chunk::Chunk, String)> = plan
+        .chunks
+        .iter()
+        .filter(|c| !first_ids.contains(&c.id))
+        .map(|c| {
+            let refs = cursor_refs(c);
+            let mut extra = String::new();
+            for (scope, name, meaning, decl_ids) in &meanings {
+                if refs.contains(name) && in_scope(scope, c) && !decl_ids.contains(&c.id) {
+                    extra.push_str(&format!("- cursor {name}: {meaning}\n"));
+                }
+            }
+            if !extra.is_empty() {
+                extra = format!("Cursor meanings (analyzed first):\n{extra}");
+            }
+            (c, extra)
+        })
+        .collect();
+    for r in run_many(&rc, rest).await {
+        let id = match &r {
+            Ok(c) => c.chunk.id.clone(),
+            Err(_) => format!("~err{}", results.len()),
+        };
+        results.insert(id, r);
+    }
+
+    // 계획 순서로
+    let mut chunks = Vec::with_capacity(plan.chunks.len());
+    let mut stop: Option<String> = None;
+    for c in &plan.chunks {
+        if let Some(Ok(r)) = results.remove(&c.id) {
+            chunks.push(r);
+        }
+    }
+    for (_, r) in results {
+        if let Err(e) = r {
+            stop.get_or_insert(e);
         }
     }
 
     let stats = Stats {
-        chunks: total,
-        asked: asked.load(Ordering::Relaxed),
-        cached: cached.load(Ordering::Relaxed),
-        failed: failed.load(Ordering::Relaxed),
+        chunks: rc.total,
+        asked: rc.asked.load(Ordering::Relaxed),
+        cached: rc.cached.load(Ordering::Relaxed),
+        failed: rc.failed.load(Ordering::Relaxed),
     };
     let mut unit = build_unit(&plan, spec, &chunks, stats, llm.as_ref().map(|l| l.cfg), prev.as_ref());
+    if llm.is_some() {
+        unit.rollup_keys = ss.keys;
+        unit.sql_summaries = ss.sums;
+    }
 
-    // 요약 — 조각이 다 있고 모델이 있을 때만
+    // ③ 요약 — 조각이 다 있고 모델이 있을 때만
     if let (Some(l), true, None) = (llm.as_ref(), opts.rollup, &stop) {
         rollups(&mut unit, &chunks, l, opts, &on, &cancel).await;
     }
     store.write_unit(&unit).map_err(|e| e.to_string())?;
-    on(Event::UnitDone { key: key.clone(), stats: unit.stats.clone() });
+    on(Event::UnitDone { key: rc.key.clone(), stats: unit.stats.clone() });
     match stop {
         Some(e) => Err(e),
         None => Ok(unit),
+    }
+}
+
+/// 짧은 커서 하나의 뜻 (SQL 본문만 보여 준다)
+#[allow(clippy::too_many_arguments)]
+async fn cursor_meaning(ss: &mut SumState, owner: &chunk::Chunk, s: &crate::flow::SqlStmt, plan: &Plan, label: &str, l: &Llm<'_>, opts: &Options, on: &OnEvent) {
+    let name = s.cursor.clone().unwrap_or_default();
+    // 이 커서의 데이터가 들어가는 곳 (어느 조각에서든)
+    let mut feeds: Vec<String> = Vec::new();
+    for c in plan.chunks.iter().filter(|c| in_scope(&owner.subprogram, c)) {
+        for cu in c.facts.cursors.iter().filter(|x| x.name == name) {
+            for f in &cu.feeds {
+                let t = format!("{}({})", f.table, f.ops);
+                if !feeds.contains(&t) {
+                    feeds.push(t);
+                }
+            }
+        }
+    }
+    let body = llm::cursor_message(label, &name, s.line, &s.text, &s.reads, &feeds);
+    let model = format!("{}#{}#{:?}", l.cfg.model, PROMPT_VERSION, opts.lang);
+    let rk = format!("cursor@{}", s.line);
+    let k = fnv(&[&body, &model]);
+    let prev = ss.prev.iter().find(|x| x.line == s.line && x.kind == "CURSOR").cloned();
+    let summary = match prev {
+        Some(p) if ss.keys.get(&rk) == Some(&k) && !opts.force => Some(p.summary),
+        _ => {
+            on(Event::Rollup { key: plan.key.clone(), what: format!("커서 {name}") });
+            let sys = llm::rollup_system(opts.lang, "one SQL cursor (what rows it returns)");
+            match llm::ask_summary(l.client, l.cfg, sys, body).await {
+                Ok((ins, _)) => {
+                    ss.keys.insert(rk, k);
+                    Some(ins)
+                }
+                Err(e) => {
+                    tracing::warn!("{} 커서 {name} 뜻 실패: {e:?}", plan.key);
+                    None
+                }
+            }
+        }
+    };
+    if let Some(summary) = summary {
+        ss.sums.push(crate::store::SqlSummary {
+            subprogram: owner.subprogram.clone(),
+            kind: "CURSOR".into(),
+            cursor: Some(name),
+            line: s.line,
+            end_line: s.end_line,
+            chunk_ids: vec![owner.id.clone()],
+            summary,
+        });
     }
 }
 
@@ -321,14 +510,17 @@ fn facts_line(f: &Facts) -> String {
     s
 }
 
-async fn rollups(unit: &mut UnitResult, chunks: &[ChunkResult], l: &Llm<'_>, opts: &Options, on: &OnEvent, cancel: &AtomicBool) {
+/// 여러 조각에 걸친 SQL 문을 하나로 요약해 `ss.sums` 에 더한다
+#[allow(clippy::too_many_arguments)]
+async fn sql_rollups(ss: &mut SumState, chunks: &[ChunkResult], pick: impl Fn(&crate::flow::SqlStmt) -> bool, unit_key: &str, l: &Llm<'_>, opts: &Options, on: &OnEvent, cancel: &AtomicBool) {
     let model = format!("{}#{}#{:?}", l.cfg.model, PROMPT_VERSION, opts.lang);
-    // 0) 여러 조각에 걸친 긴 SQL 문 (커서 쿼리, INSERT … SELECT, MERGE …) — 조각 답을 모아 SQL 하나로
-    let mut sql_sums: Vec<crate::store::SqlSummary> = Vec::new();
     let all_stmts: Vec<(&ChunkResult, &crate::flow::SqlStmt)> = chunks.iter().flat_map(|c| c.chunk.facts.statements.iter().map(move |s| (c, s))).collect();
     for (owner_chunk, st) in all_stmts {
         if cancel.load(Ordering::Relaxed) {
             return;
+        }
+        if !pick(st) || ss.sums.iter().any(|q| q.line == st.line && q.kind == st.kind) {
+            continue;
         }
         let parts: Vec<&ChunkResult> = chunks
             .iter()
@@ -351,26 +543,26 @@ async fn rollups(unit: &mut UnitResult, chunks: &[ChunkResult], l: &Llm<'_>, opt
         }
         let rk = format!("sql@{}", st.line);
         let k = fnv(&[&body, &model]);
-        let prev = unit.sql_summaries.iter().find(|x| x.line == st.line && x.kind == st.kind).cloned();
+        let prev = ss.prev.iter().find(|x| x.line == st.line && x.kind == st.kind).cloned();
         let summary = match prev {
-            Some(p) if unit.rollup_keys.get(&rk) == Some(&k) && !opts.force => Some(p.summary),
+            Some(p) if ss.keys.get(&rk) == Some(&k) && !opts.force => Some(p.summary),
             _ => {
-                on(Event::Rollup { key: unit.key.clone(), what: format!("SQL {label}") });
+                on(Event::Rollup { key: unit_key.to_string(), what: format!("SQL {label}") });
                 let sys = llm::rollup_system(opts.lang, "one SQL statement (what rows it selects or changes, from which tables, under which conditions)");
                 match llm::ask_summary(l.client, l.cfg, sys, body).await {
                     Ok((ins, _)) => {
-                        unit.rollup_keys.insert(rk, k);
+                        ss.keys.insert(rk, k);
                         Some(ins)
                     }
                     Err(e) => {
-                        tracing::warn!("{} SQL {label} 요약 실패: {e:?}", unit.key);
+                        tracing::warn!("{unit_key} SQL {label} 요약 실패: {e:?}");
                         None
                     }
                 }
             }
         };
         if let Some(summary) = summary {
-            sql_sums.push(crate::store::SqlSummary {
+            ss.sums.push(crate::store::SqlSummary {
                 subprogram: owner_chunk.chunk.subprogram.clone(),
                 kind: st.kind.clone(),
                 cursor: st.cursor.clone(),
@@ -381,7 +573,15 @@ async fn rollups(unit: &mut UnitResult, chunks: &[ChunkResult], l: &Llm<'_>, opt
             });
         }
     }
-    unit.sql_summaries = sql_sums;
+}
+
+async fn rollups(unit: &mut UnitResult, chunks: &[ChunkResult], l: &Llm<'_>, opts: &Options, on: &OnEvent, cancel: &AtomicBool) {
+    let model = format!("{}#{}#{:?}", l.cfg.model, PROMPT_VERSION, opts.lang);
+    // 0) 여러 조각에 걸친 긴 SQL 문 중 커서가 아닌 것 (INSERT … SELECT, MERGE …) — 커서는 앞에서 이미 했다
+    let mut ss = SumState { keys: std::mem::take(&mut unit.rollup_keys), prev: unit.sql_summaries.clone(), sums: std::mem::take(&mut unit.sql_summaries) };
+    sql_rollups(&mut ss, chunks, |st| st.kind != "CURSOR", &unit.key, l, opts, on, cancel).await;
+    unit.rollup_keys = ss.keys;
+    unit.sql_summaries = ss.sums;
 
     // 1) 여러 조각으로 나뉜 서브프로그램
     for i in 0..unit.subprograms.len() {

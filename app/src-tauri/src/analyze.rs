@@ -225,3 +225,13 @@ pub fn analysis_unit(st: State<'_, AppState>, id: u64, key: String) -> R<UnitDet
 pub fn analysis_dir(st: State<'_, AppState>, id: u64) -> R<String> {
     Ok(store_for(&st, id)?.root().display().to_string())
 }
+
+/// 품질 평가 (저장된 조각 결과만 읽는다 — 모델을 부르지 않는다). Markdown 과 숫자.
+#[tauri::command]
+pub fn analysis_eval(st: State<'_, AppState>, id: u64) -> R<serde_json::Value> {
+    let store = store_for(&st, id)?;
+    let r = sqls_analyze::eval::evaluate(&store, sqls_analyze::llm::Lang::Ko);
+    let md = sqls_analyze::eval::markdown(&r, None);
+    let _ = store.write_text("integrated/eval.md", &md);
+    Ok(serde_json::json!({ "report": r, "markdown": md }))
+}

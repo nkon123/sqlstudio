@@ -235,6 +235,20 @@ integrated/report.md   (Mermaid 호출 그래프, 커서 → DML 흐름 표 포�
 }
 ```
 
+### 모델 품질 평가
+
+사내 모델이 이 소스에서 얼마나 쓸 만한지 숫자로 본다. 저장된 결과만 읽으므로 모델을 다시 부르지 않는다.
+
+```bat
+sqlstudio-analyze run  --connection ERP-DEV --name "ORD%" --limit 20 --llm "qwen7b" --out D:\eval\qwen7b
+sqlstudio-analyze run  --connection ERP-DEV --name "ORD%" --limit 20 --llm "gemma"  --out D:\eval\gemma
+sqlstudio-analyze eval --out D:\eval\qwen7b --compare D:\eval\gemma      & rem integrated/eval.md
+```
+
+JSON 실패·다시 물음·고쳐 읽은 답, 빈 요약, 언어, 코드 베끼기, **근거 없는 이름**(답에 나온 테이블·프로시저 이름 중 그 조각의
+코드·문맥·사실에 없는 것), 줄 번호 없는 위험 지적, 시간·토큰, 조각 크기별 문제율과 권장 `--max-lines`, 문제가 큰 조각 목록.
+화면의 분석 → **품질** 탭에서도 본다.
+
 JSON 이라 jq·스크립트·다른 도구로 다시 쓰기 쉽고, 더 큰 모델로 통합 요약만 따로 만들 수도 있다
 (`integrate --llm <공급자> --overview` — 단위 요약만 보낸다).
 

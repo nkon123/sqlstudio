@@ -10,6 +10,7 @@
 //! 모델은 소스를 읽기만 한다. 이 크레이트에는 DB 에 SQL 을 보내는 경로가 사전 조회(ALL_SOURCE 등) 말고는 없다.
 
 pub mod chunk;
+pub mod eval;
 pub mod facts;
 pub mod flow;
 pub mod integrate;

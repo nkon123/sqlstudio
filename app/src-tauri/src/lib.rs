@@ -68,6 +68,7 @@ pub fn run() {
             analyze::analysis_result,
             analyze::analysis_unit,
             analyze::analysis_dir,
+            analyze::analysis_eval,
             db::set_mcp_settings,
             ai::list_providers,
             ai::save_provider,

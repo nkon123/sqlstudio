@@ -49,6 +49,10 @@ fn answer(user: &str, mock: &Mock) -> String {
     if user.contains("Piece: NIGHTLY") && !mock.nightly_seen.swap(true, Ordering::SeqCst) {
         return "I think this procedure loops over orders.".into();
     }
+    // 소스에 없는 테이블 이름을 지어낸다 — eval 이 잡아야 한다
+    if user.contains("Piece: CALC_TOTAL,") {
+        return json!({"summary": "합계를 ORDER_SUMMARY_TMP 에 저장한다", "steps": [{"step": "한다"}], "rules": [], "risks": []}).to_string();
+    }
     if user.contains("Combine") || user.contains("Describe the whole") {
         return json!({"summary": "주문 처리 패키지", "steps": ["합계", "마감"], "rules": [], "risks": []}).to_string();
     }
@@ -222,6 +226,17 @@ async fn end_to_end_with_messy_small_model() {
     let report = std::fs::read_to_string(dir.join("integrated/report.md")).unwrap();
     assert!(report.contains("```mermaid"));
     assert!(report.contains("주문 처리 패키지"));
+
+    // 품질 평가 (저장된 결과만 읽는다)
+    let rep = sqls_analyze::eval::evaluate(&store, sqls_analyze::llm::Lang::Ko);
+    assert_eq!(rep.models, vec!["tiny"]);
+    assert!(rep.chunks >= 8 && rep.failed == 0, "{rep:?}");
+    assert!(rep.retried >= 1, "NIGHTLY 는 두 번 물었다");
+    assert_eq!(rep.ungrounded_names, vec![("ORDER_SUMMARY_TMP".to_string(), 1)]);
+    assert!(rep.worst.iter().any(|w| w.what.iter().any(|x| x.contains("ORDER_SUMMARY_TMP"))));
+    assert!(rep.repaired.keys().any(|k| k.contains("끝 쉼표")));
+    let md = sqls_analyze::eval::markdown(&rep, Some(&rep));
+    assert!(md.contains("| 근거 없는 이름 |") && md.contains("| 항목 | A | B |"));
 
     // 진행 이벤트
     let ev = events.lock().unwrap();

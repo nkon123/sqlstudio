@@ -54,7 +54,7 @@ type Progress =
   | { type: "fetch"; run: number; index: number; total: number; key: string; error?: string | null }
   | { type: "finished"; run: number; error?: string | null; units: number; nodes: number; tables: number; findings: number; dir: string };
 
-type View = "summary" | "calls" | "tables" | "findings";
+type View = "summary" | "calls" | "tables" | "findings" | "quality";
 const keyOf = (u: UnitRef) => `${u.owner}.${u.name}.${u.unit_type.replace(/ /g, "_")}`;
 const when = (t?: number | null) => (t ? new Date(t * 1000).toLocaleString() : "");
 const short = (id: string) => id.split(".").slice(1).join(".");
@@ -116,6 +116,7 @@ export class AnalysisView {
     tab("calls", "호출 관계");
     tab("tables", "테이블");
     tab("findings", "확인할 것");
+    tab("quality", "품질");
     nav.append(h("span", { class: "spacer" }), h("button", { class: "small", title: "저장된 조각 결과로 통합 분석을 다시 만든다 (모델 없이)", onclick: () => this.reload(true) }, "다시 통합"));
     const left = h("div", { class: "an-left" },
       h("table", { class: "an-list" },
@@ -298,6 +299,7 @@ export class AnalysisView {
     if (this.view === "summary") return this.renderSummary(g);
     if (this.view === "calls") return this.renderCalls(g);
     if (this.view === "tables") return this.renderTables(g);
+    if (this.view === "quality") return void this.renderQuality();
     return this.renderFindings(g);
   }
 
@@ -444,6 +446,22 @@ export class AnalysisView {
     fill();
     this.content.replaceChildren(h("div", { class: "an-pad" }, input,
       h("table", { class: "an-table" }, h("thead", {}, h("tr", {}, ...["테이블", "C", "R", "U", "D", "쓰는 곳", "커서 흐름", "영향 시작점"].map((x) => h("th", {}, x)))), tbody)));
+  }
+
+  /** 모델 답의 품질 — 저장된 결과만 읽는다 */
+  private async renderQuality() {
+    const id = this.sessionId();
+    if (id == null) return;
+    this.content.replaceChildren(h("div", { class: "hint" }, "평가 중…"));
+    try {
+      const r = await invoke<{ report: { advice: string[]; chunks: number }; markdown: string }>("analysis_eval", { id });
+      this.content.replaceChildren(h("div", { class: "an-pad" },
+        h("h3", {}, "조언"), h("ul", { class: "an-ul" }, ...r.report.advice.map((a) => h("li", {}, a))),
+        h("p", { class: "hint" }, "아래 표는 integrated/eval.md 로도 저장된다. 두 모델 비교: sqlstudio-analyze eval --out A --compare B"),
+        h("pre", { class: "an-code", style: "max-height:none" }, r.markdown)));
+    } catch (e) {
+      this.content.replaceChildren(h("div", { class: "hint" }, errOf(e).message));
+    }
   }
 
   private renderFindings(g: Integrated) {

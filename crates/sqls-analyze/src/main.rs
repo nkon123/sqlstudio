@@ -12,6 +12,9 @@
 //! # 묻기
 //! sqlstudio-analyze show --out D:\analysis\erp --table ERP.ORDERS
 //! sqlstudio-analyze show --out D:\analysis\erp --node ERP.ORDER_PKG.CLOSE_ORDER
+//! # 모델 품질 평가 (저장된 결과만 읽는다). 두 모델 비교는 --compare 로
+//! sqlstudio-analyze run --connection ERP-DEV --name "ORD%" --limit 20 --llm "로컬 (Ollama)" --out D:\eval\qwen7b
+//! sqlstudio-analyze eval --out D:\eval\qwen7b [--compare D:\eval\gemma]
 //! ```
 //!
 //! 중간에 멈추거나(Ctrl+C) 죽어도 다시 돌리면 끝난 조각은 건너뛴다.
@@ -38,6 +41,8 @@ const USAGE: &str = "사용법:
                         [--max-lines N] [--max-chars N] [--lang ko|en] [--force] [--no-rollup] [--allow-remote]
   sqlstudio-analyze integrate (--out <폴더> | --connection <접속>) [--llm <공급자> --overview]
   sqlstudio-analyze show (--out <폴더> | --connection <접속>) [--table <테이블>] [--node <서브프로그램>]
+  sqlstudio-analyze eval (--out <폴더> | --connection <접속>) [--compare <다른 결과 폴더>] [--lang ko|en]
+  run 의 --limit N: 앞의 N 개 단위만 (모델을 시험할 때)
   공통: --config <config.toml>";
 
 #[derive(Default)]
@@ -62,6 +67,8 @@ struct Args {
     overview: bool,
     table: Option<String>,
     node: Option<String>,
+    compare: Option<PathBuf>,
+    limit: Option<usize>,
 }
 
 fn parse() -> Result<Args, String> {
@@ -104,6 +111,8 @@ fn parse() -> Result<Args, String> {
             "--overview" => a.overview = true,
             "--table" => a.table = Some(need(&mut it, &x)?.to_uppercase()),
             "--node" => a.node = Some(need(&mut it, &x)?.to_uppercase()),
+            "--compare" => a.compare = Some(PathBuf::from(need(&mut it, &x)?)),
+            "--limit" => a.limit = Some(need(&mut it, &x)?.parse().map_err(|_| "--limit 는 숫자")?),
             other => return Err(format!("알 수 없는 인자: {other}")),
         }
     }
@@ -145,6 +154,7 @@ async fn main() -> ExitCode {
         "run" => cmd_run(&a).await,
         "integrate" => cmd_integrate(&a).await,
         "show" => cmd_show(&a),
+        "eval" => cmd_eval(&a),
         other => Err(format!("알 수 없는 명령: {other}\n\n{USAGE}")),
     };
     match r {
@@ -230,6 +240,7 @@ async fn cmd_run(a: &Args) -> Result<(), String> {
     }
     let client = sqls_llm::Client::new();
     let total = session.as_ref().map(|(_, r)| r.len()).unwrap_or(units.len());
+    let total = a.limit.map(|n| n.min(total)).unwrap_or(total);
     let started = Instant::now();
     let mut failed_units = 0;
     let on: sqls_analyze::run::OnEvent = Arc::new(|e: Event| match e {
@@ -376,5 +387,20 @@ fn cmd_show(a: &Args) -> Result<(), String> {
     }
     println!("단위 {} · 서브프로그램 {} · 호출 {} · 테이블 {} · 시작점 {} · 순환 {} · 확인할 것 {}", g.units, g.nodes.len(), g.edges.len(), g.tables.len(), g.entries.len(), g.cycles.len(), g.findings.len());
     println!("보고서: {}", store.root().join("integrated").join("report.md").display());
+    Ok(())
+}
+
+fn cmd_eval(a: &Args) -> Result<(), String> {
+    let store = Store::open(out_dir(a)?).map_err(|e| e.to_string())?;
+    let ra = sqls_analyze::eval::evaluate(&store, a.lang);
+    let rb = match &a.compare {
+        Some(d) => Some(sqls_analyze::eval::evaluate(&Store::open(d).map_err(|e| e.to_string())?, a.lang)),
+        None => None,
+    };
+    let md = sqls_analyze::eval::markdown(&ra, rb.as_ref());
+    store.write_integrated("eval.json", &serde_json::json!({ "a": ra, "b": rb })).map_err(|e| e.to_string())?;
+    let p = store.write_text("integrated/eval.md", &md).map_err(|e| e.to_string())?;
+    println!("{md}");
+    eprintln!("보고서: {}", p.display());
     Ok(())
 }

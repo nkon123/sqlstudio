@@ -1,0 +1,9 @@
+[package]
+name = "sqls-mcp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+oracle = "0.6.3"
+rmcp = { version = "3.5.1", features = ["server", "transport-io", "macros", "transport-streamable-http-server"] }
+tokio = { version = "1.53.2", features = ["full"] }

@@ -1,0 +1,18 @@
+[package]
+name = "sqls-llm"
+version = "0.1.0"
+edition = "2021"
+description = "SQLStudio LLM providers — Ollama, OpenAI-compatible, Anthropic (streaming)"
+
+[dependencies]
+# native-tls: Windows 에서는 SChannel(시스템 인증서 저장소)을 쓴다 — 사내 루트 CA 가 그대로 통한다.
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "stream", "http2", "system-proxy", "charset"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time", "sync"] }
+futures-util = "0.3"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

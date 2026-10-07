@@ -57,6 +57,19 @@ pub struct SubResult {
     pub chunk_ids: Vec<String>,
 }
 
+/// 긴 SQL 문 하나의 요약 — 조각별 답을 모아 만든다
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SqlSummary {
+    /// 서브프로그램 경로 (전역 커서면 None)
+    pub subprogram: Option<String>,
+    pub kind: String,
+    pub cursor: Option<String>,
+    pub line: u32,
+    pub end_line: u32,
+    pub chunk_ids: Vec<String>,
+    pub summary: Insight,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stats {
     pub chunks: u32,
@@ -89,6 +102,9 @@ pub struct UnitResult {
     pub stats: Stats,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// 여러 조각에 걸친 긴 SQL 문(커서 등) 하나하나의 요약
+    #[serde(default)]
+    pub sql_summaries: Vec<SqlSummary>,
     /// 요약 캐시 키 — 입력이 같으면 다시 묻지 않는다 ("path#overload" 또는 "_unit" → 키)
     #[serde(default)]
     pub rollup_keys: std::collections::BTreeMap<String, String>,

@@ -16,7 +16,7 @@ use crate::chunk::{Chunk, ChunkKind};
 use crate::facts::Facts;
 
 /// 프롬프트·스키마를 바꾸면 올린다 — 저장된 결과를 다시 분석하게 된다.
-pub const PROMPT_VERSION: u32 = 2;
+pub const PROMPT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Risk {

@@ -151,7 +151,8 @@ fn big_subprogram_is_split_at_statements() {
     let mut next = 1;
     for c in &p.chunks {
         assert_eq!(c.start_line, next, "{:?}", p.chunks.iter().map(|c| (c.start_line, c.end_line)).collect::<Vec<_>>());
-        assert!(c.end_line - c.start_line < 30);
+        // 아주 작은 끝 조각은 이웃에 붙이므로 한도의 125% 까지
+        assert!(c.end_line - c.start_line < 38, "{:?}", (c.start_line, c.end_line));
         next = c.end_line + 1;
         // IF 블록 중간에서 자르지 않는다: 조각 끝은 END IF; 이거나 선언/EXCEPTION 앞
         let last = body.lines().nth(c.end_line as usize - 1).unwrap().trim();

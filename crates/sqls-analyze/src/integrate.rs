@@ -77,6 +77,9 @@ pub struct Flow {
     pub line: u32,
     /// record R / variable V / CURRENT OF / loop body
     pub via: String,
+    /// 커서(긴 SQL)의 모델 요약이 있으면
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_summary: Option<String>,
 }
 
 /// 모든 SQL 문 (statements.json)
@@ -317,6 +320,7 @@ pub fn integrate(units: &[UnitResult]) -> Integrated {
                         ops: f.ops.clone(),
                         line: f.line,
                         via: f.via.clone(),
+                        cursor_summary: cursor_summary(u, s, &c.name),
                     });
                 }
             }
@@ -377,6 +381,15 @@ impl crate::store::SubResult {
     fn parent_is_top(&self) -> bool {
         !self.path.contains('.')
     }
+}
+
+/// 커서의 뜻: 긴 SQL 요약 → (짧아서 한 조각에 든 커서면) 그 조각의 요약
+fn cursor_summary(u: &UnitResult, s: &crate::store::SubResult, name: &str) -> Option<String> {
+    u.sql_summaries
+        .iter()
+        .find(|q| q.cursor.as_deref() == Some(name) && (q.subprogram.is_none() || q.subprogram.as_deref() == Some(s.path.as_str())))
+        .map(|q| q.summary.summary.clone())
+        .filter(|x| !x.is_empty())
 }
 
 /// 호출 이름 → 노드 id
@@ -547,7 +560,8 @@ pub fn report(g: &Integrated, units: &[UnitResult]) -> String {
     if !g.flows.is_empty() {
         s.push_str("## 커서 → DML 흐름\n\n| 서브프로그램 | 커서 | 읽는 테이블 | → 쓰는 테이블 | 줄 | 근거 |\n|---|---|---|---|---|---|\n");
         for f in &g.flows {
-            s.push_str(&format!("| `{}` | `{}` ({}) | {} | {} {} | {} | {} |\n", f.node, f.cursor, f.cursor_kind, f.from.join(", "), f.to, f.ops, f.line, f.via));
+            let sum = f.cursor_summary.as_ref().map(|x| format!("<br><small>{}</small>", x.replace('|', "\\|").replace('\n', " "))).unwrap_or_default();
+            s.push_str(&format!("| `{}` | `{}` ({}){sum} | {} | {} {} | {} | {} |\n", f.node, f.cursor, f.cursor_kind, f.from.join(", "), f.to, f.ops, f.line, f.via));
         }
         s.push('\n');
     }

@@ -402,10 +402,11 @@ pub fn extract(t: &[Tok], locals: &HashSet<String>) -> Facts {
         i += 1;
     }
 
+    let ctes = cte_names(t);
     f.tables = acc
         .tables
         .into_iter()
-        .filter(|(n, _)| n != "DUAL" && n != "SYS.DUAL")
+        .filter(|(n, _)| n != "DUAL" && n != "SYS.DUAL" && !ctes.contains(n))
         .map(|(name, (ops, lines))| TableUse {
             name,
             ops: ["C", "R", "U", "D"].iter().filter(|o| ops.contains(&o.chars().next().unwrap())).copied().collect(),
@@ -624,4 +625,28 @@ pub fn absorb_dynamic(f: &mut Facts) {
         }
     }
     f.tables.sort_by(|a, b| a.name.cmp(&b.name));
+}
+
+/// WITH 절의 CTE 이름 (`WITH a AS (SELECT …), b AS (…)`) — 테이블이 아니다
+pub fn cte_names(t: &[Tok]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for i in 0..t.len() {
+        let starts = i > 0 && (t[i - 1].is("WITH") || t[i - 1].sym(","));
+        if !starts {
+            continue;
+        }
+        let Some(n) = t[i].name() else { continue };
+        // 이름 [(컬럼, …)] AS (SELECT|WITH
+        let mut j = i + 1;
+        if t.get(j).is_some_and(|x| x.sym("(")) {
+            while j < t.len() && !t[j].sym(")") {
+                j += 1;
+            }
+            j += 1;
+        }
+        if t.get(j).is_some_and(|x| x.is("AS")) && t.get(j + 1).is_some_and(|x| x.sym("(")) && t.get(j + 2).is_some_and(|x| x.is("SELECT") || x.is("WITH")) {
+            out.insert(n);
+        }
+    }
+    out
 }

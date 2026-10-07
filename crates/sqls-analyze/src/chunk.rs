@@ -179,6 +179,49 @@ impl Ctx<'_> {
             .collect()
     }
 
+    /// 아주 작은 조각(한도의 1/6 미만)은 이웃에 붙인다 — 한도를 25% 까지는 넘겨도 된다.
+    /// "ORDER BY x;" 한 줄짜리 조각에 모델을 한 번 더 부르지 않게.
+    fn merge_tiny(&self, ranges: &mut Vec<(u32, u32)>, skip: &[(u32, u32)]) {
+        let tiny = |cx: &Self, a: u32, b: u32| {
+            let (n, c) = cx.size(a, b, skip);
+            n * 6 < cx.lim.max_lines && c * 6 < cx.lim.max_chars
+        };
+        let loose = |cx: &Self, a: u32, b: u32| {
+            let (n, c) = cx.size(a, b, skip);
+            n * 4 <= cx.lim.max_lines * 5 && c * 4 <= cx.lim.max_chars * 5
+        };
+        // 이어진 조각 둘이 한도 안에 들어가면 합친다 (다른 깊이에서 잘린 조각끼리)
+        let mut i = 0;
+        while i + 1 < ranges.len() {
+            let (a, _) = ranges[i];
+            let (c, d) = ranges[i + 1];
+            if ranges[i].1 + 1 >= c && self.fits(a, d, skip) {
+                ranges[i].1 = d;
+                ranges.remove(i + 1);
+            } else {
+                i += 1;
+            }
+        }
+        let mut i = 0;
+        while ranges.len() > 1 && i < ranges.len() {
+            let (a, b) = ranges[i];
+            if tiny(self, a, b) {
+                // 앞 조각과 이어져 있으면 앞에, 아니면 뒤에
+                if i > 0 && ranges[i - 1].1 + 1 >= a && loose(self, ranges[i - 1].0, b) {
+                    ranges[i - 1].1 = b;
+                    ranges.remove(i);
+                    continue;
+                }
+                if i + 1 < ranges.len() && b + 1 >= ranges[i + 1].0 && loose(self, a, ranges[i + 1].1) {
+                    ranges[i + 1].0 = a;
+                    ranges.remove(i);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
     /// [lo, hi] 를 한도 안 조각들로. `cuts` = (자를 수 있는 줄, 깊이) — 그 줄 다음에서 자를 수 있다.
     fn split(&self, lo: u32, hi: u32, cuts: &[(u32, usize)], depth: usize, skip: &[(u32, u32)], out: &mut Vec<(u32, u32)>) {
         if lo > hi {
@@ -199,7 +242,7 @@ impl Ctx<'_> {
         }
         spans.push((s, hi));
         if spans.len() == 1 {
-            if depth < 10 && cuts.iter().any(|&(l, d)| d > depth && l >= lo && l < hi) {
+            if depth < 40 && cuts.iter().any(|&(l, d)| d > depth && l >= lo && l < hi) {
                 return self.split(lo, hi, cuts, depth + 1, skip, out);
             }
             // 더 자를 자리가 없다 — 줄 수로
@@ -301,19 +344,28 @@ pub fn plan(src: &UnitSource, spec: Option<&str>, lim: Limits) -> Plan {
             // 연속 범위를 한도 안에서 묶는다
             let mut ranges: Vec<(u32, u32)> = Vec::new();
             for &(a, b) in &st.global_lines {
-                let cuts: Vec<(u32, usize)> = (a..=b).filter(|&l| cx.text(l).trim_end().ends_with(';')).map(|l| (l, 1)).collect();
+                let mut cuts: Vec<(u32, usize)> = (a..=b).filter(|&l| cx.text(l).trim_end().ends_with(';')).map(|l| (l, 1)).collect();
+                // 긴 전역 커서는 SQL 절 경계에서
+                cuts.extend(flow::sql_cuts(&cx.tokens(a, b, &[])));
                 cx.split(a, b, &cuts, 1, &[], &mut ranges);
             }
-            let ranges: Vec<(u32, u32)> =
-                ranges.into_iter().filter(|&(a, b)| (a..=b).any(|l| code_lines.contains(&l))).collect();
+            cx.merge_tiny(&mut ranges, &[]);
+            // 코드가 없거나 "END 패키지;" 뿐인 조각은 만들지 않는다
+            let ranges: Vec<(u32, u32)> = ranges
+                .into_iter()
+                .filter(|&(a, b)| (a..=b).any(|l| code_lines.contains(&l) && !cx.text(l).trim().to_uppercase().starts_with("END")))
+                .collect();
+            // 전역 SQL 문·커서는 전역 토큰 전체로 한 번에 (여러 조각에 걸친 커서도 온전하게)
+            let (mut g_stmts, mut g_cursors) = flow::analyze(&global_toks, &globals, &flow::KnownCursors::new());
+            let last_g = ranges.len().saturating_sub(1);
             let n = ranges.len() as u32;
             for (k, (a, b)) in ranges.into_iter().enumerate() {
                 let code = cx.render(a, b, &[]);
                 let tk = cx.tokens(a, b, &[]);
                 let mut f = facts::extract(&tk, &globals);
-                let (stmts, cursors) = flow::analyze(&tk, &globals, &flow::KnownCursors::new());
-                f.statements = stmts;
-                f.cursors = cursors;
+                let here = |l: u32| (l >= a && l <= b) || k == last_g;
+                f.statements = g_stmts.extract_if(.., |x| here(x.line)).collect();
+                f.cursors = g_cursors.extract_if(.., |c| here(c.line)).collect();
                 facts::absorb_dynamic(&mut f);
                 let signature = format!("{} {} 전역 선언", st.unit_type, st.name);
                 chunks.push(Chunk {
@@ -326,7 +378,7 @@ pub fn plan(src: &UnitSource, spec: Option<&str>, lim: Limits) -> Plan {
                     parts: n,
                     start_line: a,
                     end_line: b,
-                    hash: fnv(&[&code, &signature]),
+                    hash: String::new(),
                     signature,
                     context: String::new(),
                     code,
@@ -414,13 +466,20 @@ pub fn plan(src: &UnitSource, spec: Option<&str>, lim: Limits) -> Plan {
                 parts: n,
                 start_line: a,
                 end_line: b,
-                hash: fnv(&[&code, &context, &s.signature]),
+                hash: String::new(),
                 signature: s.signature.clone(),
                 context,
                 code,
                 facts: f,
             });
         }
+    }
+
+    // 여러 조각에 걸친 SQL 문: 조각마다 "그 SQL 의 전체 구조 + 이 조각의 위치 + 전체 사실" 을 문맥으로
+    long_sql_context(&cx, &mut chunks);
+    drop_split_ctes(&cx, &mut chunks);
+    for c in &mut chunks {
+        c.hash = fnv(&[&c.code, &c.context, &c.signature]);
     }
 
     // 소스 순서대로 번호
@@ -446,6 +505,83 @@ pub fn plan(src: &UnitSource, spec: Option<&str>, lim: Limits) -> Plan {
     }
 }
 
+/// SQL 문(조각 문맥용) 의 이름 — "CURSOR C_REPORT", "INSERT (99행)"
+fn stmt_label(s: &flow::SqlStmt) -> String {
+    match &s.cursor {
+        Some(c) if s.kind == "CURSOR" => format!("CURSOR {c}"),
+        Some(c) => format!("{} ({c})", s.kind),
+        None => s.kind.clone(),
+    }
+}
+
+/// 조각으로 나뉜 SQL 에서, 앞 조각에서 정의된 CTE 를 뒤 조각이 FROM 으로 쓰면 테이블로 잡힌다 — 문장 범위로 걸러 낸다
+fn drop_split_ctes(cx: &Ctx, chunks: &mut [Chunk]) {
+    let stmts: Vec<(u32, u32)> = chunks.iter().flat_map(|c| c.facts.statements.iter().map(|s| (s.line, s.end_line))).collect();
+    let ctes: Vec<(u32, u32, HashSet<String>)> = stmts
+        .into_iter()
+        .filter_map(|(a, b)| {
+            let n = facts::cte_names(&cx.tokens(a, b, &[]));
+            (!n.is_empty()).then_some((a, b, n))
+        })
+        .collect();
+    if ctes.is_empty() {
+        return;
+    }
+    for c in chunks.iter_mut() {
+        c.facts.tables.retain(|t| !t.lines.iter().all(|&l| ctes.iter().any(|(a, b, n)| *a <= l && l <= *b && n.contains(&t.name))));
+    }
+}
+
+fn long_sql_context(cx: &Ctx, chunks: &mut [Chunk]) {
+    // 모든 SQL 문 (조각들에 나뉘어 담겨 있다) + 전역 커서가 서브프로그램에서 어디로 들어가는지
+    let stmts: Vec<flow::SqlStmt> = chunks.iter().flat_map(|c| c.facts.statements.iter().cloned()).collect();
+    let mut feeds: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for c in chunks.iter() {
+        for cu in &c.facts.cursors {
+            for f in &cu.feeds {
+                let s = format!("{}({})@{} [{}]", f.table, f.ops, f.line, f.via);
+                let e = feeds.entry(cu.name.clone()).or_default();
+                if !e.contains(&s) {
+                    e.push(s);
+                }
+            }
+        }
+    }
+    for c in chunks.iter_mut() {
+        let (a, b) = (c.start_line, c.end_line);
+        for s in &stmts {
+            let spans = s.line < s.end_line && ((s.line < a && s.end_line >= a) || (s.line <= b && s.end_line > b));
+            if !spans {
+                continue;
+            }
+            let toks = cx.tokens(s.line, s.end_line, &[]);
+            let outline = flow::sql_outline(&toks);
+            let (all, here) = flow::outline_text(&outline, a.max(s.line), b.min(s.end_line));
+            let mut t = format!(
+                "긴 SQL 의 일부: {} ({}~{}행) 중 {}~{}행이 이 조각이다{}.\nSQL 전체 구조: {}\n",
+                stmt_label(s),
+                s.line,
+                s.end_line,
+                a.max(s.line),
+                b.min(s.end_line),
+                if here.is_empty() { String::new() } else { format!(" ({here})") },
+                all
+            );
+            if !s.reads.is_empty() {
+                t.push_str(&format!("이 SQL 전체가 읽는 테이블: {}\n", s.reads.join(", ")));
+            }
+            if !s.writes.is_empty() {
+                let w: Vec<String> = s.writes.iter().map(|w| format!("{}({})", w.name, w.ops)).collect();
+                t.push_str(&format!("이 SQL 이 쓰는 테이블: {}\n", w.join(", ")));
+            }
+            if let Some(f) = s.cursor.as_ref().and_then(|n| feeds.get(n)) {
+                t.push_str(&format!("이 커서의 데이터가 들어가는 곳: {}\n", f.join(", ")));
+            }
+            c.context.push_str(&t);
+        }
+    }
+}
+
 pub fn kind_word(k: SubKind) -> &'static str {
     match k {
         SubKind::Procedure => "PROCEDURE",
@@ -465,11 +601,17 @@ fn sub_ranges(cx: &Ctx, toks: &[Tok], s: &Subprogram, skip: &[(u32, u32)]) -> Ve
     let mut out = Vec::new();
     // 머리 + 선언부 — 선언부가 길면 따로 자른다
     let head_hi = s.begin_line.saturating_sub(1).max(lo);
-    let head_cuts: Vec<(u32, usize)> = (lo..=head_hi).filter(|&l| cx.text(l).trim_end().ends_with(';')).map(|l| (l, 1)).collect();
+    let mut head_cuts: Vec<(u32, usize)> = (lo..=head_hi).filter(|&l| cx.text(l).trim_end().ends_with(';')).map(|l| (l, 1)).collect();
+    // 선언부의 긴 커서 — SQL 절 경계
+    head_cuts.extend(flow::sql_cuts(&cx.tokens(lo, head_hi, skip)));
     let mut head = Vec::new();
     cx.split(lo, head_hi, &head_cuts, 1, skip, &mut head);
     // 본문
-    let cuts = plsql::statement_ends(toks, s);
+    let mut cuts = plsql::statement_ends(toks, s);
+    // 본문의 긴 SQL (FOR r IN (SELECT …), INSERT … SELECT, MERGE …) — 문장 경계로 안 될 때만 쓰이는 깊은 자리
+    cuts.extend(flow::sql_cuts(&cx.tokens(s.begin_line, hi, skip)));
+    cuts.sort();
+    cuts.dedup();
     let mut body = Vec::new();
     cx.split(s.begin_line, hi, &cuts, 1, skip, &mut body);
     // 머리의 마지막 조각과 본문 첫 조각이 같이 들어가면 붙인다
@@ -481,6 +623,7 @@ fn sub_ranges(cx: &Ctx, toks: &[Tok], s: &Subprogram, skip: &[(u32, u32)]) -> Ve
     }
     out.extend(head);
     out.extend(body);
+    cx.merge_tiny(&mut out, skip);
     out
 }
 

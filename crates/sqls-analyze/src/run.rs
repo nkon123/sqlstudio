@@ -268,6 +268,7 @@ fn build_unit(plan: &Plan, spec: Option<&str>, chunks: &[ChunkResult], stats: St
         stats,
         provider: cfg.map(|c| c.name.clone()),
         model: cfg.map(|c| c.model.clone()),
+        sql_summaries: Vec::new(),
         rollup_keys: BTreeMap::new(),
         analyzed_at: now(),
     };
@@ -282,6 +283,7 @@ fn build_unit(plan: &Plan, spec: Option<&str>, chunks: &[ChunkResult], stats: St
             }
         }
         u.summary = p.summary.clone();
+        u.sql_summaries = p.sql_summaries.clone();
     }
     u
 }
@@ -321,6 +323,66 @@ fn facts_line(f: &Facts) -> String {
 
 async fn rollups(unit: &mut UnitResult, chunks: &[ChunkResult], l: &Llm<'_>, opts: &Options, on: &OnEvent, cancel: &AtomicBool) {
     let model = format!("{}#{}#{:?}", l.cfg.model, PROMPT_VERSION, opts.lang);
+    // 0) 여러 조각에 걸친 긴 SQL 문 (커서 쿼리, INSERT … SELECT, MERGE …) — 조각 답을 모아 SQL 하나로
+    let mut sql_sums: Vec<crate::store::SqlSummary> = Vec::new();
+    let all_stmts: Vec<(&ChunkResult, &crate::flow::SqlStmt)> = chunks.iter().flat_map(|c| c.chunk.facts.statements.iter().map(move |s| (c, s))).collect();
+    for (owner_chunk, st) in all_stmts {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let parts: Vec<&ChunkResult> = chunks
+            .iter()
+            .filter(|c| c.chunk.start_line <= st.end_line && c.chunk.end_line >= st.line && c.chunk.subprogram == owner_chunk.chunk.subprogram)
+            .collect();
+        if parts.len() < 2 || parts.iter().any(|p| p.insight.is_none()) {
+            continue;
+        }
+        let label = match (&st.cursor, st.kind.as_str()) {
+            (Some(c), "CURSOR") => format!("cursor {c}"),
+            (Some(c), k) => format!("{k} ({c})"),
+            (None, k) => k.to_string(),
+        };
+        // 조각 문맥의 "SQL 전체 구조 / 읽는 테이블 / 들어가는 곳" 줄을 그대로 쓴다
+        let facts: Vec<&str> = parts[0].chunk.context.lines().filter(|l| l.starts_with("SQL 전체 구조") || l.starts_with("이 SQL") || l.starts_with("이 커서")).collect();
+        let mut body = format!("Combine these parts into one description of ONE SQL statement: {label} (lines {}-{}).\n{}\n", st.line, st.end_line, facts.join("\n"));
+        for p in &parts {
+            let here = p.chunk.context.lines().find(|l| l.starts_with("긴 SQL 의 일부")).unwrap_or("");
+            body.push_str(&format!("Part (lines {}-{}) {here}\n{}", p.chunk.start_line, p.chunk.end_line, insight_text(p.insight.as_ref().unwrap(), 8)));
+        }
+        let rk = format!("sql@{}", st.line);
+        let k = fnv(&[&body, &model]);
+        let prev = unit.sql_summaries.iter().find(|x| x.line == st.line && x.kind == st.kind).cloned();
+        let summary = match prev {
+            Some(p) if unit.rollup_keys.get(&rk) == Some(&k) && !opts.force => Some(p.summary),
+            _ => {
+                on(Event::Rollup { key: unit.key.clone(), what: format!("SQL {label}") });
+                let sys = llm::rollup_system(opts.lang, "one SQL statement (what rows it selects or changes, from which tables, under which conditions)");
+                match llm::ask_summary(l.client, l.cfg, sys, body).await {
+                    Ok((ins, _)) => {
+                        unit.rollup_keys.insert(rk, k);
+                        Some(ins)
+                    }
+                    Err(e) => {
+                        tracing::warn!("{} SQL {label} 요약 실패: {e:?}", unit.key);
+                        None
+                    }
+                }
+            }
+        };
+        if let Some(summary) = summary {
+            sql_sums.push(crate::store::SqlSummary {
+                subprogram: owner_chunk.chunk.subprogram.clone(),
+                kind: st.kind.clone(),
+                cursor: st.cursor.clone(),
+                line: st.line,
+                end_line: st.end_line,
+                chunk_ids: parts.iter().map(|p| p.chunk.id.clone()).collect(),
+                summary,
+            });
+        }
+    }
+    unit.sql_summaries = sql_sums;
+
     // 1) 여러 조각으로 나뉜 서브프로그램
     for i in 0..unit.subprograms.len() {
         if cancel.load(Ordering::Relaxed) {
@@ -335,6 +397,9 @@ async fn rollups(unit: &mut UnitResult, chunks: &[ChunkResult], l: &Llm<'_>, opt
             continue;
         }
         let mut body = format!("Combine these parts into one description of {} ({}).\nSignature: {}\nFacts: {}\n", s.path, unit.name, s.signature, facts_line(&s.facts));
+        for q in unit.sql_summaries.iter().filter(|q| q.subprogram.as_deref() == Some(s.path.as_str())) {
+            body.push_str(&format!("Long SQL {} {} (lines {}-{}): {}\n", q.kind, q.cursor.clone().unwrap_or_default(), q.line, q.end_line, q.summary.summary));
+        }
         for p in &parts {
             body.push_str(&format!("Part {}/{} (lines {}-{}):\n{}", p.chunk.part, p.chunk.parts, p.chunk.start_line, p.chunk.end_line, insight_text(p.insight.as_ref().unwrap(), 8)));
         }
@@ -359,8 +424,15 @@ async fn rollups(unit: &mut UnitResult, chunks: &[ChunkResult], l: &Llm<'_>, opt
         return;
     }
     let mut items: Vec<String> = Vec::new();
-    if let Some(g) = chunks.iter().find(|c| c.chunk.subprogram.is_none()).and_then(|c| c.insight.as_ref()) {
-        items.push(format!("(global declarations):\n{}", insight_text(g, 3)));
+    let global_sql: Vec<&crate::store::SqlSummary> = unit.sql_summaries.iter().filter(|q| q.subprogram.is_none()).collect();
+    for q in &global_sql {
+        items.push(format!("(global) {} {}: {}\n", q.kind, q.cursor.clone().unwrap_or_default(), q.summary.summary));
+    }
+    // 긴 SQL 요약에 들지 않은 전역 조각
+    for g in chunks.iter().filter(|c| c.chunk.subprogram.is_none() && !global_sql.iter().any(|q| q.chunk_ids.contains(&c.chunk.id))) {
+        if let Some(i) = &g.insight {
+            items.push(format!("(global declarations):\n{}", insight_text(i, 3)));
+        }
     }
     for s in &unit.subprograms {
         if s.path.contains('.') {

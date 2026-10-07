@@ -19,9 +19,29 @@ struct Mock {
     hits: AtomicU32,
     bodies: Mutex<Vec<Value>>,
     nightly_seen: AtomicBool,
+    /// 긴 커서 시험용 답
+    long: bool,
+}
+
+/// 작은 모델처럼: 조각이 어느 절인지만 보고 짧게 답한다
+fn long_answer(user: &str) -> String {
+    if user.contains("ONE SQL statement") {
+        return json!({"summary": "월별 활성 고객의 상태별 매출을 집계해 순위 1000위 안(또는 VIP·GOLD·프로모션 고객)을 고른다",
+            "steps": ["활성·미차단 고객", "상태별 월 매출 합계", "건수 순위", "지역 붙이기"], "rules": ["rnk <= 1000", "VIP/GOLD 는 순위와 무관"], "risks": []}).to_string();
+    }
+    if user.contains("Describe the whole unit") {
+        return json!({"summary": "월별 고객 매출 보고서를 만드는 패키지", "steps": [], "rules": [], "risks": []}).to_string();
+    }
+    let part = user.lines().find(|l| l.starts_with("긴 SQL 의 일부")).unwrap_or("").to_string();
+    let what = part.split("이 조각이다").nth(1).unwrap_or("").trim_matches(|c: char| c == ' ' || c == '(' || c == ')' || c == '.').to_string();
+    let summary = if what.is_empty() { "보고서 테이블을 다시 채운다".to_string() } else { format!("{what} 부분") };
+    json!({"summary": summary, "steps": [], "rules": [], "risks": []}).to_string()
 }
 
 fn answer(user: &str, mock: &Mock) -> String {
+    if mock.long {
+        return long_answer(user);
+    }
     if user.contains("Piece: CLOSE_ORDER") {
         // 코드 펜스 + 끝 쉼표 + 범위 밖 줄
         return "다음은 분석입니다:\n```json\n{\"summary\": \"주문을 마감하고 이력을 남긴다\", \"steps\": [\"합계 계산\", \"상태 변경\",], \"rules\": [\"합계 1000 초과면 감사 로그\"], \"risks\": [{\"line\": 41, \"issue\": \"NO_DATA_FOUND 를 삼킨다\"}, {\"line\": 9999, \"issue\": \"엉뚱한 줄\"}],}\n```".into();
@@ -82,7 +102,7 @@ async fn serve(listener: tokio::net::TcpListener, mock: Arc<Mock>) {
 async fn end_to_end_with_messy_small_model() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let mock = Arc::new(Mock { hits: AtomicU32::new(0), bodies: Mutex::new(Vec::new()), nightly_seen: AtomicBool::new(false) });
+    let mock = Arc::new(Mock { hits: AtomicU32::new(0), bodies: Mutex::new(Vec::new()), nightly_seen: AtomicBool::new(false), long: false });
     tokio::spawn(serve(listener, mock.clone()));
 
     let mut cfg = ProviderConfig::new("mock", ProviderKind::Ollama, "tiny");
@@ -218,5 +238,65 @@ async fn provider_down_stops_quickly() {
     // 실패한 조각도 파일로 남는다 (다음에 다시 묻는다)
     let u = store.read_unit("APP.ORDER_PKG.PACKAGE_BODY").unwrap();
     assert!(u.stats.failed >= 3);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn long_cursor_with_small_model() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mock = Arc::new(Mock { hits: AtomicU32::new(0), bodies: Mutex::new(Vec::new()), nightly_seen: AtomicBool::new(false), long: true });
+    tokio::spawn(serve(listener, mock.clone()));
+    let mut cfg = ProviderConfig::new("mock", ProviderKind::Ollama, "tiny");
+    cfg.base_url = Some(format!("http://127.0.0.1:{port}"));
+    let client = Client::new();
+    let dir = std::env::temp_dir().join(format!("sqls-analyze-long-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    // 작은 모델 설정: 조각 40줄
+    let opts = Options { limits: Limits { max_lines: 40, max_chars: 2400 }, ..Default::default() };
+    let src = UnitSource { owner: "APP".into(), name: "REPORT_PKG".into(), unit_type: "PACKAGE BODY".into(), text: include_str!("data/report_pkg.pkb").into() };
+    let on: sqls_analyze::run::OnEvent = Arc::new(|_| {});
+    let u = analyze_unit(&store, &src, None, Some(Llm { client: &client, cfg: &cfg }), &opts, on, Arc::new(AtomicBool::new(false))).await.unwrap();
+    assert_eq!(u.stats.failed, 0);
+
+    let bodies = mock.bodies.lock().unwrap().clone();
+    let users: Vec<String> = bodies.iter().map(|b| b["messages"][1]["content"].as_str().unwrap().to_string()).collect();
+    // 커서 조각: 어디서 잘렸고 무엇을 알고 묻는가
+    let parts: Vec<&String> = users.iter().filter(|m| m.contains("긴 SQL 의 일부: CURSOR C_REPORT")).collect();
+    assert!(parts.len() >= 3, "{}", parts.len());
+    for m in &parts {
+        assert!(m.contains("SQL 전체 구조: WITH ACTIVE_CUST 4~13 · WITH MONTHLY 14~46 · WITH RANKED 47~51 · SELECT 52~81 · FROM 82~85 · WHERE 86~91 · ORDER BY 92"), "{m}");
+        assert!(m.contains("이 SQL 전체가 읽는 테이블: CUSTOMERS, CUST_BLOCK, ORDERS, PROMOTIONS, REGIONS"), "CTE 는 테이블이 아니다: {m}");
+        assert!(m.contains("이 커서의 데이터가 들어가는 곳: REPORT_MONTHLY(C)@99 [record R]"), "{m}");
+        // 작은 모델 문맥 안: 지시문 + 문맥 + 코드
+        let sys = bodies[0]["messages"][0]["content"].as_str().unwrap();
+        let chars = m.chars().count() + sys.chars().count();
+        assert!(chars < 6000, "프롬프트 {chars}자");
+    }
+    // SQL 하나로 모은 요약
+    let rollup = users.iter().find(|m| m.contains("ONE SQL statement: cursor C_REPORT")).expect("긴 SQL 요약 요청");
+    assert!(rollup.contains("Part (lines 1-13)") || rollup.contains("Part (lines 3-13)") || rollup.contains("WITH ACTIVE_CUST 부분"), "{rollup}");
+    assert_eq!(u.sql_summaries.len(), 1);
+    let q = &u.sql_summaries[0];
+    assert_eq!((q.cursor.as_deref(), q.line, q.end_line), (Some("C_REPORT"), 3, 92));
+    assert!(q.chunk_ids.len() >= 3);
+    assert!(q.summary.summary.starts_with("월별 활성 고객"));
+    // 단위 요약은 SQL 요약을 입력으로 쓴다
+    let unit_req = users.iter().find(|m| m.contains("Describe the whole unit")).unwrap();
+    assert!(unit_req.contains("(global) CURSOR C_REPORT: 월별 활성 고객"), "{unit_req}");
+    // 통합: 흐름에 커서의 뜻이 붙는다
+    let (g, _) = sqls_analyze::integrate::write_all(&store, None).unwrap();
+    let f = g.flows.iter().find(|f| f.cursor == "C_REPORT").unwrap();
+    assert_eq!(f.to, "APP.REPORT_MONTHLY");
+    assert_eq!(f.from, vec!["APP.CUSTOMERS", "APP.CUST_BLOCK", "APP.ORDERS", "APP.PROMOTIONS", "APP.REGIONS"]);
+    assert!(f.cursor_summary.as_deref().unwrap().starts_with("월별 활성 고객"));
+    // 과정을 보고 싶으면: SQLS_SHOW=1 cargo test -p sqls-analyze --test mock_llm long_cursor -- --nocapture
+    if std::env::var("SQLS_SHOW").is_ok() {
+        for (i, m) in users.iter().enumerate() {
+            println!("──── 요청 {} ({}자) ────\n{m}\n", i + 1, m.chars().count());
+        }
+        println!("──── 저장된 SQL 요약 ────\n{}", serde_json::to_string_pretty(&u.sql_summaries).unwrap());
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -529,3 +529,155 @@ pub fn declared_cursors(t: &[Tok], locals: &HashSet<String>) -> KnownCursors {
     let (_, cs) = analyze(t, locals, &KnownCursors::new());
     cs.into_iter().filter(|c| c.kind == "declared" && c.line > 0).map(|c| (c.name, c.reads)).collect()
 }
+
+// ─────────────────────────────────────────────────────────────
+// 긴 SQL 을 자를 자리, SQL 의 구조 요약
+// ─────────────────────────────────────────────────────────────
+
+/// SQL 절을 여는 키워드 (이 앞에서 자를 수 있다)
+const CLAUSES: &[&str] = &["SELECT", "FROM", "WHERE", "GROUP", "HAVING", "ORDER", "UNION", "INTERSECT", "MINUS", "CONNECT", "MODEL", "WINDOW", "VALUES", "SET", "USING", "WHEN"];
+const JOINS: &[&str] = &["JOIN", "LEFT", "RIGHT", "INNER", "FULL", "CROSS", "NATURAL"];
+
+/// SQL 절 경계의 자를 자리. (그 줄 다음에서 자른다, 깊이)
+///
+/// PL/SQL 문장 경계(깊이 1~9)를 먼저 쓰고, 한 SQL 문이 한도를 넘을 때만 쓰이도록 깊이를 10 부터 준다:
+/// 괄호 깊이 p 에서 절·CTE·JOIN 은 `10 + 2p`, 쉼표(컬럼 목록)·AND/OR 는 `11 + 2p`.
+/// 바깥 절부터 자르고, 한 절(긴 SELECT 목록, 긴 WHERE)이 크면 그 안의 쉼표·AND 에서, 서브쿼리가 크면 그 안의 절에서 자른다.
+pub fn sql_cuts(t: &[Tok]) -> Vec<(u32, usize)> {
+    let mut out = Vec::new();
+    let mut p: usize = 0;
+    let mut in_sql = false;
+    // 괄호 깊이별: WITH 절 안인지
+    let mut with_at: Vec<usize> = Vec::new();
+    for k in 0..t.len() {
+        let tk = &t[k];
+        let first_on_line = k == 0 || t[k - 1].line < tk.line;
+        let before = |d: usize| (tk.line.saturating_sub(1), d);
+        if tk.sym("(") {
+            p += 1;
+            continue;
+        }
+        if tk.sym(")") {
+            p = p.saturating_sub(1);
+            with_at.retain(|&w| w <= p);
+            continue;
+        }
+        if tk.sym(";") {
+            p = 0;
+            in_sql = false;
+            with_at.clear();
+            continue;
+        }
+        let prev_dot = k > 0 && t[k - 1].sym(".");
+        let Some(w) = tk.word() else {
+            if in_sql && tk.sym(",") {
+                // CTE 사이의 쉼표: , 이름 AS (
+                if with_at.contains(&p) && t.get(k + 1).and_then(|x| x.name()).is_some() && t.get(k + 2).is_some_and(|x| x.is("AS")) {
+                    out.push((t[k + 1].line.saturating_sub(1), 10 + 2 * p));
+                } else if first_on_line {
+                    out.push(before(11 + 2 * p));
+                } else {
+                    out.push((tk.line, 11 + 2 * p));
+                }
+            }
+            continue;
+        };
+        if prev_dot {
+            continue;
+        }
+        match w {
+            "SELECT" | "WITH" | "INSERT" | "UPDATE" | "DELETE" | "MERGE" => {
+                if w == "WITH" {
+                    with_at.push(p);
+                }
+                if in_sql && !(k > 0 && t[k - 1].sym("(")) {
+                    out.push(before(10 + 2 * p));
+                }
+                in_sql = true;
+            }
+            _ if !in_sql => {}
+            "AND" | "OR" => out.push(before(11 + 2 * p)),
+            _ if CLAUSES.contains(&w) => {
+                // ORDER BY 가 OVER( … ) 안이면 그 안의 깊이로 들어간다 (p 가 이미 크다)
+                out.push(before(10 + 2 * p));
+            }
+            _ if JOINS.contains(&w) && !(k > 0 && t[k - 1].word().is_some_and(|x| JOINS.contains(&x))) => out.push(before(10 + 2 * p)),
+            _ => {}
+        }
+    }
+    out.retain(|&(l, _)| l > 0);
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// SQL 한 문장의 맨 바깥 절 구조 — "WITH ACTIVE_CUST 4~13 · SELECT 27~80 · FROM 81~84 …"
+pub fn sql_outline(t: &[Tok]) -> Vec<(String, u32, u32)> {
+    let mut marks: Vec<(String, u32)> = Vec::new();
+    let mut p = 0usize;
+    let mut base: Option<usize> = None;
+    let mut with_level: Option<usize> = None;
+    for k in 0..t.len() {
+        let tk = &t[k];
+        if tk.sym("(") {
+            p += 1;
+            continue;
+        }
+        if tk.sym(")") {
+            p = p.saturating_sub(1);
+            continue;
+        }
+        let Some(w) = tk.word() else {
+            // , 이름 AS (  — 다음 CTE
+            if tk.sym(",") && with_level == Some(p) {
+                if let (Some(n), true) = (t.get(k + 1).and_then(|x| x.name()), t.get(k + 2).is_some_and(|x| x.is("AS"))) {
+                    marks.push((format!("WITH {n}"), t[k + 1].line));
+                }
+            }
+            continue;
+        };
+        if k > 0 && t[k - 1].sym(".") {
+            continue;
+        }
+        if base.is_none() && matches!(w, "SELECT" | "WITH" | "INSERT" | "UPDATE" | "DELETE" | "MERGE") {
+            base = Some(p);
+        }
+        if base != Some(p) {
+            continue;
+        }
+        let label = match w {
+            "WITH" => {
+                with_level = Some(p);
+                t.get(k + 1).and_then(|x| x.name()).map(|n| format!("WITH {n}"))
+            }
+            "SELECT" => {
+                with_level = None;
+                Some("SELECT".to_string())
+            }
+            "GROUP" | "ORDER" | "CONNECT" => Some(format!("{w} BY")),
+            "FROM" | "WHERE" | "HAVING" | "UNION" | "INTERSECT" | "MINUS" | "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "SET" | "VALUES" | "USING" => {
+                Some(w.to_string())
+            }
+            _ => None,
+        };
+        if let Some(l) = label {
+            if marks.last().is_none_or(|(x, _)| x != &l || l.starts_with("WITH")) {
+                marks.push((l, tk.line));
+            }
+        }
+    }
+    let end = t.last().map(|x| x.line).unwrap_or(0);
+    let mut out = Vec::new();
+    for (i, (l, a)) in marks.iter().enumerate() {
+        let b = marks.get(i + 1).map(|(_, n)| n.saturating_sub(1).max(*a)).unwrap_or(end);
+        out.push((l.clone(), *a, b));
+    }
+    out
+}
+
+/// 줄 범위 [a, b] 가 걸치는 절들
+pub fn outline_text(outline: &[(String, u32, u32)], a: u32, b: u32) -> (String, String) {
+    let all: Vec<String> = outline.iter().map(|(l, x, y)| if x == y { format!("{l} {x}") } else { format!("{l} {x}~{y}") }).collect();
+    let here: Vec<String> = outline.iter().filter(|(_, x, y)| *x <= b && *y >= a).map(|(l, _, _)| l.clone()).collect();
+    (all.join(" · "), here.join(", "))
+}

@@ -181,6 +181,7 @@ sqlstudio-analyze show --connection ERP-DEV --node ERP.ORDER_PKG.CLOSE_ORDER    
 | 단계 | 하는 일 | 모델 |
 |---|---|---|
 | 조각 | 서브프로그램 하나 = 조각 하나. 한도(기본 120줄·6000자)를 넘으면 **문장 경계**에서 자른다 (IF/LOOP 중간에서 자르지 않는다). 중첩 서브프로그램은 따로. 2부부터는 시그니처·선언부를 문맥으로 붙인다. 패키지 명세의 주석도 붙인다 | — |
+| 긴 SQL | 커서 하나(SQL 하나)가 한도를 넘으면 **SQL 절 경계**에서 자른다: CTE 하나씩 → SELECT/FROM/WHERE/GROUP BY/ORDER BY·JOIN → 그래도 크면 컬럼 목록의 쉼표·WHERE 의 AND/OR → 서브쿼리 안. 조각마다 "그 SQL 의 전체 구조, 이 조각이 그 중 어디인지, 전체가 읽는 테이블, 커서 데이터가 들어가는 곳" 을 붙이고, 조각 답을 모아 **SQL 하나의 요약**을 따로 만든다 | 조각마다 + SQL 마다 1번 |
 | 정적 사실 | 테이블별 C/R/U/D, 호출, 시퀀스, 동적 SQL, COMMIT/ROLLBACK, 자율 트랜잭션, RAISE, 예외 삼킴(`WHEN … THEN NULL`), DB 링크, 복잡도 | **쓰지 않는다** |
 | SQL 문·커서 | **SQL 문마다** 한 건 (커서 선언, `FOR r IN (SELECT…)`, `OPEN c FOR`, `SELECT INTO`, INSERT/UPDATE/DELETE/MERGE, `EXECUTE IMMEDIATE` 문자열): 읽는 테이블·쓰는 테이블·INTO 변수·본문. **커서마다** 한 건: 읽는 테이블과 **그 데이터가 들어가는 DML** (테이블·연산·줄·근거) | **쓰지 않는다** |
 | 조각 분석 | 요약 · 단계 · 업무 규칙 · 위험(줄 번호). 정적 사실을 프롬프트에 넣어 "찾지 말고 의미를 말하라" 고 한다 | 조각마다 1번 |
@@ -191,6 +192,10 @@ sqlstudio-analyze show --connection ERP-DEV --node ERP.ORDER_PKG.CLOSE_ORDER    
   (`FETCH c BULK COLLECT INTO v_ids` → `FORALL … UPDATE … v_ids(i)`), `WHERE CURRENT OF c`, 커서 루프 안의 DML(약한 연결,
   "루프 안"으로 따로 표시). 서브프로그램 전체를 한 번에 보므로 FETCH 와 INSERT 가 다른 조각에 있어도 이어진다.
   패키지 전역 커서도 이름으로 찾아 읽는 테이블을 붙인다. 통합하면 테이블마다 "데이터가 들어오는 곳 / 나가는 곳" 이 생긴다.
+- 예: 90줄짜리 커서(CTE 3개, SUM 컬럼 25개, 조인 4개, EXISTS 서브쿼리)를 조각 40줄로 돌리면
+  `WITH ACTIVE_CUST`(1~13) / `WITH MONTHLY, WITH RANKED`(14~51) / `SELECT, FROM, WHERE, ORDER BY`(52~93) 세 조각이 되고,
+  조각 20줄이면 `MONTHLY` CTE 안의 SUM 목록이 쉼표에서 한 번 더 나뉜다. 한 줄짜리 꼬리 조각은 앞 조각에 붙인다 (한도의 125% 까지).
+  각 조각 프롬프트는 지시문을 합쳐 3천 자 안팎이다. 테이블·흐름은 조각과 상관없이 SQL 전체로 뽑는다 (CTE 이름은 테이블로 치지 않는다).
 - **호출 관계와 CRUD 는 모델 답이 아니라 소스에서 뽑은 것**이다. 작은 모델이 테이블 이름을 지어내도 그래프는 틀리지 않는다.
   모델 없이(`--static`, 화면의 "모델 없이") 돌려도 통합 분석은 다 나온다.
 - 작은 모델 대비: 답 모양을 JSON 스키마로 묶고(Ollama `format`), 코드 펜스·끝 쉼표·잘린 답은 고쳐 읽고,

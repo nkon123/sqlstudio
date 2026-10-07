@@ -88,7 +88,17 @@ pub fn from_files(paths: &[PathBuf], default_owner: &str) -> std::io::Result<Vec
     let mut units: Vec<UnitSource> = Vec::new();
     for f in &files {
         let text = decode(&std::fs::read(f)?);
-        for st in sqls_core::sql::split_script(&text) {
+        let stmts = sqls_core::sql::split_script(&text);
+        // CREATE 없이 "PACKAGE BODY x IS …" 로 시작하는 파일 (ALL_SOURCE 를 그대로 내린 것) — 파일 전체가 단위 하나
+        if !stmts.iter().any(|s| s.kind == sqls_core::sql::StmtKind::PlsqlUnit) {
+            let (s, _) = crate::plsql::structure(&text);
+            if !s.name.is_empty() && BODY_TYPES.iter().chain(["PACKAGE", "TYPE"].iter()).any(|t| *t == s.unit_type) {
+                let body = text.trim_start().trim_end().trim_end_matches('/').trim_end().to_string();
+                units.push(UnitSource { owner: s.owner.clone().unwrap_or_else(|| default_owner.to_uppercase()), name: s.name.clone(), unit_type: s.unit_type.clone(), text: body });
+            }
+            continue;
+        }
+        for st in stmts {
             if st.kind != sqls_core::sql::StmtKind::PlsqlUnit {
                 continue;
             }
@@ -178,9 +188,11 @@ mod tests {
         // CP949 로 쓴 본문
         let (body, _, _) = encoding_rs::EUC_KR.encode("CREATE OR REPLACE PACKAGE BODY app.pk IS\n  PROCEDURE one IS BEGIN NULL; END; -- 한글\nEND;\n/\nCREATE PROCEDURE solo AS BEGIN NULL; END;\n/\n");
         std::fs::write(dir.join("sub").join("b.pkb"), body).unwrap();
+        // CREATE 없는 파일 (ALL_SOURCE 내보내기)
+        std::fs::write(dir.join("c.pkb"), "PACKAGE BODY bare IS\n  PROCEDURE p IS BEGIN NULL; END;\nEND;\n").unwrap();
         let units = from_files(&[dir.clone()], "scott").unwrap();
         let keys: Vec<String> = units.iter().map(|(u, _)| u.key()).collect();
-        assert_eq!(keys, vec!["APP.PK.PACKAGE_BODY", "SCOTT.SOLO.PROCEDURE"]);
+        assert_eq!(keys, vec!["APP.PK.PACKAGE_BODY", "SCOTT.BARE.PACKAGE_BODY", "SCOTT.SOLO.PROCEDURE"]);
         assert!(units[0].1.as_deref().unwrap().contains("하나"));
         assert!(units[0].0.text.contains("한글"));
         assert!(units[0].0.text.starts_with("PACKAGE BODY"));

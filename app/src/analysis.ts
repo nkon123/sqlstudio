@@ -36,13 +36,14 @@ interface UnitResult {
   key: string; owner: string; name: string; unit_type: string; lines: number; warning?: string | null;
   subprograms: SubResult[]; facts: Facts; summary?: Insight | null; stats: { chunks: number; asked: number; cached: number; failed: number };
   model?: string | null; analyzed_at: number;
+  sql_summaries?: { subprogram?: string | null; kind: string; cursor?: string | null; line: number; end_line: number; chunk_ids: string[]; summary: Insight }[];
 }
 interface Chunk { id: string; part: number; parts: number; start_line: number; end_line: number; signature: string; context: string; code: string; facts: Facts; subprogram?: string | null }
 interface ChunkResult { chunk: Chunk; insight?: Insight | null; error?: string | null; raw?: string | null; llm?: { model: string; elapsed_ms: number; attempts: number; repaired?: string[] } | null }
 interface Node { id: string; unit: string; path: string; kind: string; signature: string; start_line: number; end_line: number; public?: boolean | null; summary?: string | null; complexity: number; commits: boolean }
 interface Edge { from: string; to: string; resolved: boolean; external?: string | null; lines: number[] }
 interface TableRow { table: string; by: Record<string, string>; impacted_entries: string[]; fed_from?: string[]; feeds_into?: string[] }
-interface Flow { node: string; unit: string; cursor: string; cursor_kind: string; from: string[]; to: string; ops: string; line: number; via: string }
+interface Flow { node: string; unit: string; cursor: string; cursor_kind: string; from: string[]; to: string; ops: string; line: number; via: string; cursor_summary?: string | null }
 interface Finding { node: string; unit: string; line?: number | null; source: string; kind: string; message: string }
 interface Integrated {
   units: number; nodes: Node[]; edges: Edge[]; tables: TableRow[]; entries: string[]; cycles: string[][];
@@ -343,6 +344,11 @@ export class AnalysisView {
     if (u.warning) box.append(h("p", { class: "warn" }, u.warning));
     if (u.summary) box.append(insightEl(u.summary));
     box.append(factsEl(u.facts));
+    const sqls = u.sql_summaries ?? [];
+    if (sqls.length) box.append(h("div", { class: "an-block" }, h("h4", {}, `긴 SQL ${sqls.length} (여러 조각을 모아 요약)`),
+      ...sqls.map((q) => h("details", { class: "an-chunk", open: true },
+        h("summary", {}, h("code", {}, q.cursor ? `${q.kind} ${q.cursor}` : q.kind), h("small", { class: "dim" }, ` ${q.line}~${q.end_line}행 · 조각 ${q.chunk_ids.length}개${q.subprogram ? ` · ${q.subprogram}` : " · 전역"}`)),
+        insightEl(q.summary)))));
     for (const s of u.subprograms) {
       const chunks = d.chunks.filter((c) => s.chunk_ids.includes(c.chunk.id));
       const det = h("details", { class: "an-sub" },
@@ -410,7 +416,7 @@ export class AnalysisView {
       h("ul", { class: "an-ul" }, ...tables.map((t) => h("li", {}, h("code", {}, t.by[id]), " ", t.table))));
     const flows = (g.flows ?? []).filter((f) => f.node === id);
     if (flows.length) box.append(h("h4", {}, `커서 → DML ${flows.length}`),
-      h("ul", { class: "an-ul" }, ...flows.map((f) => h("li", {}, h("code", {}, f.cursor), ` (${f.from.join(", ") || "?"}) → `, h("code", {}, f.ops), ` ${f.to} `,
+      h("ul", { class: "an-ul" }, ...flows.map((f) => h("li", { title: f.cursor_summary ?? "" }, h("code", {}, f.cursor), ` (${f.from.join(", ") || "?"}) → `, h("code", {}, f.ops), ` ${f.to} `,
         h("small", { class: "dim" }, `${f.line}행 · ${viaLabel(f.via)}`)))));
     const tx = g.transactions[id];
     if (tx) box.append(h("h4", {}, "이 시작점에서 닿는 COMMIT/ROLLBACK"), h("ul", { class: "an-ul" }, ...tx.map((x) => h("li", {}, this.nodeLink(x)))));

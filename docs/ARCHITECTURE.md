@@ -146,7 +146,11 @@ sqls_core::complete            토큰화 → 문장 경계 → 쿼리 블록 →
    PROCEDURE/FUNCTION 의 머리·선언부·본문을 찾고, BEGIN/IF/LOOP/CASE … END 짝을 스택으로 맞춘다 (CASE 식의 END,
    `END IF` / `END LOOP` / `END CASE` 구분). 본문의 `;` 마다 깊이를 기록해 두었다가, 한도를 넘는 서브프로그램은
    깊이 1(본문 바로 안의 문장 끝)에서 먼저 자르고, 한 문장이 크면 그 안으로 내려간다. 중첩 서브프로그램은 바깥 조각에서
-   한 줄 표시로 바꾸고 따로 조각을 만든다. 11g XE 의 SYS 에서 wrap 안 된 171개 단위(OWA_UTIL·HTP·STANDARD 등)로
+   한 줄 표시로 바꾸고 따로 조각을 만든다. 한 SQL 문(긴 커서)이 한도를 넘으면 `flow::sql_cuts` 의 자리를 쓴다 — 괄호 깊이 p 에서
+   절·CTE·JOIN 은 깊이 `10+2p`, 쉼표·AND/OR 는 `11+2p` 로 주어 PL/SQL 문장 경계(1~9)를 다 쓴 뒤에만, 바깥 절부터 쓰이게 했다.
+   자른 뒤에는 이웃 조각끼리 한도 안이면 합치고, 아주 작은 조각은 한도의 125% 까지 붙인다. 여러 조각에 걸친 SQL 은 조각 문맥에
+   `sql_outline`(맨 바깥 절과 줄 범위)과 문장 전체의 사실을 넣고, 요약 단계에서 SQL 하나로 모은다(`UnitResult.sql_summaries`).
+   11g XE 의 SYS 에서 wrap 안 된 171개 단위(OWA_UTIL·HTP·STANDARD 등)로
    검증했다: 구조 경고 0, 서브프로그램 머리 일치, 한도를 넘는 조각 0.
 2. **사실은 기계가 뽑는다** (`facts.rs`). 테이블 CRUD(INSERT INTO, UPDATE, DELETE [FROM], MERGE INTO … USING, FROM 목록·JOIN,
    `EXTRACT(x FROM d)` 같은 함수 안 FROM 은 뺀다), 호출 후보(이름 사슬 + `(` 또는 문장 처음 + `;`; 내장 함수, 선언된 지역

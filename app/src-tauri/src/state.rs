@@ -34,6 +34,8 @@ pub struct AppState {
     pub ai_tasks: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
     /// 프로필(대문자) → 자동완성 허브 (메타 세션 + 스키마 캐시)
     pub hubs: Mutex<HashMap<String, Arc<crate::complete::MetaHub>>>,
+    /// 진행 중인 디버그
+    pub debuggers: Mutex<HashMap<u64, Arc<crate::debug::DebugRun>>>,
 }
 
 impl AppState {
@@ -57,6 +59,7 @@ impl AppState {
             api_keys: RwLock::new(HashMap::new()),
             passwords: RwLock::new(HashMap::new()),
             hubs: Mutex::new(HashMap::new()),
+            debuggers: Mutex::new(HashMap::new()),
             ai_tasks: Mutex::new(HashMap::new()),
         }
     }

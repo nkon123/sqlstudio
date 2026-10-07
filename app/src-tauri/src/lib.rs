@@ -6,6 +6,7 @@
 mod ai;
 mod complete;
 mod db;
+mod debug;
 mod files;
 mod state;
 
@@ -48,6 +49,18 @@ pub fn run() {
             complete::complete,
             complete::completion_status,
             complete::refresh_completion,
+            debug::debug_prepare,
+            debug::debug_compile,
+            debug::debug_start,
+            debug::debug_step,
+            debug::debug_interrupt,
+            debug::debug_breakpoint,
+            debug::debug_clear_breakpoint,
+            debug::debug_eval,
+            debug::debug_frame_vars,
+            debug::debug_set,
+            debug::debug_source,
+            debug::debug_finish,
             db::set_mcp_settings,
             ai::list_providers,
             ai::save_provider,

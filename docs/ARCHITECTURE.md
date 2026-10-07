@@ -113,6 +113,29 @@ sqls_core::complete            토큰화 → 문장 경계 → 쿼리 블록 →
 - **캐시 적재**: 메타 세션(읽기 전용, 작업 세션과 별개)이 단계별로 읽고 단계마다 반영한다.
   11g 사전 뷰는 느리다 — 제약 × 제약 컬럼 조인은 DB 에서 2~4초, 따로 읽어 Rust 에서 이으면 1초.
 
+## PL/SQL 디버거 (`debug.rs`)
+
+`DBMS_DEBUG` 는 세션 두 개로 돈다.
+
+```
+대상 세션  initialize → debug_on → [사용자 블록] → debug_off      ← 사용자 블록 실행 중 서버에서 멈춘다
+제어 세션  attach_session → synchronize / continue / get_value / set_breakpoint …
+```
+
+- 대상 세션의 실행은 블로킹이라 대상 `Session` 스레드에서 돌리고, 제어는 다른 `Session` 으로 한다.
+  세션 모델이 그대로 쓰인다 (멈춘 대상은 그냥 "오래 걸리는 호출" 이다).
+- 사용자 블록을 `debug_on … debug_off` 로 감싸 **같은 호출 안에서** 끈다. 따로 부르면 앱이 죽었을 때
+  세션이 디버그 상태로 남아 패키지를 잠근다 (실제로 겪었다). 줄 번호가 밀리지 않게 한 줄에 붙인다.
+- 대상은 `set_timeout(900)` + `nodebug_on_timeout`: 제어가 사라지면 900초 뒤 디버그 없이 끝까지 돈다.
+  `Debugger` 의 `Drop` 은 두 세션을 `abandon` 한다.
+- `DBMS_DEBUG` 의 레코드(runtime_info, program_info)는 SQL 로 바인드할 수 없어서 익명 블록 안에서
+  스칼라 OUT 바인드로 풀어 낸다. 상수(break_next_line 등)도 시작할 때 서버에서 읽는다.
+- 4000바이트 넘는 VARCHAR2 OUT 은 LONG 이 되어 숫자 대입이 PLS-00382 가 난다. 그래서 4000 으로 맞추고,
+  긴 값(백트레이스)만 `l_` 이름으로 LONG 바인드한다.
+- 프레임 번호는 스택 절대 깊이 (0 = 현재). 시작하면 한 번 step-into 해서 첫 줄에서 멈춘다.
+- 디버그 정보 여부는 `ALL_PLSQL_OBJECT_SETTINGS.PLSQL_DEBUG` 로 본다 (11g XE 에 ALL_PROBE_OBJECTS 가 없다).
+- 디버거는 사용자가 쓴 블록만 돌린다. AI 경로와는 이어져 있지 않다.
+
 ## AI 문맥
 
 - 서버 버전을 시스템 프롬프트에 넣는다. 11g 면 12c+ 문법을 쓰지 말라고 구체적으로 적는다.
@@ -126,7 +149,7 @@ sqls_core::complete            토큰화 → 문장 경계 → 쿼리 블록 →
 
 ## 하지 않은 것 / 다음 할 일
 
-- PL/SQL 디버거, 세션·락 모니터, AWR/ASH 같은 DBA 화면 (Toad 의 나머지 절반)
+- 세션·락 모니터, AWR/ASH 같은 DBA 화면 (Toad 의 나머지 절반)
 - 비밀번호를 Windows 자격 증명 관리자에 저장 (지금은 메모리 + 환경변수)
 - 결과 정렬·필터, 결과 편집
 - MCP 에서 "SQL 제안" 툴: AI 가 제안한 SQL 을 앱의 새 탭으로 보내 사람이 검토·실행 (실행은 여전히 사람)

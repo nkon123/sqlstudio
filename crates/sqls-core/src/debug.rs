@@ -63,7 +63,7 @@ pub enum Step {
     Abort,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Frame {
     pub depth: u32,
     pub owner: String,
@@ -387,6 +387,11 @@ impl Debugger {
             flags += self.c.b_exc;
         }
         self.wait_event(false, flags).await
+    }
+
+    /// 대상 세션 핸들 — 다른 작업이 디버거를 잡고 기다리는 동안에도 [`Session::cancel`] 로 멈출 수 있게
+    pub fn target_handle(&self) -> Session {
+        self.target.clone()
     }
 
     /// 대상이 돌고 있을 때 멈추게 한다 (긴 루프 등). 대상 호출은 ORA-01013 으로 끝난다.

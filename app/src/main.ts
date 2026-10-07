@@ -12,6 +12,7 @@ import {
 import { AiPanel } from "./ai";
 import { listen } from "@tauri-apps/api/event";
 import { sqlCompletion } from "./completion";
+import { DebugView } from "./debugger";
 import { SqlEditor } from "./editor";
 import { ResultGrid } from "./grid";
 import { alertBox, bindBox, confirmBox, field, h, modal, passwordBox, toast } from "./ui";
@@ -41,6 +42,23 @@ class Tab {
   running = false;
   runStarted = 0;
   lastError: string | undefined;
+  private editorParts: HTMLElement[] = [];
+  private dbg: DebugView | null = null;
+
+  /** 디버거 화면 (탭의 접속을 쓴다) */
+  debugger(): DebugView {
+    if (!this.dbg) {
+      this.dbg = new DebugView(() => this.conn?.id, () => this.showEditor());
+      this.root.append(this.dbg.el);
+    }
+    for (const p of this.editorParts) p.hidden = true;
+    return this.dbg;
+  }
+
+  showEditor() {
+    for (const p of this.editorParts) p.hidden = false;
+    this.editor.focus();
+  }
 
   constructor(app: App, text = "") {
     const editorHost = h("div", { class: "editor-host" });
@@ -62,6 +80,7 @@ class Tab {
       gridPane, this.output, this.plan, this.desc);
     const splitter = h("div", { class: "splitter" });
     this.root = h("div", { class: "tab-body" }, editorHost, splitter, bottom);
+    this.editorParts = [editorHost, splitter, bottom];
     this.editor = new SqlEditor(editorHost, {
       runStatement: () => app.runStatement(),
       runScript: () => app.runScript(),
@@ -146,6 +165,7 @@ class App {
       b("run", "▶ 실행", "커서 위치 문장 실행 (Ctrl+Enter / F9)", () => this.runStatement(), "primary"),
       b("script", "스크립트", "전체 실행 (F5)", () => this.runScript()),
       b("explain", "실행계획", "Ctrl+E", () => this.explain()),
+      b("debug", "디버그", "PL/SQL 디버거 — 커서 위치 블록을 디버그로 연다 (탐색기에서 프로시저·패키지를 골라도 된다)", () => this.debugActive()),
       b("cancel", "중지", "실행 중인 쿼리를 취소", () => this.cancel(), "danger"),
       h("span", { class: "sep" }),
       b("commit", "커밋", "COMMIT", () => this.txn("commit")),
@@ -551,6 +571,15 @@ class App {
     }, 5000);
   }
 
+  private async debugActive() {
+    const t = this.need();
+    if (!t) return;
+    const cur = await this.currentStatement(t);
+    const k = cur?.a.statement?.kind;
+    const text = cur && (k === "plsql" || k === "other") ? cur.a.statement!.text : "BEGIN\n  NULL;\nEND;";
+    t.debugger().openBlock(text);
+  }
+
   private async txn(kind: "commit" | "rollback") {
     const t = this.need();
     if (!t || !t.conn) return;
@@ -645,8 +674,11 @@ class App {
         this.renderDesc(t, d);
       } else {
         const ddl = await api.getDdl(t.conn.id, o.object_type, q);
+        const debuggable = ["PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY"].includes(o.object_type);
         t.desc.replaceChildren(h("div", { class: "desc-actions" },
-          h("button", { onclick: () => this.newTab(true, ddl) }, "새 탭에서 열기")), h("pre", {}, ddl));
+          h("button", { onclick: () => this.newTab(true, ddl) }, "새 탭에서 열기"),
+          debuggable ? h("button", { class: "primary", onclick: () => t.debugger().openUnit(o.owner, o.name, o.object_type) }, "디버그") : ""),
+          h("pre", {}, ddl));
       }
       t.show("desc");
     } catch (e) {
@@ -735,7 +767,7 @@ class App {
     const busy = !!t?.running;
     this.btn.connect.disabled = busy;
     this.btn.disconnect.disabled = !c || busy;
-    for (const k of ["run", "script", "explain"]) this.btn[k].disabled = !c || busy;
+    for (const k of ["run", "script", "explain", "debug"]) this.btn[k].disabled = !c || busy;
     this.btn.cancel.disabled = !busy;
     this.btn.commit.disabled = !c || busy || !t?.txnPending;
     this.btn.rollback.disabled = !c || busy || !t?.txnPending;

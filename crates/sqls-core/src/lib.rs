@@ -14,6 +14,7 @@ pub mod config;
 pub mod debug;
 pub mod error;
 pub mod meta;
+pub mod monitor;
 pub mod session;
 pub mod sql;
 

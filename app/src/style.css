@@ -264,3 +264,19 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .an-block h4 { margin: 8px 0 2px; font-size: 12px; color: var(--dim); }
 .an-sql { font-family: var(--mono); font-size: 11px; max-width: 420px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .an-flow { font-size: 11px; font-family: var(--mono); }
+
+/* ── 세션 모니터 ── */
+.mon-waits { max-height: 30%; overflow: auto; border-bottom: 1px solid var(--line); font-size: 12px; }
+.mon-waits:empty { display: none; }
+.mon-wait-head { padding: 4px 8px; font-weight: 600; color: var(--danger); }
+.mon-wait { padding: 2px 8px; display: flex; align-items: center; gap: 4px; }
+.mon-wait.root { font-weight: 600; }
+.mon-wait button { margin-left: 8px; }
+.mon-list tr { cursor: default; }
+.mon-list tr.active { background: var(--sel); }
+.mon-list tr.mon-blocked td:first-child { box-shadow: inset 3px 0 var(--warn); }
+.mon-list tr.mon-blocker td:first-child { box-shadow: inset 3px 0 var(--danger); }
+.mon-detail h4 { margin: 10px 0 4px; font-size: 12px; color: var(--dim); display: flex; align-items: center; }
+.mon-main { grid-template-columns: minmax(420px, 1.5fr) minmax(300px, 1fr); }
+.mon-list td { white-space: nowrap; }
+.mon-list td:nth-child(4), .mon-list td:nth-child(7) { white-space: normal; max-width: 200px; }

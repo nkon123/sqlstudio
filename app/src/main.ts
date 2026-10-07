@@ -14,6 +14,7 @@ import { listen } from "@tauri-apps/api/event";
 import { sqlCompletion } from "./completion";
 import { AnalysisView } from "./analysis";
 import { DebugView } from "./debugger";
+import { MonitorView } from "./monitor";
 import { SqlEditor } from "./editor";
 import { ResultGrid } from "./grid";
 import { alertBox, bindBox, confirmBox, field, h, modal, passwordBox, toast } from "./ui";
@@ -46,6 +47,7 @@ class Tab {
   private editorParts: HTMLElement[] = [];
   private dbg: DebugView | null = null;
   private an: AnalysisView | null = null;
+  private mon: MonitorView | null = null;
 
   /** 디버거 화면 (탭의 접속을 쓴다) */
   debugger(): DebugView {
@@ -55,6 +57,7 @@ class Tab {
     }
     for (const p of this.editorParts) p.hidden = true;
     if (this.an) this.an.el.hidden = true;
+    if (this.mon) this.mon.el.hidden = true;
     return this.dbg;
   }
 
@@ -66,11 +69,25 @@ class Tab {
     }
     for (const p of this.editorParts) p.hidden = true;
     if (this.dbg) this.dbg.el.hidden = true;
+    if (this.mon) this.mon.el.hidden = true;
     return this.an;
+  }
+
+  /** 세션·락 모니터 */
+  monitor(): MonitorView {
+    if (!this.mon) {
+      this.mon = new MonitorView(() => this.conn?.id, () => this.showEditor());
+      this.root.append(this.mon.el);
+    }
+    for (const p of this.editorParts) p.hidden = true;
+    if (this.dbg) this.dbg.el.hidden = true;
+    if (this.an) this.an.el.hidden = true;
+    return this.mon;
   }
 
   showEditor() {
     if (this.an) this.an.el.hidden = true;
+    if (this.mon) this.mon.el.hidden = true;
     for (const p of this.editorParts) p.hidden = false;
     this.editor.focus();
   }
@@ -182,6 +199,7 @@ class App {
       b("explain", "실행계획", "Ctrl+E", () => this.explain()),
       b("debug", "디버그", "PL/SQL 디버거 — 커서 위치 블록을 디버그로 연다 (탐색기에서 프로시저·패키지를 골라도 된다)", () => this.debugActive()),
       b("analyze", "분석", "PL/SQL 분석 — 패키지·프로시저를 조각내어 (로컬) 모델로 분석하고 호출 관계·테이블 CRUD 를 통합한다", () => this.analyzeActive()),
+      b("monitor", "세션", "세션·락 모니터 — 누가 무엇을 막고 있는지, 세션의 SQL·트랜잭션, 세션 종료(확인 후)", () => this.monitorActive()),
       b("cancel", "중지", "실행 중인 쿼리를 취소", () => this.cancel(), "danger"),
       h("span", { class: "sep" }),
       b("commit", "커밋", "COMMIT", () => this.txn("commit")),
@@ -596,6 +614,13 @@ class App {
     t.debugger().openBlock(text);
   }
 
+  private monitorActive() {
+    const t = this.need();
+    if (!t) return;
+    if (!t.conn) return toast("먼저 접속하세요", "error");
+    t.monitor().open();
+  }
+
   private analyzeActive(owner?: string, name?: string) {
     const t = this.need();
     if (!t) return;
@@ -791,7 +816,7 @@ class App {
     const busy = !!t?.running;
     this.btn.connect.disabled = busy;
     this.btn.disconnect.disabled = !c || busy;
-    for (const k of ["run", "script", "explain", "debug", "analyze"]) this.btn[k].disabled = !c || busy;
+    for (const k of ["run", "script", "explain", "debug", "analyze", "monitor"]) this.btn[k].disabled = !c || busy;
     this.btn.cancel.disabled = !busy;
     this.btn.commit.disabled = !c || busy || !t?.txnPending;
     this.btn.rollback.disabled = !c || busy || !t?.txnPending;

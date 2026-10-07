@@ -9,6 +9,7 @@ mod complete;
 mod db;
 mod debug;
 mod files;
+mod monitor;
 mod state;
 
 use state::AppState;
@@ -69,6 +70,9 @@ pub fn run() {
             analyze::analysis_unit,
             analyze::analysis_dir,
             analyze::analysis_eval,
+            monitor::monitor_snapshot,
+            monitor::monitor_detail,
+            monitor::monitor_kill,
             db::set_mcp_settings,
             ai::list_providers,
             ai::save_provider,

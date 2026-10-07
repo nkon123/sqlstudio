@@ -141,6 +141,8 @@ pub struct SessionInfo {
     pub connect_string: String,
     pub server_version: String,
     pub read_only: bool,
+    /// V$SESSION.SID (모니터에서 "이 탭의 세션" 표시, 자기 자신 종료 막기). 못 읽으면 0
+    pub sid: i64,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -374,6 +376,9 @@ fn open(spec: &ConnectSpec) -> Result<(Connection, SessionInfo)> {
         .server_version()
         .map(|(v, banner)| format!("{v} ({})", banner.lines().next().unwrap_or("")))
         .unwrap_or_default();
+    let sid: i64 = conn
+        .query_row_as::<i64>("SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'SID')) FROM dual", &[])
+        .unwrap_or(0);
     Ok((
         conn,
         SessionInfo {
@@ -381,6 +386,7 @@ fn open(spec: &ConnectSpec) -> Result<(Connection, SessionInfo)> {
             connect_string: spec.connect_string.clone(),
             server_version,
             read_only: spec.read_only,
+            sid,
         },
     ))
 }

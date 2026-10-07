@@ -138,6 +138,15 @@ sqls_core::complete            토큰화 → 문장 경계 → 쿼리 블록 →
 - 디버그 정보 여부는 `ALL_PLSQL_OBJECT_SETTINGS.PLSQL_DEBUG` 로 본다 (11g XE 에 ALL_PROBE_OBJECTS 가 없다).
 - 디버거는 사용자가 쓴 블록만 돌린다. AI 경로와는 이어져 있지 않다.
 
+## 세션·락 모니터 (`monitor.rs`)
+
+V$SESSION 한 번(막는 수는 상관 서브쿼리), 락 대기는 `BLOCKING_SESSION` 이 있는 세션과 `ROW_WAIT_*` 로 만든 ROWID,
+상세는 V$TRANSACTION·V$LOCKED_OBJECT·V$SQL(`SQL_FULLTEXT` 4000자). 11g XE 에서 수십 ms.
+
+세션 종료는 **잠깐 쓰는 별도 세션**에서 실행한다. KILL 이 ORA-00031(종료 표시됨)을 돌려주면 ODPI-C 가 그 접속을 죽은
+것으로 보고 닫아 버린다(DPI-1080) — 사용자의 작업 세션에서 실행했다면 그 세션이 날아간다 (통합 테스트에서 실제로 겪었다).
+ORA-00031 은 성공으로 본다.
+
 ## PL/SQL 분석 (`crates/sqls-analyze`)
 
 작은 로컬 모델은 문맥이 짧고(4~8K), 긴 입력에서 앞을 잊고, 이름을 지어낸다. 그래서 세 가지를 나눴다.
@@ -193,7 +202,7 @@ SQL 문·커서 흐름(`flow.rs`)은 조각이 아니라 **서브프로그램 �
 
 ## 하지 않은 것 / 다음 할 일
 
-- 세션·락 모니터, AWR/ASH 같은 DBA 화면 (Toad 의 나머지 절반)
+- AWR/ASH, 실제 실행계획(DISPLAY_CURSOR) 같은 튜닝 화면, 스키마 비교
 - PL/SQL 분석: 결과를 YAML 로도 내기, 패키지 명세의 형식·상수까지 문맥에 넣기, 분석 결과를 MCP 툴로 열기
 - 비밀번호를 Windows 자격 증명 관리자에 저장 (지금은 메모리 + 환경변수)
 - 결과 정렬·필터, 결과 편집

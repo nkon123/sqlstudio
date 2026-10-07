@@ -1,0 +1,24 @@
+[package]
+name = "sqls-analyze"
+version = "0.1.0"
+edition = "2021"
+description = "SQLStudio PL/SQL analysis — chunk units for small local models, keep per-chunk JSON, integrate into a call/table graph"
+
+[[bin]]
+name = "sqlstudio-analyze"
+path = "src/main.rs"
+
+[dependencies]
+sqls-core = { path = "../sqls-core" }
+sqls-llm = { path = "../sqls-llm" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util = "0.3"
+encoding_rs = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

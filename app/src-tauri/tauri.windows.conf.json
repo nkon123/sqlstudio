@@ -2,7 +2,8 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "resources": {
-      "../../target/release/sqlstudio-mcp.exe": "sqlstudio-mcp.exe"
+      "../../target/release/sqlstudio-mcp.exe": "sqlstudio-mcp.exe",
+      "../../target/release/sqlstudio-analyze.exe": "sqlstudio-analyze.exe"
     }
   }
 }

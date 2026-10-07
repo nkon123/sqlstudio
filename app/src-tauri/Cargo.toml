@@ -14,6 +14,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 sqls-core = { path = "../../crates/sqls-core" }
 sqls-llm = { path = "../../crates/sqls-llm" }
+sqls-analyze = { path = "../../crates/sqls-analyze" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }

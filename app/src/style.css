@@ -210,3 +210,54 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .bp-dot { color: var(--danger); font-size: 11px; line-height: 1; }
 .dbg-current { background: color-mix(in srgb, var(--warn) 28%, transparent) !important; }
 .cm-lineNumbers .cm-gutterElement { cursor: pointer; }
+
+/* ── PL/SQL 분석 ── */
+.an-toolbar { flex-wrap: wrap; }
+.an-toolbar .check { margin: 0; font-size: 12px; gap: 4px; }
+.an-progress { height: 3px; background: var(--line); }
+.an-bar-fill { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+.an-main { flex: 1; display: grid; grid-template-columns: minmax(280px, 34%) 1fr; min-height: 0; }
+.an-left { overflow: auto; border-right: 1px solid var(--line); }
+.an-list, .an-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.an-list th, .an-table th { position: sticky; top: 0; background: var(--panel); text-align: left; font-weight: 600; color: var(--dim); border-bottom: 1px solid var(--line); padding: 3px 6px; }
+.an-list td, .an-table td { border-bottom: 1px solid var(--line); padding: 2px 6px; vertical-align: top; }
+.an-list td:nth-child(3) { font-family: var(--mono); }
+.an-list tr:hover { background: var(--hover); cursor: default; }
+.an-list tr.active { background: var(--sel); }
+.an-table td.num { text-align: right; font-family: var(--mono); }
+.an-table code, .an-chip { font-family: var(--mono); }
+.an-right { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.an-content { flex: 1; overflow: auto; min-height: 0; }
+.an-pad { padding: 8px 12px; }
+.an-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.an-stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.an-stat { display: flex; flex-direction: column; align-items: center; min-width: 80px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; }
+.an-stat b { font-size: 18px; }
+.an-stat small { color: var(--dim); }
+.an-ul { margin: 2px 0 8px; padding-left: 18px; font-size: 12px; }
+.an-ul li { padding: 1px 0; }
+.an-link { color: var(--accent); text-decoration: none; font-family: var(--mono); }
+.an-link:hover { text-decoration: underline; }
+.an-sub { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin: 6px 0; }
+.an-sub > summary { cursor: pointer; }
+.an-sub-sum { color: var(--text); margin: 2px 0 0 16px; font-size: 12px; }
+.an-sig { font-family: var(--mono); font-size: 12px; color: var(--dim); margin: 4px 0; white-space: pre-wrap; }
+.an-insight p { margin: 4px 0; }
+.an-insight ol, .an-insight ul { margin: 2px 0 6px; padding-left: 20px; font-size: 12px; }
+.an-rules li::marker { content: "◆ "; color: var(--accent); }
+.an-risks li { color: var(--warn); }
+.an-facts { font-size: 12px; margin: 4px 0; display: flex; flex-direction: column; gap: 2px; }
+.an-chip { display: inline-block; padding: 0 6px; margin: 1px 3px 1px 0; border-radius: 8px; background: var(--hover); font-size: 11px; }
+.an-chip.warn { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+.an-chunk { margin: 4px 0 4px 8px; font-size: 12px; }
+.an-chunk > summary { cursor: pointer; }
+.an-code { margin: 4px 0; padding: 6px 8px; max-height: 360px; overflow: auto; background: var(--bg); border-radius: 4px; font: 11px/1.4 var(--mono); white-space: pre; }
+.an-split { display: grid; grid-template-columns: minmax(180px, 32%) 1fr; height: 100%; min-height: 0; }
+.an-col { display: flex; flex-direction: column; gap: 4px; padding: 6px; border-right: 1px solid var(--line); min-height: 0; }
+.an-nodes { flex: 1; overflow: auto; list-style: none; padding: 0; font-family: var(--mono); }
+.an-nodes li { padding: 1px 4px; cursor: pointer; border-radius: 3px; white-space: nowrap; }
+.an-nodes li:hover { background: var(--hover); }
+.an-nodes li.active { background: var(--sel); }
+.an-detail { overflow: auto; min-height: 0; }
+.analysis .ok { color: var(--ok); } .analysis .warn { color: var(--warn); } .analysis .dim { color: var(--dim); }
+.an-list td.an-state, .an-list td:nth-child(2) { white-space: nowrap; }

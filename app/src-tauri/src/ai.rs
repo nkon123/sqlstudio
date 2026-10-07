@@ -76,7 +76,7 @@ pub fn set_api_key(st: State<'_, AppState>, provider: String, key: String) {
     }
 }
 
-fn provider(st: &AppState, name: &str) -> R<ProviderConfig> {
+pub(crate) fn provider(st: &AppState, name: &str) -> R<ProviderConfig> {
     let mut p = st
         .providers
         .read()

@@ -36,6 +36,8 @@ pub struct AppState {
     pub hubs: Mutex<HashMap<String, Arc<crate::complete::MetaHub>>>,
     /// 진행 중인 디버그
     pub debuggers: Mutex<HashMap<u64, Arc<crate::debug::DebugRun>>>,
+    /// 진행 중인 PL/SQL 분석 → 멈춤 신호
+    pub analyses: Mutex<HashMap<u64, Arc<AtomicBool>>>,
 }
 
 impl AppState {
@@ -60,6 +62,7 @@ impl AppState {
             passwords: RwLock::new(HashMap::new()),
             hubs: Mutex::new(HashMap::new()),
             debuggers: Mutex::new(HashMap::new()),
+            analyses: Mutex::new(HashMap::new()),
             ai_tasks: Mutex::new(HashMap::new()),
         }
     }

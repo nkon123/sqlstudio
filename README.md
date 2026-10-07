@@ -161,6 +161,66 @@ Oracle `DBMS_DEBUG` 를 쓰므로 11g 에서 그대로 된다 (`DBMS_DEBUG_JDWP`
   (`ALTER ... COMPILE DEBUG`) — 운영 DB 에서는 주의.
 - 세션을 둘(대상·제어) 쓴다. 앱이 죽거나 네트워크가 끊겨도 대상 세션은 900초 뒤 스스로 디버그를 끝낸다.
 
+## PL/SQL 분석 (로컬 모델용, 조각 → JSON → 통합)
+
+패키지·프로시저를 **작은 조각으로 나눠** 모델에 묻고, 조각마다 결과를 JSON 으로 남긴 뒤, 나중에 모두 이어서
+호출 관계·테이블 CRUD·영향 범위를 만든다. 작은 로컬 모델(1~8B)을 전제로 설계했다.
+
+툴바의 **분석** (또는 탐색기에서 패키지를 고르고 **분석**) → 단위 체크 → 공급자 선택 → **분석 시작**.
+대량이면 CLI 로 밤새 돌린다:
+
+```bat
+set SQLSTUDIO_PW_ERP-DEV=...
+sqlstudio-analyze run --connection ERP-DEV --schema ERP --llm "로컬 (Ollama)"
+sqlstudio-analyze run --files D:\src\plsql --owner ERP --static --out D:\analysis\erp   & rem 파일에서, 모델 없이
+sqlstudio-analyze integrate --connection ERP-DEV                                         & rem 통합만 다시
+sqlstudio-analyze show --connection ERP-DEV --table ERP.ORDERS                           & rem 누가 쓰나 + 영향 시작점
+sqlstudio-analyze show --connection ERP-DEV --node ERP.ORDER_PKG.CLOSE_ORDER             & rem 부르는 곳/것
+```
+
+| 단계 | 하는 일 | 모델 |
+|---|---|---|
+| 조각 | 서브프로그램 하나 = 조각 하나. 한도(기본 120줄·6000자)를 넘으면 **문장 경계**에서 자른다 (IF/LOOP 중간에서 자르지 않는다). 중첩 서브프로그램은 따로. 2부부터는 시그니처·선언부를 문맥으로 붙인다. 패키지 명세의 주석도 붙인다 | — |
+| 정적 사실 | 테이블별 C/R/U/D, 호출, 시퀀스, 동적 SQL, COMMIT/ROLLBACK, 자율 트랜잭션, RAISE, 예외 삼킴(`WHEN … THEN NULL`), DB 링크, 복잡도 | **쓰지 않는다** |
+| 조각 분석 | 요약 · 단계 · 업무 규칙 · 위험(줄 번호). 정적 사실을 프롬프트에 넣어 "찾지 말고 의미를 말하라" 고 한다 | 조각마다 1번 |
+| 요약 | 여러 조각으로 나뉜 서브프로그램 → 하나로, 서브프로그램들 → 단위 요약 (크면 묶음으로 나눠 줄인다) | 조금 |
+| 통합 | 호출 이름을 서브프로그램으로 풀기(같은 패키지 → 같은 스키마 → 다른 스키마), 호출 그래프, CRUD 행렬, 시작점, 순환 호출, 안 쓰이는 비공개 서브프로그램, 시작점별 COMMIT 위치, 테이블 → 영향 받는 시작점, 확인할 것 목록 | **쓰지 않는다** (전체 요약만 선택) |
+
+- **호출 관계와 CRUD 는 모델 답이 아니라 소스에서 뽑은 것**이다. 작은 모델이 테이블 이름을 지어내도 그래프는 틀리지 않는다.
+  모델 없이(`--static`, 화면의 "모델 없이") 돌려도 통합 분석은 다 나온다.
+- 작은 모델 대비: 답 모양을 JSON 스키마로 묶고(Ollama `format`), 코드 펜스·끝 쉼표·잘린 답은 고쳐 읽고,
+  그래도 안 되면 한 번 다시 묻는다. 범위 밖 줄 번호는 버린다. temperature 0.1.
+- **이어 하기**: 조각 파일에 (조각 해시 + 모델 + 프롬프트 버전) 키가 있다. 멈추거나(Ctrl+C) 죽어도 다시 돌리면
+  끝난 조각은 건너뛰고, 소스를 고치면 **바뀐 조각만** 다시 묻는다. 모델 서버가 3번 연속 실패하면 멈춘다.
+- wrap 된 소스는 건너뛴다. 11g 의 `ALL_OBJECTS` 는 권한이 많은 계정에서 1분 넘게 걸려 `DBA_OBJECTS` 를 먼저 쓴다
+  (`SELECT_CATALOG_ROLE` 이 있으면 SYS 스키마 814개 단위 목록이 0.03초).
+- 외부 공급자(Claude 등)를 고르면 소스가 밖으로 나간다 — 화면은 확인을 받고, CLI 는 `--allow-remote` 가 있어야 한다.
+- 모델은 소스를 읽기만 한다. 분석 경로에서 DB 로 가는 것은 사전 조회(`ALL_SOURCE` 등, 읽기 전용 세션)뿐이다.
+
+결과 폴더 (`%APPDATA%\sqlstudio\analysis\<접속>` — 앱과 CLI 가 같이 쓴다):
+
+```
+units/ERP.ORDER_PKG.PACKAGE_BODY/unit.json             구조, 서브프로그램별 사실·요약, 단위 요약
+units/ERP.ORDER_PKG.PACKAGE_BODY/chunks/004-CLOSE_ORDER.json   조각: 코드(줄 번호), 정적 사실, 모델 답, 호출 기록
+integrated/graph.json  crud.json  findings.json  integrated.json  report.md (Mermaid 호출 그래프 포함)
+```
+
+조각 JSON 하나 (줄임):
+
+```json
+{
+  "chunk": { "id": "004-CLOSE_ORDER", "start_line": 20, "end_line": 45, "signature": "PROCEDURE CLOSE_ORDER(P_ID NUMBER)",
+             "facts": { "tables": [{ "name": "ORDERS", "ops": "U", "lines": [27] }], "calls": [{ "name": "AUDIT_PKG.LOG", "lines": [25] }],
+                        "transactions": [{ "line": 33, "what": "COMMIT" }], "swallowed": [41] } },
+  "insight": { "summary": "주문을 마감하고 이력을 남긴다", "steps": ["합계 계산", "상태 변경"],
+               "rules": ["합계 1000 초과면 감사 로그"], "risks": [{ "line": 41, "issue": "NO_DATA_FOUND 를 삼킨다" }] },
+  "llm": { "model": "qwen2.5-coder:7b", "elapsed_ms": 8400, "attempts": 1, "repaired": ["JSON 앞뒤 글 제거"] }
+}
+```
+
+JSON 이라 jq·스크립트·다른 도구로 다시 쓰기 쉽고, 더 큰 모델로 통합 요약만 따로 만들 수도 있다
+(`integrate --llm <공급자> --overview` — 단위 요약만 보낸다).
+
 ## AI 패널
 
 | 버튼 | 하는 일 |
@@ -210,6 +270,7 @@ sqlstudio-mcp --http 127.0.0.1:8765    # Streamable HTTP (루프백만 허용)
 # 공통: Rust 1.80+, Node 20+
 cd app && npm ci && npx tauri build      # 앱 + 설치 파일
 cargo build --release -p sqls-mcp        # MCP 서버
+cargo build --release -p sqls-analyze    # PL/SQL 분석 CLI
 ```
 
 Linux 는 `libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev` 가 필요하다.
@@ -217,7 +278,8 @@ Linux 는 `libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev` 가 필�
 ## 테스트
 
 ```bash
-cargo test --workspace                   # DB 없이 도는 테스트 (SQL 분리·판정, 자동완성, LLM 스트리밍, MCP 프로토콜)
+cargo test --workspace                   # DB 없이 도는 테스트 (SQL 분리·판정, 자동완성, LLM 스트리밍, MCP 프로토콜,
+                                         #   PL/SQL 조각·사실, 깨진 답을 내는 가짜 모델로 분석 끝에서 끝까지)
 cd app && npx tsc --noEmit               # 프런트엔드 타입 검사
 
 # 실제 Oracle 11g 통합 테스트
@@ -237,6 +299,7 @@ crates/
   sqls-core/   Oracle 세션(접속당 스레드), SQL 분석, 구절 인식 자동완성, 데이터 사전, 설정
   sqls-llm/    LLM 공급자 (Ollama / OpenAI 호환 / Anthropic), 스트리밍, 프롬프트
   sqls-mcp/    MCP 서버 (sqlstudio-mcp) — 사전 조회만, SQL 실행 없음
+  sqls-analyze/ PL/SQL 분석 (sqlstudio-analyze) — 렉서·구조, 조각, 정적 사실, 조각별 모델 분석, 저장, 통합
 app/
   src-tauri/   Tauri 백엔드 — 명령 처리 (DB, AI, 파일)
   src/         화면 — CodeMirror 에디터, 가상 스크롤 그리드, AI 패널

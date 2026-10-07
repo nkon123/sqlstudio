@@ -12,6 +12,7 @@ import {
 import { AiPanel } from "./ai";
 import { listen } from "@tauri-apps/api/event";
 import { sqlCompletion } from "./completion";
+import { AnalysisView } from "./analysis";
 import { DebugView } from "./debugger";
 import { SqlEditor } from "./editor";
 import { ResultGrid } from "./grid";
@@ -44,6 +45,7 @@ class Tab {
   lastError: string | undefined;
   private editorParts: HTMLElement[] = [];
   private dbg: DebugView | null = null;
+  private an: AnalysisView | null = null;
 
   /** 디버거 화면 (탭의 접속을 쓴다) */
   debugger(): DebugView {
@@ -52,10 +54,23 @@ class Tab {
       this.root.append(this.dbg.el);
     }
     for (const p of this.editorParts) p.hidden = true;
+    if (this.an) this.an.el.hidden = true;
     return this.dbg;
   }
 
+  /** PL/SQL 분석 화면 (탭의 접속 프로필 기준) */
+  analysis(): AnalysisView {
+    if (!this.an) {
+      this.an = new AnalysisView(() => this.conn?.id, () => this.showEditor());
+      this.root.append(this.an.el);
+    }
+    for (const p of this.editorParts) p.hidden = true;
+    if (this.dbg) this.dbg.el.hidden = true;
+    return this.an;
+  }
+
   showEditor() {
+    if (this.an) this.an.el.hidden = true;
     for (const p of this.editorParts) p.hidden = false;
     this.editor.focus();
   }
@@ -166,6 +181,7 @@ class App {
       b("script", "스크립트", "전체 실행 (F5)", () => this.runScript()),
       b("explain", "실행계획", "Ctrl+E", () => this.explain()),
       b("debug", "디버그", "PL/SQL 디버거 — 커서 위치 블록을 디버그로 연다 (탐색기에서 프로시저·패키지를 골라도 된다)", () => this.debugActive()),
+      b("analyze", "분석", "PL/SQL 분석 — 패키지·프로시저를 조각내어 (로컬) 모델로 분석하고 호출 관계·테이블 CRUD 를 통합한다", () => this.analyzeActive()),
       b("cancel", "중지", "실행 중인 쿼리를 취소", () => this.cancel(), "danger"),
       h("span", { class: "sep" }),
       b("commit", "커밋", "COMMIT", () => this.txn("commit")),
@@ -580,6 +596,13 @@ class App {
     t.debugger().openBlock(text);
   }
 
+  private analyzeActive(owner?: string, name?: string) {
+    const t = this.need();
+    if (!t) return;
+    if (!t.conn) return toast("먼저 접속하세요", "error");
+    t.analysis().open(owner, name);
+  }
+
   private async txn(kind: "commit" | "rollback") {
     const t = this.need();
     if (!t || !t.conn) return;
@@ -677,7 +700,8 @@ class App {
         const debuggable = ["PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY"].includes(o.object_type);
         t.desc.replaceChildren(h("div", { class: "desc-actions" },
           h("button", { onclick: () => this.newTab(true, ddl) }, "새 탭에서 열기"),
-          debuggable ? h("button", { class: "primary", onclick: () => t.debugger().openUnit(o.owner, o.name, o.object_type) }, "디버그") : ""),
+          debuggable ? h("button", { class: "primary", onclick: () => t.debugger().openUnit(o.owner, o.name, o.object_type) }, "디버그") : "",
+          debuggable && o.object_type !== "TYPE" ? h("button", { title: "이 단위를 PL/SQL 분석 화면에서 연다", onclick: () => this.analyzeActive(o.owner, o.name) }, "분석") : ""),
           h("pre", {}, ddl));
       }
       t.show("desc");
@@ -767,7 +791,7 @@ class App {
     const busy = !!t?.running;
     this.btn.connect.disabled = busy;
     this.btn.disconnect.disabled = !c || busy;
-    for (const k of ["run", "script", "explain", "debug"]) this.btn[k].disabled = !c || busy;
+    for (const k of ["run", "script", "explain", "debug", "analyze"]) this.btn[k].disabled = !c || busy;
     this.btn.cancel.disabled = !busy;
     this.btn.commit.disabled = !c || busy || !t?.txnPending;
     this.btn.rollback.disabled = !c || busy || !t?.txnPending;

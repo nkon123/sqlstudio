@@ -3510,6 +3510,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqls-analyze"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "sqls-core",
+ "sqls-llm",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "sqls-core"
 version = "0.1.0"
 dependencies = [
@@ -3558,6 +3574,7 @@ dependencies = [
  "encoding_rs",
  "serde",
  "serde_json",
+ "sqls-analyze",
  "sqls-core",
  "sqls-llm",
  "tauri",

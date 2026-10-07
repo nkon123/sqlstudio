@@ -28,7 +28,7 @@ const LIMIT: usize = 200;
 pub struct HubStatus {
     profile: String,
     /// connecting | objects | columns | synonyms | keys | ready | error
-    phase: &'static str,
+    pub(crate) phase: &'static str,
     objects: usize,
     columns: usize,
     error: Option<String>,
@@ -50,6 +50,11 @@ impl MetaHub {
         let st = HubStatus { profile: self.profile.clone(), phase, objects, columns, error };
         *self.status.lock().unwrap() = st.clone();
         let _ = self.app.emit("completion-status", st);
+    }
+
+    /// 읽기 전용 메타 세션 (사전 조회용). 아직 접속 중이면 None
+    pub fn session(&self) -> Option<&Session> {
+        self.session.get()
     }
 
     pub fn status(&self) -> HubStatus {
@@ -136,7 +141,7 @@ pub fn ensure_hub(st: &AppState, app: &AppHandle, profile: &Profile, password: &
     hub
 }
 
-fn hub_for(st: &AppState, id: u64) -> Result<Arc<MetaHub>, ErrView> {
+pub(crate) fn hub_for(st: &AppState, id: u64) -> Result<Arc<MetaHub>, ErrView> {
     let profile = {
         let map = st.sessions.lock().unwrap();
         map.get(&id)

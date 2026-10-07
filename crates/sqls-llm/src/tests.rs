@@ -83,7 +83,7 @@ fn cfg(kind: ProviderKind, base: &str) -> ProviderConfig {
 }
 
 fn req() -> ChatRequest {
-    ChatRequest { system: "sys".into(), messages: vec![Message::user("안녕")] }
+    ChatRequest { system: "sys".into(), messages: vec![Message::user("안녕")], json_schema: None }
 }
 
 #[tokio::test]

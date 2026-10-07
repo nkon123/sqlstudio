@@ -56,7 +56,7 @@ jobs:
       - name: 통합 테스트
         env:
           SQLS_TEST_DSN: system/oracle@localhost:1521/XE
-        run: cargo test -p sqls-core -p sqls-mcp -- --ignored --test-threads=1
+        run: cargo test -p sqls-core -p sqls-mcp -p sqls-analyze -- --ignored --test-threads=1
 
   windows:
     runs-on: windows-latest
@@ -70,8 +70,8 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
-      - name: MCP 서버 (설치 파일에 함께 넣는다)
-        run: cargo build --release -p sqls-mcp
+      - name: MCP 서버·분석 CLI (설치 파일에 함께 넣는다)
+        run: cargo build --release -p sqls-mcp -p sqls-analyze
       - name: 앱 + 설치 파일
         working-directory: app
         run: |
@@ -83,4 +83,5 @@ jobs:
           path: |
             target/release/bundle/nsis/*.exe
             target/release/sqlstudio-mcp.exe
+            target/release/sqlstudio-analyze.exe
           if-no-files-found: error

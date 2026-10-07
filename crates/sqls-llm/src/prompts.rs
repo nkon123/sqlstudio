@@ -130,7 +130,7 @@ pub fn user_message(task: Task, ctx: &Context) -> String {
 pub fn build(task: Task, ctx: &Context, history: &[Message]) -> ChatRequest {
     let mut messages = history.to_vec();
     messages.push(Message::user(user_message(task, ctx)));
-    ChatRequest { system: system_prompt(task, ctx), messages }
+    ChatRequest { system: system_prompt(task, ctx), messages, json_schema: None }
 }
 
 /// 답에서 첫 번째 ```sql 블록을 꺼낸다 ("에디터에 넣기" 버튼)

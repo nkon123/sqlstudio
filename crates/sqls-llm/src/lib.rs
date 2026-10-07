@@ -175,6 +175,10 @@ impl Message {
 pub struct ChatRequest {
     pub system: String,
     pub messages: Vec<Message>,
+    /// 답을 이 JSON 스키마로 묶는다 (Ollama `format`, OpenAI `response_format`, Anthropic `output_config.format`).
+    /// 서버가 지원하지 않으면 400 이 온다 — 부르는 쪽이 스키마 없이 다시 보낸다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_schema: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -419,6 +423,10 @@ fn build_request(cfg: &ProviderConfig, req: &ChatRequest) -> Result<Built> {
                 "options": options,
                 "keep_alive": cfg.keep_alive.clone().unwrap_or_else(|| "30m".into()),
             });
+            let mut body = body;
+            if let Some(schema) = &req.json_schema {
+                body["format"] = schema.clone();
+            }
             Ok((format!("{base}/api/chat"), body, headers))
         }
         ProviderKind::OpenaiCompatible => {
@@ -433,6 +441,12 @@ fn build_request(cfg: &ProviderConfig, req: &ChatRequest) -> Result<Built> {
             if let Some(t) = cfg.temperature {
                 body["temperature"] = json!(t);
             }
+            if let Some(schema) = &req.json_schema {
+                body["response_format"] = json!({
+                    "type": "json_schema",
+                    "json_schema": { "name": "answer", "schema": schema },
+                });
+            }
             Ok((format!("{base}/chat/completions"), body, headers))
         }
         ProviderKind::Anthropic => {
@@ -445,6 +459,9 @@ fn build_request(cfg: &ProviderConfig, req: &ChatRequest) -> Result<Built> {
             });
             if let Some(e) = &cfg.effort {
                 body["output_config"] = json!({ "effort": e });
+            }
+            if let Some(schema) = &req.json_schema {
+                body["output_config"]["format"] = json!({ "type": "json_schema", "schema": schema });
             }
             if cfg.fallbacks {
                 body["fallbacks"] = json!("default");

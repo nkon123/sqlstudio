@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sqls-core", "crates/sqls-llm", "crates/sqls-mcp", "app/src-tauri"]
+members = ["crates/sqls-core", "crates/sqls-llm", "crates/sqls-mcp", "crates/sqls-analyze", "app/src-tauri"]
 
 [profile.release]
 # 속도: 크레이트 경계를 넘는 인라인, 코드 크기도 줄어든다

@@ -4,6 +4,7 @@
 //! 세션 스레드(sqls-core)나 async 작업으로 보낸다. 명령 처리기는 절대 블로킹하지 않는다.
 
 mod ai;
+mod analyze;
 mod complete;
 mod db;
 mod debug;
@@ -61,6 +62,12 @@ pub fn run() {
             debug::debug_set,
             debug::debug_source,
             debug::debug_finish,
+            analyze::analysis_list,
+            analyze::analysis_start,
+            analyze::analysis_cancel,
+            analyze::analysis_result,
+            analyze::analysis_unit,
+            analyze::analysis_dir,
             db::set_mcp_settings,
             ai::list_providers,
             ai::save_provider,

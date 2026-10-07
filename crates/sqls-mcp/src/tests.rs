@@ -66,7 +66,13 @@ async fn tool_names(c: &Client) -> Vec<String> {
 async fn no_tool_executes_sql() {
     let cfg = Config::parse(CFG).unwrap();
     let c = client(SqlStudioMcp::new(&cfg, no_db())).await;
-    assert_eq!(tool_names(&c).await, ["describe_table", "get_ddl", "list_connections", "list_objects"]);
+    assert_eq!(
+        tool_names(&c).await,
+        [
+            "analysis_findings", "analysis_overview", "analysis_unit", "describe_table", "get_ddl", "list_connections",
+            "list_objects", "subprogram_relations", "table_usage",
+        ]
+    );
     // 기본 설정에서는 SQL 문장을 인자로 받는 툴이 하나도 없다
     for t in c.list_all_tools().await.unwrap() {
         let schema = serde_json::to_string(&t.input_schema).unwrap();
@@ -146,4 +152,63 @@ async fn live_tools_over_protocol() {
     let _ = (err, plan);
     let (err, d) = call(&c, "describe_table", json!({"connection": "XE", "name": "sys.dual"})).await;
     assert!(!err, "{d}");
+}
+
+/// 분석 결과(JSON)만 읽는 툴 — DB 없이
+#[tokio::test]
+async fn analysis_tools_read_stored_results() {
+    use sqls_analyze::chunk::UnitSource;
+    use sqls_analyze::run::{analyze_unit, Options};
+    use sqls_analyze::store::Store;
+    let root = std::env::temp_dir().join(format!("sqls-mcp-analysis-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    // 프로필 이름 XE 의 결과 폴더
+    let store = Store::open(root.join("XE")).unwrap();
+    let on: sqls_analyze::run::OnEvent = Arc::new(|_| {});
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for (name, text, spec) in [
+        ("ORDER_PKG", include_str!("../../sqls-analyze/tests/data/order_pkg.pkb"), Some(include_str!("../../sqls-analyze/tests/data/order_pkg.pks"))),
+        ("FLOW_PKG", include_str!("../../sqls-analyze/tests/data/flow_pkg.pkb"), None),
+    ] {
+        let src = UnitSource { owner: "APP".into(), name: name.into(), unit_type: "PACKAGE BODY".into(), text: text.into() };
+        analyze_unit(&store, &src, spec, None, &Options::default(), on.clone(), cancel.clone()).await.unwrap();
+    }
+    sqls_analyze::integrate::write_all(&store, None).unwrap();
+
+    let cfg = Config::parse(CFG).unwrap();
+    let c = client(SqlStudioMcp::new(&cfg, no_db()).with_analysis_root(&root)).await;
+    let (err, text) = call(&c, "analysis_overview", json!({"connection": "XE"})).await;
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["units"], 2);
+
+    let (err, text) = call(&c, "analysis_unit", json!({"connection": "XE", "name": "order_pkg"})).await;
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    let close = v["subprograms"].as_array().unwrap().iter().find(|s| s["name"] == "CLOSE_ORDER").unwrap();
+    assert!(close["tables"].as_array().unwrap().iter().any(|t| t == "ORDERS(U)"));
+
+    let (err, text) = call(&c, "table_usage", json!({"connection": "XE", "table": "order_log"})).await;
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v[0]["table"], "APP.ORDER_LOG");
+    assert_eq!(v[0]["data_comes_from"][0], "APP.ORDERS");
+    assert_eq!(v[0]["cursor_flows_in"][0]["cursor"], "C_OPEN");
+
+    let (err, text) = call(&c, "subprogram_relations", json!({"connection": "XE", "name": "close_order"})).await;
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v[0]["called_by"][0]["caller"], "APP.ORDER_PKG.NIGHTLY");
+
+    let (err, text) = call(&c, "analysis_findings", json!({"connection": "XE", "kind": "예외 삼킴"})).await;
+    assert!(!err, "{text}");
+    assert!(text.contains("WHEN"), "{text}");
+
+    // 허용하지 않은 프로필, 분석이 없는 경우
+    let (err, text) = call(&c, "analysis_overview", json!({"connection": "PROD"})).await;
+    assert!(err && text.contains("Unknown connection"), "{text}");
+    let c2 = client(SqlStudioMcp::new(&cfg, no_db()).with_analysis_root(root.join("nothing"))).await;
+    let (err, text) = call(&c2, "analysis_overview", json!({"connection": "XE"})).await;
+    assert!(err && text.contains("No PL/SQL analysis"), "{text}");
+    std::fs::remove_dir_all(&root).unwrap();
 }

@@ -299,6 +299,14 @@ JSON 함수 같은 12c+ 문법을 쓰지 말라고 지시한다.
 | `describe_table` | 컬럼·형식·NOT NULL·주석·PK·인덱스·통계 행 수 |
 | `get_ddl` | DDL / PL/SQL 소스 (DBMS_METADATA, 깨진 DB 에서는 사전 정보로 대체) |
 | `explain_plan` | (기본 꺼짐) 실행계획 — 실행하지 않음 |
+| `analysis_overview` | PL/SQL 분석 결과 개요: 단위별 요약, 시작점, 순환 — **DB 에 붙지 않는다** |
+| `analysis_unit` | 패키지 하나: 목적·업무 규칙, 서브프로그램별 테이블 CRUD·호출, 긴 SQL·커서 요약, 커서 → DML 흐름, 확인할 것 |
+| `table_usage` | 테이블을 누가 읽고·쓰는지, 커서로 어느 테이블 데이터가 들어오는지(계보), 바꾸면 영향 받는 시작점 |
+| `subprogram_relations` | 서브프로그램의 부르는 곳·부르는 것·테이블·커서 흐름·닿는 COMMIT |
+| `analysis_findings` | 예외 삼킴·동적 SQL·순환 호출·모델 지적 |
+
+분석 툴은 앱의 분석 화면이나 `sqlstudio-analyze` 가 쓴 결과 폴더(`analysis/<접속>`)만 읽는다. 예) Claude Desktop 에서
+"ORDERS 테이블 컬럼을 바꾸면 어떤 배치가 영향 받아?" → `table_usage` 로 쓰는 곳과 영향 시작점을 답한다.
 
 ```bash
 sqlstudio-mcp --check                  # 설정과 접속 점검

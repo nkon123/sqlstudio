@@ -12,11 +12,15 @@
 //! - 쿼리마다 시간 상한이 있다. 넘으면 취소하고, 취소가 안 먹히면 세션을 버리고 새로 연다.
 //! - 결과 행 수에 상한이 있다 (토큰 = 시간·비용).
 //! - stdout 은 프로토콜 전용이다. 로그는 stderr 로만 쓴다.
+//! - `analysis_*` / `table_usage` / `subprogram_relations` 툴은 DB 에 붙지 않는다 — PL/SQL 분석 결과(JSON)만 읽는다.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::path::PathBuf;
 use std::time::Duration;
+
+mod analysis;
 
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
@@ -60,6 +64,9 @@ pub struct SqlStudioMcp {
     limits: McpConfig,
     sessions: Arc<Mutex<HashMap<String, Session>>>,
     connector: Connector,
+    /// PL/SQL 분석 결과 폴더의 부모 (None 이면 설정 파일 옆 analysis/<프로필>)
+    analysis_root: Option<PathBuf>,
+    analysis_cache: analysis::Cache,
     tool_router: ToolRouter<Self>,
 }
 
@@ -114,6 +121,31 @@ pub struct DdlArgs {
     pub name: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NameArgs {
+    /// Connection profile name
+    pub connection: String,
+    /// Name, optionally OWNER-qualified: a package/procedure (ORDER_PKG) or a subprogram (ORDER_PKG.CLOSE_ORDER)
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TableArgs {
+    /// Connection profile name
+    pub connection: String,
+    /// Table name, optionally OWNER.TABLE
+    pub table: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FindingsArgs {
+    /// Connection profile name
+    pub connection: String,
+    /// Filter by kind (예외 삼킴, 동적 SQL, 순환 호출, 모델 지적, 구조). Omit for all.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
 // ─────────────────────────────────────────────────────────────
 // 서버
 // ─────────────────────────────────────────────────────────────
@@ -136,6 +168,8 @@ impl SqlStudioMcp {
             limits: cfg.mcp.clone(),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             connector,
+            analysis_root: None,
+            analysis_cache: analysis::Cache::default(),
             tool_router: {
                 let mut r = Self::tool_router();
                 if !cfg.mcp.allow_explain {
@@ -144,6 +178,26 @@ impl SqlStudioMcp {
                 r
             },
         }
+    }
+
+    /// 분석 결과 폴더를 바꾼다 (시험용, 또는 결과를 다른 곳에 둔 경우)
+    pub fn with_analysis_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.analysis_root = Some(root.into());
+        self
+    }
+
+    fn analysis_dir(&self, conn: &str) -> Result<PathBuf, String> {
+        let p = self.profile(conn)?;
+        Ok(match &self.analysis_root {
+            Some(r) => r.join(&p.name),
+            None => sqls_analyze::default_dir(&p.name),
+        })
+    }
+
+    fn integrated(&self, conn: &str) -> Result<(PathBuf, std::sync::Arc<sqls_analyze::integrate::Integrated>), String> {
+        let dir = self.analysis_dir(conn)?;
+        let g = self.analysis_cache.integrated(&dir)?;
+        Ok((dir, g))
     }
 
     fn profile(&self, name: &str) -> Result<Profile, String> {
@@ -315,6 +369,51 @@ impl SqlStudioMcp {
         })
         .await
     }
+
+    #[tool(
+        description = "Overview of the stored PL/SQL analysis for a connection (no database access): analyzed packages/procedures with summaries, entry points, cycles. Start here for questions about what the PL/SQL code does.",
+        annotations(read_only_hint = true)
+    )]
+    async fn analysis_overview(&self, Parameters(a): Parameters<ConnArg>) -> Result<String, String> {
+        let (dir, g) = self.integrated(&a.connection)?;
+        Ok(to_json(analysis::overview(&dir, &g)))
+    }
+
+    #[tool(
+        description = "Analysis of one package/procedure (no database access): purpose, business rules, each subprogram with tables (CRUD) and calls, long SQL/cursor summaries, cursor-to-DML data flows, findings.",
+        annotations(read_only_hint = true)
+    )]
+    async fn analysis_unit(&self, Parameters(a): Parameters<NameArgs>) -> Result<String, String> {
+        let (dir, g) = self.integrated(&a.connection)?;
+        Ok(to_json(analysis::unit(&dir, &g, &a.name)?))
+    }
+
+    #[tool(
+        description = "Who reads/inserts/updates/deletes a table, which tables feed it through cursors (data lineage), and which entry points are affected by changing it (no database access).",
+        annotations(read_only_hint = true)
+    )]
+    async fn table_usage(&self, Parameters(a): Parameters<TableArgs>) -> Result<String, String> {
+        let (_, g) = self.integrated(&a.connection)?;
+        Ok(to_json(analysis::table_usage(&g, &a.table)?))
+    }
+
+    #[tool(
+        description = "Callers, callees, tables, cursor flows and reachable COMMITs of a PL/SQL subprogram (no database access). Name like ORDER_PKG.CLOSE_ORDER or just CLOSE_ORDER.",
+        annotations(read_only_hint = true)
+    )]
+    async fn subprogram_relations(&self, Parameters(a): Parameters<NameArgs>) -> Result<String, String> {
+        let (_, g) = self.integrated(&a.connection)?;
+        Ok(to_json(analysis::relations(&g, &a.name)?))
+    }
+
+    #[tool(
+        description = "Things to review found by the PL/SQL analysis (no database access): swallowed exceptions, dynamic SQL, call cycles, model-reported risks.",
+        annotations(read_only_hint = true)
+    )]
+    async fn analysis_findings(&self, Parameters(a): Parameters<FindingsArgs>) -> Result<String, String> {
+        let (_, g) = self.integrated(&a.connection)?;
+        Ok(to_json(analysis::findings(&g, a.kind.as_deref())))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -327,7 +426,9 @@ impl ServerHandler for SqlStudioMcp {
                  This server never executes your SQL and never returns table data: \
                  learn the schema with list_connections, list_objects, describe_table and get_ddl, \
                  then write SQL and give it to the user, who reviews and runs it in SQLStudio. \
-                 Always respect the server version: Oracle 11g lacks FETCH FIRST, IDENTITY, LATERAL and JSON functions.",
+                 Always respect the server version: Oracle 11g lacks FETCH FIRST, IDENTITY, LATERAL and JSON functions. \
+                 For questions about existing PL/SQL (what a package does, who writes a table, impact of a change), \
+                 use analysis_overview, analysis_unit, table_usage and subprogram_relations — they read a stored analysis, not the database.",
             )
     }
 }

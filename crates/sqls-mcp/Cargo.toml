@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 sqls-core = { path = "../sqls-core" }
+sqls-analyze = { path = "../sqls-analyze" }
 rmcp = { version = "3.5", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 tokio = { version = "1", features = ["full"] }

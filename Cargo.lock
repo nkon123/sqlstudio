@@ -3560,6 +3560,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "sqls-analyze",
  "sqls-core",
  "tokio",
  "tokio-util",

@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::facts::{self, Facts};
+use crate::flow;
 use crate::plsql::{self, Structure, SubKind, Subprogram, Tok};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -281,6 +282,8 @@ pub fn plan(src: &UnitSource, spec: Option<&str>, lim: Limits) -> Plan {
     let global_skip: Vec<(u32, u32)> = st.subprograms.iter().filter(|s| s.parent.is_none()).map(|s| (s.doc_line, s.end_line)).collect();
     let global_toks: Vec<Tok> = toks.iter().filter(|t| !global_skip.iter().any(|(a, b)| *a <= t.line && t.line <= *b)).cloned().collect();
     let globals = facts::local_names(&global_toks);
+    // 패키지 전역 커서 → 읽는 테이블 (서브프로그램이 FOR r IN c_global 로 쓸 때 잇는다)
+    let global_cursors = flow::declared_cursors(&global_toks, &globals);
 
     // 1) 전역 선언
     let is_container = st.unit_type.ends_with("BODY") || st.unit_type == "PACKAGE" || st.unit_type == "TYPE";
@@ -307,7 +310,11 @@ pub fn plan(src: &UnitSource, spec: Option<&str>, lim: Limits) -> Plan {
             for (k, (a, b)) in ranges.into_iter().enumerate() {
                 let code = cx.render(a, b, &[]);
                 let tk = cx.tokens(a, b, &[]);
-                let f = facts::extract(&tk, &globals);
+                let mut f = facts::extract(&tk, &globals);
+                let (stmts, cursors) = flow::analyze(&tk, &globals, &flow::KnownCursors::new());
+                f.statements = stmts;
+                f.cursors = cursors;
+                facts::absorb_dynamic(&mut f);
                 let signature = format!("{} {} 전역 선언", st.unit_type, st.name);
                 chunks.push(Chunk {
                     id: String::new(),
@@ -355,13 +362,39 @@ pub fn plan(src: &UnitSource, spec: Option<&str>, lim: Limits) -> Plan {
         // 자기 이름은 재귀 호출일 수 있으므로 지역 이름에서 뺀다
         locals.remove(&s.name);
 
+        // SQL 문·커서 흐름은 서브프로그램 전체로 (조각 경계를 넘는 FETCH → INSERT 도 잇는다)
+        let mut known = global_cursors.clone();
+        let mut up = s.parent;
+        while let Some(c) = up {
+            let sp = &st.subprograms[c];
+            let hi = if sp.begin_line > 0 { sp.begin_line } else { sp.end_line };
+            let sk: Vec<(u32, u32)> = sp.children.iter().map(|&k| (st.subprograms[k].doc_line, st.subprograms[k].end_line)).collect();
+            for (k, v) in flow::declared_cursors(&cx.tokens(sp.start_line, hi, &sk), &locals) {
+                known.entry(k).or_insert(v);
+            }
+            up = sp.parent;
+        }
+        let (mut sub_stmts, mut sub_cursors) = flow::analyze(&cx.tokens(s.doc_line, s.end_line, &skip), &locals, &known);
+
         let doc = docs.get(&s.name).cloned().unwrap_or_default();
         let ranges = sub_ranges(&cx, &toks, s, &skip);
         let n = ranges.len() as u32;
         let decl_ctx = if n > 1 { decl_context(&cx, s, &skip_l) } else { String::new() };
+        let last = ranges.len().saturating_sub(1);
         for (k, (a, b)) in ranges.into_iter().enumerate() {
             let code = cx.render(a, b, &skip_l);
-            let f = facts::extract(&cx.tokens(a, b, &skip), &locals);
+            let mut f = facts::extract(&cx.tokens(a, b, &skip), &locals);
+            // 문장은 시작 줄로, 커서는 선언(없으면 처음 쓰인) 줄로 조각에 나눠 담는다. 마지막 조각이 남은 것을 받는다.
+            let here = |l: u32| (l >= a && l <= b) || k == last;
+            f.statements = sub_stmts.extract_if(.., |x| here(x.line)).collect();
+            f.cursors = sub_cursors
+                .extract_if(.., |c| {
+                    let l = if c.line > 0 { c.line } else { c.used_at.first().copied().or(c.feeds.first().map(|x| x.line)).unwrap_or(a) };
+                    here(l)
+                })
+                .collect();
+            // 동적 SQL 문자열에서 읽은 테이블도 CRUD 에 넣는다
+            facts::absorb_dynamic(&mut f);
             let mut context = String::new();
             if !doc.is_empty() {
                 context.push_str("명세 주석:\n");

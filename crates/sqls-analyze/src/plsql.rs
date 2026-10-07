@@ -206,6 +206,31 @@ pub fn lex(src: &str) -> Vec<Tok> {
     out
 }
 
+/// 토큰을 다시 글로 (공백 정리, 식별자는 대문자). 시그니처·SQL 문 기록에 쓴다.
+pub fn join_tokens(t: &[Tok]) -> String {
+    let mut s = String::new();
+    let mut prev_word = false;
+    for tk in t {
+        let (txt, is_word) = match &tk.kind {
+            Kind::Word(w) => (w.clone(), true),
+            Kind::Quoted(q) => (format!("\"{q}\""), true),
+            Kind::Str(x) => (format!("'{}'", x.replace('\'', "''")), true),
+            Kind::Num(x) => (x.clone(), true),
+            Kind::Sym(x) => (x.to_string(), false),
+        };
+        let op = matches!(txt.as_str(), ":=" | "=>" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "||" | "+" | "*");
+        if !s.is_empty() && ((is_word && (prev_word || s.ends_with(')'))) || op || s.ends_with(',') || (is_word && s.ends_with(' '))) && !s.ends_with(' ') {
+            s.push(' ');
+        }
+        s.push_str(&txt);
+        if op {
+            s.push(' ');
+        }
+        prev_word = is_word;
+    }
+    s
+}
+
 // ─────────────────────────────────────────────────────────────
 // 구조
 // ─────────────────────────────────────────────────────────────
@@ -372,26 +397,7 @@ impl P<'_> {
     }
 
     fn signature(&self, from: usize, to: usize) -> String {
-        let mut s = String::new();
-        let mut prev_word = false;
-        for tk in &self.t[from..to] {
-            let (txt, is_word) = match &tk.kind {
-                Kind::Word(w) => (w.clone(), true),
-                Kind::Quoted(q) => (format!("\"{q}\""), true),
-                Kind::Str(x) => (format!("'{x}'"), true),
-                Kind::Num(x) => (x.clone(), true),
-                Kind::Sym(x) => (x.to_string(), false),
-            };
-            if (is_word && (prev_word || s.ends_with(')'))) || matches!(txt.as_str(), ":=" | "=>") || (!s.is_empty() && s.ends_with(',')) {
-                s.push(' ');
-            }
-            s.push_str(&txt);
-            if matches!(txt.as_str(), ":=" | "=>") {
-                s.push(' ');
-            }
-            prev_word = is_word;
-        }
-        s
+        join_tokens(&self.t[from..to])
     }
 
     /// 선언부를 훑는다. 서브프로그램을 만나면 따라 들어간다. BEGIN 이나 (짝 없는) END 를 만나면 그 인덱스.

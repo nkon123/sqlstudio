@@ -162,7 +162,8 @@ async fn end_to_end_with_messy_small_model() {
 
     // 통합
     let (g, files) = sqls_analyze::integrate::write_all(&store, None).unwrap();
-    assert_eq!(files.len(), 5);
+    assert_eq!(files.len(), 7);
+    assert!(dir.join("integrated/statements.json").exists() && dir.join("integrated/flows.json").exists());
     let e = g.edges.iter().find(|e| e.from == "APP.ORDER_PKG.CLOSE_ORDER" && e.to == "APP.AUDIT_PKG.LOG").expect("패키지 사이 호출을 풀어야 한다");
     assert!(e.resolved);
     assert!(g.edges.iter().any(|e| e.from == "APP.ORDER_PKG.NIGHTLY" && e.to == "APP.ORDER_PKG.CLOSE_ORDER"));

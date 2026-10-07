@@ -261,3 +261,6 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .an-detail { overflow: auto; min-height: 0; }
 .analysis .ok { color: var(--ok); } .analysis .warn { color: var(--warn); } .analysis .dim { color: var(--dim); }
 .an-list td.an-state, .an-list td:nth-child(2) { white-space: nowrap; }
+.an-block h4 { margin: 8px 0 2px; font-size: 12px; color: var(--dim); }
+.an-sql { font-family: var(--mono); font-size: 11px; max-width: 420px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.an-flow { font-size: 11px; font-family: var(--mono); }

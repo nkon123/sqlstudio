@@ -54,6 +54,38 @@ pub struct TableRow {
     pub by: BTreeMap<String, String>,
     /// 이 테이블을 바꾸는(C/U/D) 노드에 닿는 시작점
     pub impacted_entries: Vec<String>,
+    /// 커서 흐름으로 이 테이블에 데이터를 대는 테이블
+    #[serde(default)]
+    pub fed_from: Vec<String>,
+    /// 이 테이블의 데이터가 커서 흐름으로 들어가는 테이블
+    #[serde(default)]
+    pub feeds_into: Vec<String>,
+}
+
+/// 커서(또는 SELECT INTO) 로 읽은 데이터가 DML 로 들어가는 흐름 — 테이블 사이의 데이터 계보
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Flow {
+    pub node: String,
+    pub unit: String,
+    pub cursor: String,
+    /// declared / implicit_loop / ref_cursor / select_into
+    pub cursor_kind: String,
+    /// 커서가 읽는 테이블 (스키마를 붙인 이름)
+    pub from: Vec<String>,
+    pub to: String,
+    pub ops: String,
+    pub line: u32,
+    /// record R / variable V / CURRENT OF / loop body
+    pub via: String,
+}
+
+/// 모든 SQL 문 (statements.json)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StmtRow {
+    pub node: String,
+    pub unit: String,
+    #[serde(flatten)]
+    pub stmt: crate::flow::SqlStmt,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +114,9 @@ pub struct Integrated {
     /// 시작점 → 닿는 곳 중 COMMIT/ROLLBACK 하는 노드
     pub transactions: BTreeMap<String, Vec<String>>,
     pub findings: Vec<Finding>,
+    /// 커서 → DML 흐름
+    #[serde(default)]
+    pub flows: Vec<Flow>,
     /// 모델로 만든 전체 요약 (요청했을 때)
     pub overview: Option<Insight>,
 }
@@ -265,6 +300,48 @@ pub fn integrate(units: &[UnitResult]) -> Integrated {
     for row in tables.values_mut() {
         let writers: BTreeSet<&String> = row.by.iter().filter(|(_, o)| o.contains(['C', 'U', 'D'])).map(|(n, _)| n).collect();
         row.impacted_entries = reach_of.iter().filter(|(_, r)| writers.iter().any(|w| r.contains(*w))).map(|(e, _)| e.clone()).collect();
+    }
+    // 커서 흐름
+    for u in units {
+        for s in &u.subprograms {
+            let node = if s.kind == crate::plsql::SubKind::Init { format!("{}.{}.(초기화)", u.owner, u.name) } else { node_id(u, &s.path) };
+            for c in &s.facts.cursors {
+                for f in &c.feeds {
+                    out.flows.push(Flow {
+                        node: node.clone(),
+                        unit: u.key.clone(),
+                        cursor: c.name.clone(),
+                        cursor_kind: c.kind.clone(),
+                        from: c.reads.iter().map(|r| qualify(&u.owner, r)).collect(),
+                        to: qualify(&u.owner, &f.table),
+                        ops: f.ops.clone(),
+                        line: f.line,
+                        via: f.via.clone(),
+                    });
+                }
+            }
+        }
+    }
+    for f in &out.flows {
+        for src in &f.from {
+            if src == &f.to {
+                continue;
+            }
+            if let Some(row) = tables.get_mut(&f.to) {
+                if !row.fed_from.contains(src) {
+                    row.fed_from.push(src.clone());
+                }
+            }
+            if let Some(row) = tables.get_mut(src) {
+                if !row.feeds_into.contains(&f.to) {
+                    row.feeds_into.push(f.to.clone());
+                }
+            }
+        }
+    }
+    for row in tables.values_mut() {
+        row.fed_from.sort();
+        row.feeds_into.sort();
     }
     out.tables = tables.into_values().collect();
 
@@ -467,6 +544,14 @@ pub fn report(g: &Integrated, units: &[UnitResult]) -> String {
     }
     s.push('\n');
 
+    if !g.flows.is_empty() {
+        s.push_str("## 커서 → DML 흐름\n\n| 서브프로그램 | 커서 | 읽는 테이블 | → 쓰는 테이블 | 줄 | 근거 |\n|---|---|---|---|---|---|\n");
+        for f in &g.flows {
+            s.push_str(&format!("| `{}` | `{}` ({}) | {} | {} {} | {} | {} |\n", f.node, f.cursor, f.cursor_kind, f.from.join(", "), f.to, f.ops, f.line, f.via));
+        }
+        s.push('\n');
+    }
+
     // 호출 그래프 (Mermaid) — 크면 읽을 수 없으므로 푼 호출만, 최대 150개
     let resolved: Vec<&Edge> = g.edges.iter().filter(|e| e.resolved && e.from != e.to).take(150).collect();
     if !resolved.is_empty() {
@@ -526,6 +611,23 @@ pub fn write_all(store: &Store, overview: Option<Insight>) -> std::io::Result<(I
     files.push(store.write_integrated("graph.json", &serde_json::json!({ "nodes": g.nodes, "edges": g.edges, "entries": g.entries, "cycles": g.cycles, "unused": g.unused, "transactions": g.transactions }))?);
     files.push(store.write_integrated("crud.json", &g.tables)?);
     files.push(store.write_integrated("findings.json", &g.findings)?);
+    files.push(store.write_integrated("flows.json", &g.flows)?);
+    let stmts: Vec<StmtRow> = units
+        .iter()
+        .flat_map(|u| {
+            let mut rows: Vec<StmtRow> = Vec::new();
+            for st in &u.globals.statements {
+                rows.push(StmtRow { node: format!("{}.{}.(전역)", u.owner, u.name), unit: u.key.clone(), stmt: st.clone() });
+            }
+            for s in &u.subprograms {
+                for st in &s.facts.statements {
+                    rows.push(StmtRow { node: node_id(u, &s.path), unit: u.key.clone(), stmt: st.clone() });
+                }
+            }
+            rows
+        })
+        .collect();
+    files.push(store.write_integrated("statements.json", &stmts)?);
     files.push(store.write_integrated("integrated.json", &g)?);
     files.push(store.write_text("integrated/report.md", &report(&g, &units))?);
     Ok((g, files))

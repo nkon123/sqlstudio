@@ -50,6 +50,12 @@ pub struct Facts {
     /// 1 + 분기 수 (IF, ELSIF, CASE WHEN, LOOP, WHEN 예외, AND/OR 는 세지 않음)
     pub complexity: u32,
     pub lines: u32,
+    /// SQL 문 하나하나 (커서 선언·커서 루프·SELECT INTO·DML·동적 SQL)
+    #[serde(default)]
+    pub statements: Vec<crate::flow::SqlStmt>,
+    /// 커서와 그 데이터가 들어가는 DML
+    #[serde(default)]
+    pub cursors: Vec<crate::flow::CursorInfo>,
 }
 
 /// 함수처럼 쓰이지만 호출 관계에 넣지 않을 것 — SQL/PLSQL 내장 함수, 형식 이름
@@ -101,7 +107,7 @@ fn builtin(w: &str) -> bool {
 }
 
 /// 식별자 사슬 a.b.c (@link) 를 읽는다. (이름, 다음 토큰 인덱스)
-fn chain(t: &[Tok], mut i: usize) -> Option<(String, usize, Option<String>)> {
+pub(crate) fn chain(t: &[Tok], mut i: usize) -> Option<(String, usize, Option<String>)> {
     let mut parts = vec![t.get(i)?.name()?];
     i += 1;
     while i + 1 < t.len() && t[i].sym(".") {
@@ -250,6 +256,11 @@ pub fn extract(t: &[Tok], locals: &HashSet<String>) -> Facts {
                     if let Some((n, _, link)) = chain(t, i + 1) {
                         acc.table(n, 'C', line, link);
                     }
+                }
+            }
+            "TRUNCATE" if t.get(i + 1).is_some_and(|x| x.is("TABLE")) => {
+                if let Some((n, _, link)) = chain(t, i + 2) {
+                    acc.table(n, 'D', line, link);
                 }
             }
             "UPDATE" if prev_w != Some("FOR") && !t.get(i + 1).is_some_and(|x| x.is("SET")) => {
@@ -562,7 +573,11 @@ pub fn merge(parts: &[&Facts]) -> Facts {
         out.swallowed.extend(p.swallowed.iter().copied());
         out.complexity += p.complexity.saturating_sub(1);
         out.lines += p.lines;
+        out.statements.extend(p.statements.iter().cloned());
+        out.cursors.extend(p.cursors.iter().cloned());
     }
+    out.statements.sort_by_key(|s| s.line);
+    out.cursors.sort_by_key(|c| c.line);
     out.complexity += 1;
     out.tables = tables
         .into_iter()
@@ -577,4 +592,36 @@ pub fn merge(parts: &[&Facts]) -> Facts {
     out.db_links = links.into_iter().collect();
     out.handles = handles.into_iter().collect();
     out
+}
+
+/// 동적 SQL(EXECUTE IMMEDIATE / OPEN FOR 문자열)에서 읽은 테이블을 테이블 목록에 넣는다
+pub fn absorb_dynamic(f: &mut Facts) {
+    let mut add: Vec<(String, char, u32)> = Vec::new();
+    for s in f.statements.iter().filter(|s| s.kind.starts_with("EXECUTE") || s.kind.ends_with("(동적)")) {
+        for w in &s.writes {
+            for o in w.ops.chars() {
+                add.push((w.name.clone(), o, s.line));
+            }
+        }
+        for r in &s.reads {
+            add.push((r.clone(), 'R', s.line));
+        }
+    }
+    for (name, op, line) in add {
+        match f.tables.iter_mut().find(|t| t.name == name) {
+            Some(t) => {
+                if !t.ops.contains(op) {
+                    let mut set: Vec<char> = t.ops.chars().chain([op]).collect();
+                    set.sort_by_key(|c| "CRUD".find(*c).unwrap_or(9));
+                    t.ops = set.into_iter().collect();
+                }
+                if !t.lines.contains(&line) {
+                    t.lines.push(line);
+                    t.lines.sort();
+                }
+            }
+            None => f.tables.push(TableUse { name, ops: op.to_string(), lines: vec![line] }),
+        }
+    }
+    f.tables.sort_by(|a, b| a.name.cmp(&b.name));
 }

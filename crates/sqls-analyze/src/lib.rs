@@ -11,6 +11,7 @@
 
 pub mod chunk;
 pub mod facts;
+pub mod flow;
 pub mod integrate;
 pub mod llm;
 pub mod plsql;

@@ -331,6 +331,15 @@ fn cmd_show(a: &Args) -> Result<(), String> {
             for (n, o) in &r.by {
                 println!("  {o:<4} {n}");
             }
+            if !r.fed_from.is_empty() {
+                println!("  데이터가 들어오는 곳 (커서 흐름): {}", r.fed_from.join(", "));
+            }
+            if !r.feeds_into.is_empty() {
+                println!("  데이터가 나가는 곳 (커서 흐름): {}", r.feeds_into.join(", "));
+            }
+            for f in g.flows.iter().filter(|f| &f.to == &r.table) {
+                println!("    {} 의 커서 {} ({}) → {} {}  {}행 [{}]", f.node, f.cursor, f.from.join(", "), f.ops, f.to, f.line, f.via);
+            }
             println!("  영향 받는 시작점 {}개:", r.impacted_entries.len());
             for e in &r.impacted_entries {
                 println!("    {e}");
@@ -355,6 +364,13 @@ fn cmd_show(a: &Args) -> Result<(), String> {
         println!("  테이블:");
         for t in g.tables.iter().filter(|t| t.by.contains_key(&node.id)) {
             println!("    {:<4} {}", t.by[&node.id], t.table);
+        }
+        let flows: Vec<_> = g.flows.iter().filter(|f| f.node == node.id).collect();
+        if !flows.is_empty() {
+            println!("  커서 → DML:");
+            for f in flows {
+                println!("    {} ({}) reads {} → {} {}  {}행 [{}]", f.cursor, f.cursor_kind, f.from.join(", "), f.ops, f.to, f.line, f.via);
+            }
         }
         return Ok(());
     }

@@ -102,7 +102,7 @@ fn facts_of_close_order() {
     let p = plan(&UnitSource { owner: "APP".into(), name: "ORDER_PKG".into(), unit_type: "PACKAGE BODY".into(), text: PKG.into() }, None, Limits::default());
     let c = p.chunks.iter().find(|c| c.subprogram.as_deref() == Some("CLOSE_ORDER")).unwrap();
     let t: Vec<(&str, &str)> = c.facts.tables.iter().map(|t| (t.name.as_str(), t.ops.as_str())).collect();
-    assert_eq!(t, vec![("DAILY_SUM", "CU"), ("ORDERS", "U"), ("ORDER_HIST", "C"), ("ORDER_TMP", "D")]);
+    assert_eq!(t, vec![("DAILY_SUM", "CU"), ("ORDERS", "U"), ("ORDER_HIST", "C"), ("ORDER_TMP", "D"), ("TMP_X", "D")], "TRUNCATE 는 동적 SQL 문자열에서");
     let calls: Vec<&str> = c.facts.calls.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(calls, vec!["AUDIT_PKG.LOG", "CALC_TOTAL"]);
     assert_eq!(c.facts.dynamic_sql.len(), 1);
@@ -212,4 +212,58 @@ fn wrapped_source_is_skipped() {
     let p = plan(&UnitSource { owner: "SYS".into(), name: "DBMS_X".into(), unit_type: "PACKAGE BODY".into(), text: src.into() }, None, Limits::default());
     assert!(p.chunks.is_empty());
     assert!(p.structure.warning.as_deref().unwrap().contains("wrap"));
+}
+
+const FLOW: &str = include_str!("../tests/data/flow_pkg.pkb");
+
+fn feeds_of(p: &crate::chunk::Plan, cursor: &str) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for c in &p.chunks {
+        for cu in c.facts.cursors.iter().filter(|x| x.name == cursor) {
+            for f in &cu.feeds {
+                out.push((f.table.clone(), f.ops.clone(), f.via.clone()));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn statements_and_cursor_flows() {
+    for lim in [Limits::default(), Limits { max_lines: 12, max_chars: 100_000 }] {
+        let p = plan(&UnitSource { owner: "APP".into(), name: "FLOW_PKG".into(), unit_type: "PACKAGE BODY".into(), text: FLOW.into() }, None, lim);
+        let all: Vec<&crate::flow::SqlStmt> = p.chunks.iter().flat_map(|c| c.facts.statements.iter()).collect();
+        let kinds: Vec<(&str, u32)> = all.iter().map(|s| (s.kind.as_str(), s.line)).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("CURSOR", 2), ("CURSOR", 7), ("CURSOR", 8), ("INSERT", 12), ("DELETE", 13), ("UPDATE", 19), ("FOR LOOP", 20), ("MERGE", 21),
+                ("SELECT INTO", 25), ("INSERT", 26), ("UPDATE", 31), ("EXECUTE IMMEDIATE", 34),
+            ],
+            "한도 {:?}", lim.max_lines
+        );
+        // 전역 커서 → 루프 변수 필드로 INSERT, 루프 안 DELETE 는 약한 연결
+        assert_eq!(feeds_of(&p, "C_OPEN"), vec![("ORDER_LOG".into(), "C".into(), "record R".into()), ("ORDER_TMP".into(), "D".into(), "loop body".into())]);
+        let c_open = p.chunks.iter().flat_map(|c| c.facts.cursors.iter()).find(|c| c.name == "C_OPEN" && !c.feeds.is_empty()).unwrap();
+        assert_eq!(c_open.reads, vec!["ORDERS"], "전역 선언에서 읽는 테이블을 가져온다");
+        // FETCH BULK COLLECT → FORALL UPDATE (조각이 나뉘어도)
+        assert_eq!(feeds_of(&p, "C_LINES"), vec![("STOCK".into(), "U".into(), "variable V_IDS".into())]);
+        // 암묵 커서 루프 → MERGE
+        assert_eq!(feeds_of(&p, "X@20"), vec![("VIP_SUM".into(), "CU".into(), "record X".into())]);
+        // SELECT INTO 변수 → INSERT
+        assert_eq!(feeds_of(&p, "SELECT@25"), vec![("DAILY".into(), "C".into(), "variable V_AMT".into())]);
+        // WHERE CURRENT OF
+        let lock = feeds_of(&p, "C_LOCK");
+        assert!(lock.contains(&("ACCOUNTS".into(), "U".into(), "CURRENT OF".into())), "{lock:?}");
+        // 동적 SQL 문자열도 읽는다
+        let dyn_ = all.iter().find(|s| s.kind == "EXECUTE IMMEDIATE").unwrap();
+        assert_eq!(dyn_.writes[0].name, "AUDIT_X");
+        let run = p.chunks.iter().filter(|c| c.subprogram.as_deref() == Some("RUN")).flat_map(|c| c.facts.tables.iter()).find(|t| t.name == "AUDIT_X");
+        assert_eq!(run.map(|t| t.ops.as_str()), Some("C"), "동적 SQL 의 테이블도 CRUD 에");
+        let merge = all.iter().find(|s| s.kind == "MERGE").unwrap();
+        assert_eq!(merge.writes[0].ops, "CU");
+        assert!(merge.text.starts_with("MERGE INTO VIP_SUM"), "{}", merge.text);
+        let lines = all.iter().find(|s| s.cursor.as_deref() == Some("C_LINES")).unwrap();
+        assert_eq!(lines.reads, vec!["ORDER_LINES", "PRODUCTS"]);
+    }
 }

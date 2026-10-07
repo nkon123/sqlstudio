@@ -16,7 +16,7 @@ use crate::chunk::{Chunk, ChunkKind};
 use crate::facts::Facts;
 
 /// 프롬프트·스키마를 바꾸면 올린다 — 저장된 결과를 다시 분석하게 된다.
-pub const PROMPT_VERSION: u32 = 1;
+pub const PROMPT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Risk {
@@ -123,6 +123,15 @@ fn facts_text(f: &Facts) -> String {
     if !f.dynamic_sql.is_empty() {
         let c: Vec<String> = f.dynamic_sql.iter().map(|m| format!("{}@{}", m.what, m.line)).collect();
         s.push_str(&format!("- dynamic SQL: {}\n", c.join(", ")));
+    }
+    for c in &f.cursors {
+        let feeds: Vec<String> = c.feeds.iter().map(|x| format!("{}({})@{}", x.table, x.ops, x.line)).collect();
+        s.push_str(&format!(
+            "- cursor {} reads {}{}\n",
+            c.name,
+            if c.reads.is_empty() { "?".to_string() } else { c.reads.join(", ") },
+            if feeds.is_empty() { String::new() } else { format!(" -> feeds {}", feeds.join(", ")) }
+        ));
     }
     if !f.swallowed.is_empty() {
         s.push_str(&format!("- exception handlers that do nothing at lines: {:?}\n", f.swallowed));

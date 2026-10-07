@@ -26,6 +26,14 @@ const TABLES: &[&str] = &[
     "stats_0(k number, runs number)",
     "stats_1(k number, runs number)",
     "stats_2(k number, runs number)",
+    "order_log(id number, amt number)",
+    "order_tmp(ts date)",
+    "stock(id number, qty number)",
+    "customers(id number, name varchar2(30), vip char(1))",
+    "vip_sum(id number, cnt number)",
+    "daily(dt date, amt number)",
+    "accounts(id number, checked char(1))",
+    "audit_x(a number)",
 ];
 
 #[tokio::test]
@@ -44,14 +52,20 @@ async fn analyze_from_dictionary() {
     .unwrap();
     s.execute(&format!("CREATE OR REPLACE {}", include_str!("data/order_pkg.pks")), ExecOptions::default()).await.unwrap();
     s.execute(&format!("CREATE OR REPLACE {}", include_str!("data/order_pkg.pkb")), ExecOptions::default()).await.unwrap();
+    s.execute("CREATE OR REPLACE PACKAGE flow_pkg IS PROCEDURE run; END;", ExecOptions::default()).await.unwrap();
+    s.execute(&format!("CREATE OR REPLACE {}", include_str!("data/flow_pkg.pkb")), ExecOptions::default()).await.unwrap();
     s.execute("CREATE OR REPLACE PROCEDURE run_nightly AS BEGIN order_pkg.nightly; END;", ExecOptions::default()).await.unwrap();
 
     let owner = s.info().user.clone();
     let mut refs = source::list_units(&s, &owner, &[], Some("%ORDER_PKG%")).await.unwrap();
     refs.extend(source::list_units(&s, &owner, &[], Some("AUDIT_PKG")).await.unwrap());
     refs.extend(source::list_units(&s, &owner, &["PROCEDURE".into()], Some("RUN_NIGHTLY")).await.unwrap());
+    refs.extend(source::list_units(&s, &owner, &[], Some("FLOW_PKG")).await.unwrap());
     let types: Vec<&str> = refs.iter().map(|r| r.unit_type.as_str()).collect();
-    assert_eq!(types, vec!["PACKAGE BODY", "PACKAGE BODY", "PROCEDURE"], "{refs:?}");
+    assert_eq!(types, vec!["PACKAGE BODY", "PACKAGE BODY", "PROCEDURE", "PACKAGE BODY"], "{refs:?}");
+    // 컴파일 오류 없이 들어갔는지 (테스트 소스가 진짜 PL/SQL 인지)
+    let errs = s.query("SELECT COUNT(*) FROM user_errors WHERE name IN ('FLOW_PKG', 'ORDER_PKG')", vec![], 1).await.unwrap();
+    assert_eq!(errs.rows[0][0].as_deref(), Some("0"));
 
     let dir = std::env::temp_dir().join(format!("sqls-analyze-live-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -74,6 +88,14 @@ async fn analyze_from_dictionary() {
     assert!(!g.entries.contains(&id("ORDER_PKG.NIGHTLY")), "RUN_NIGHTLY 가 부르므로 시작점이 아니다");
     let orders = g.tables.iter().find(|t| t.table == id("ORDERS")).unwrap();
     assert_eq!(orders.impacted_entries, vec![id("RUN_NIGHTLY")]);
+    // 커서 흐름: ORDERS → ORDER_LOG (전역 커서 C_OPEN), CUSTOMERS → VIP_SUM, ORDER_LINES → STOCK
+    let has = |cur: &str, from: &str, to: &str, via: &str| g.flows.iter().any(|f| f.cursor == cur && f.from.contains(&id(from)) && f.to == id(to) && f.via == via);
+    assert!(has("C_OPEN", "ORDERS", "ORDER_LOG", "record R"), "{:#?}", g.flows);
+    assert!(has("C_LINES", "ORDER_LINES", "STOCK", "variable V_IDS"));
+    assert!(has("X@20", "CUSTOMERS", "VIP_SUM", "record X"));
+    assert!(has("C_LOCK", "ACCOUNTS", "ACCOUNTS", "CURRENT OF"));
+    let order_log = g.tables.iter().find(|t| t.table == id("ORDER_LOG")).unwrap();
+    assert_eq!(order_log.fed_from, vec![id("ORDERS")]);
     s.close();
     std::fs::remove_dir_all(&dir).unwrap();
 }

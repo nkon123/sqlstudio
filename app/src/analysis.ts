@@ -19,9 +19,14 @@ interface Insight { summary: string; steps: string[]; rules: string[]; risks: Ri
 interface TableUse { name: string; ops: string; lines: number[] }
 interface CallUse { name: string; lines: number[] }
 interface Mark { line: number; what: string }
+interface Feed { cursor: string; via: string }
+interface SqlStmt { line: number; end_line: number; kind: string; cursor?: string | null; writes: TableUse[]; reads: string[]; into?: string[]; fed_by?: Feed[]; text: string }
+interface CursorFeed { table: string; ops: string; line: number; via: string }
+interface CursorInfo { name: string; kind: string; line: number; reads: string[]; used_at: number[]; feeds: CursorFeed[] }
 interface Facts {
   tables: TableUse[]; calls: CallUse[]; sequences: string[]; dynamic_sql: Mark[]; transactions: Mark[];
   raises: Mark[]; handles: string[]; swallowed: number[]; complexity: number; lines: number;
+  statements?: SqlStmt[]; cursors?: CursorInfo[];
 }
 interface SubResult {
   path: string; name: string; overload: number; kind: string; signature: string; start_line: number; end_line: number;
@@ -36,11 +41,12 @@ interface Chunk { id: string; part: number; parts: number; start_line: number; e
 interface ChunkResult { chunk: Chunk; insight?: Insight | null; error?: string | null; raw?: string | null; llm?: { model: string; elapsed_ms: number; attempts: number; repaired?: string[] } | null }
 interface Node { id: string; unit: string; path: string; kind: string; signature: string; start_line: number; end_line: number; public?: boolean | null; summary?: string | null; complexity: number; commits: boolean }
 interface Edge { from: string; to: string; resolved: boolean; external?: string | null; lines: number[] }
-interface TableRow { table: string; by: Record<string, string>; impacted_entries: string[] }
+interface TableRow { table: string; by: Record<string, string>; impacted_entries: string[]; fed_from?: string[]; feeds_into?: string[] }
+interface Flow { node: string; unit: string; cursor: string; cursor_kind: string; from: string[]; to: string; ops: string; line: number; via: string }
 interface Finding { node: string; unit: string; line?: number | null; source: string; kind: string; message: string }
 interface Integrated {
   units: number; nodes: Node[]; edges: Edge[]; tables: TableRow[]; entries: string[]; cycles: string[][];
-  unused: string[]; transactions: Record<string, string[]>; findings: Finding[]; overview?: Insight | null;
+  unused: string[]; transactions: Record<string, string[]>; findings: Finding[]; flows?: Flow[]; overview?: Insight | null;
 }
 type Progress =
   | { type: "event"; run: number; event: { type: string; key?: string; id?: string; done?: number; total?: number; status?: string; elapsed_ms?: number; message?: string | null; what?: string } }
@@ -347,6 +353,8 @@ export class AnalysisView {
         h("div", { class: "an-sig" }, s.signature),
         s.summary ? insightEl(s.summary) : "",
         factsEl(s.facts),
+        cursorsEl(s.facts.cursors ?? []),
+        stmtsEl(s.facts.statements ?? []),
         ...chunks.map((c) => chunkEl(c)));
       box.append(det);
     }
@@ -400,6 +408,10 @@ export class AnalysisView {
         h("small", { class: "dim" }, ` ${e.lines.join(", ")}행`)))));
     box.append(h("h4", {}, `테이블 ${tables.length}`),
       h("ul", { class: "an-ul" }, ...tables.map((t) => h("li", {}, h("code", {}, t.by[id]), " ", t.table))));
+    const flows = (g.flows ?? []).filter((f) => f.node === id);
+    if (flows.length) box.append(h("h4", {}, `커서 → DML ${flows.length}`),
+      h("ul", { class: "an-ul" }, ...flows.map((f) => h("li", {}, h("code", {}, f.cursor), ` (${f.from.join(", ") || "?"}) → `, h("code", {}, f.ops), ` ${f.to} `,
+        h("small", { class: "dim" }, `${f.line}행 · ${viaLabel(f.via)}`)))));
     const tx = g.transactions[id];
     if (tx) box.append(h("h4", {}, "이 시작점에서 닿는 COMMIT/ROLLBACK"), h("ul", { class: "an-ul" }, ...tx.map((x) => h("li", {}, this.nodeLink(x)))));
     return box;
@@ -418,13 +430,14 @@ export class AnalysisView {
         const users = h("td", {}, ...Object.entries(t.by).map(([n, o]) => h("div", {}, h("code", {}, o.padEnd(4)), " ", n.endsWith("(전역)") ? short(n) : this.nodeLink(n))));
         return h("tr", {}, h("td", {}, h("strong", {}, t.table)), h("td", { class: "num" }, String(ops("C") || "")), h("td", { class: "num" }, String(ops("R") || "")),
           h("td", { class: "num" }, String(ops("U") || "")), h("td", { class: "num" }, String(ops("D") || "")), users,
+          h("td", { class: "an-flow" }, ...(t.fed_from ?? []).map((x) => h("div", { title: flowsTo(g, t.table, x) }, `← ${x}`)), ...(t.feeds_into ?? []).map((x) => h("div", { class: "dim" }, `→ ${x}`))),
           h("td", { title: t.impacted_entries.join("\n") }, String(t.impacted_entries.length)));
       }));
     };
     input.oninput = fill;
     fill();
     this.content.replaceChildren(h("div", { class: "an-pad" }, input,
-      h("table", { class: "an-table" }, h("thead", {}, h("tr", {}, ...["테이블", "C", "R", "U", "D", "쓰는 곳", "영향 시작점"].map((x) => h("th", {}, x)))), tbody)));
+      h("table", { class: "an-table" }, h("thead", {}, h("tr", {}, ...["테이블", "C", "R", "U", "D", "쓰는 곳", "커서 흐름", "영향 시작점"].map((x) => h("th", {}, x)))), tbody)));
   }
 
   private renderFindings(g: Integrated) {
@@ -441,6 +454,44 @@ export class AnalysisView {
     this.content.replaceChildren(h("div", { class: "an-pad" }, sel,
       h("table", { class: "an-table" }, h("thead", {}, h("tr", {}, ...["어디", "줄", "종류", "내용"].map((x) => h("th", {}, x)))), tbody)));
   }
+}
+
+const VIA: Record<string, string> = { "CURRENT OF": "WHERE CURRENT OF", "loop body": "루프 안 (변수를 직접 쓰지 않음)" };
+function viaLabel(v: string) {
+  if (v.startsWith("record ")) return `루프 변수 ${v.slice(7)}.컬럼`;
+  if (v.startsWith("variable ")) return `받은 변수 ${v.slice(9)}`;
+  return VIA[v] ?? v;
+}
+const CURSOR_KIND: Record<string, string> = { declared: "선언", implicit_loop: "FOR (SELECT)", ref_cursor: "OPEN FOR", select_into: "SELECT INTO" };
+
+function flowsTo(g: Integrated, to: string, from: string) {
+  return (g.flows ?? []).filter((f) => f.to === to && f.from.includes(from)).map((f) => `${f.node} · ${f.cursor} · ${f.line}행 · ${viaLabel(f.via)}`).join("\n");
+}
+
+function cursorsEl(cs: CursorInfo[]): HTMLElement | string {
+  if (!cs.length) return "";
+  return h("div", { class: "an-block" }, h("h4", {}, `커서 ${cs.length}`),
+    h("table", { class: "an-table" },
+      h("thead", {}, h("tr", {}, ...["커서", "종류", "줄", "읽는 테이블", "→ DML (테이블 연산 줄 · 근거)"].map((x) => h("th", {}, x)))),
+      h("tbody", {}, ...cs.map((c) => h("tr", {},
+        h("td", {}, h("code", {}, c.name)), h("td", { class: "dim" }, CURSOR_KIND[c.kind] ?? c.kind),
+        h("td", { class: "num", title: c.line ? "" : "패키지 전역이나 바깥 서브프로그램에 선언됨" }, c.line ? String(c.line) : "전역"),
+        h("td", {}, c.reads.join(", ") || "?"),
+        h("td", {}, ...(c.feeds.length ? c.feeds.map((f) => h("div", {}, h("code", {}, f.ops), ` ${f.table} `, h("small", { class: "dim" }, `${f.line}행 · ${viaLabel(f.via)}`))) : [h("span", { class: "dim" }, "—")])))))));
+}
+
+function stmtsEl(ss: SqlStmt[]): HTMLElement | string {
+  if (!ss.length) return "";
+  return h("details", { class: "an-chunk" }, h("summary", {}, `SQL 문 ${ss.length}`),
+    h("table", { class: "an-table" },
+      h("thead", {}, h("tr", {}, ...["줄", "종류", "읽기", "쓰기", "데이터를 대는 커서", "SQL"].map((x) => h("th", {}, x)))),
+      h("tbody", {}, ...ss.map((x) => h("tr", {},
+        h("td", { class: "num" }, x.end_line > x.line ? `${x.line}~${x.end_line}` : String(x.line)),
+        h("td", {}, x.kind, x.cursor ? h("div", {}, h("code", {}, x.cursor)) : ""),
+        h("td", {}, x.reads.join(", ")),
+        h("td", {}, x.writes.map((w) => `${w.name} ${w.ops}`).join(", ")),
+        h("td", {}, ...(x.fed_by ?? []).map((f) => h("div", {}, h("code", {}, f.cursor), h("small", { class: "dim" }, ` ${viaLabel(f.via)}`)))),
+        h("td", { class: "an-sql", title: x.text }, x.text))))));
 }
 
 function stat(label: string, n: number) {

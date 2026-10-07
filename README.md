@@ -174,7 +174,7 @@ set SQLSTUDIO_PW_ERP-DEV=...
 sqlstudio-analyze run --connection ERP-DEV --schema ERP --llm "로컬 (Ollama)"
 sqlstudio-analyze run --files D:\src\plsql --owner ERP --static --out D:\analysis\erp   & rem 파일에서, 모델 없이
 sqlstudio-analyze integrate --connection ERP-DEV                                         & rem 통합만 다시
-sqlstudio-analyze show --connection ERP-DEV --table ERP.ORDERS                           & rem 누가 쓰나 + 영향 시작점
+sqlstudio-analyze show --connection ERP-DEV --table ERP.ORDERS                           & rem 누가 쓰나, 커서 흐름, 영향 시작점
 sqlstudio-analyze show --connection ERP-DEV --node ERP.ORDER_PKG.CLOSE_ORDER             & rem 부르는 곳/것
 ```
 
@@ -182,10 +182,15 @@ sqlstudio-analyze show --connection ERP-DEV --node ERP.ORDER_PKG.CLOSE_ORDER    
 |---|---|---|
 | 조각 | 서브프로그램 하나 = 조각 하나. 한도(기본 120줄·6000자)를 넘으면 **문장 경계**에서 자른다 (IF/LOOP 중간에서 자르지 않는다). 중첩 서브프로그램은 따로. 2부부터는 시그니처·선언부를 문맥으로 붙인다. 패키지 명세의 주석도 붙인다 | — |
 | 정적 사실 | 테이블별 C/R/U/D, 호출, 시퀀스, 동적 SQL, COMMIT/ROLLBACK, 자율 트랜잭션, RAISE, 예외 삼킴(`WHEN … THEN NULL`), DB 링크, 복잡도 | **쓰지 않는다** |
+| SQL 문·커서 | **SQL 문마다** 한 건 (커서 선언, `FOR r IN (SELECT…)`, `OPEN c FOR`, `SELECT INTO`, INSERT/UPDATE/DELETE/MERGE, `EXECUTE IMMEDIATE` 문자열): 읽는 테이블·쓰는 테이블·INTO 변수·본문. **커서마다** 한 건: 읽는 테이블과 **그 데이터가 들어가는 DML** (테이블·연산·줄·근거) | **쓰지 않는다** |
 | 조각 분석 | 요약 · 단계 · 업무 규칙 · 위험(줄 번호). 정적 사실을 프롬프트에 넣어 "찾지 말고 의미를 말하라" 고 한다 | 조각마다 1번 |
 | 요약 | 여러 조각으로 나뉜 서브프로그램 → 하나로, 서브프로그램들 → 단위 요약 (크면 묶음으로 나눠 줄인다) | 조금 |
 | 통합 | 호출 이름을 서브프로그램으로 풀기(같은 패키지 → 같은 스키마 → 다른 스키마), 호출 그래프, CRUD 행렬, 시작점, 순환 호출, 안 쓰이는 비공개 서브프로그램, 시작점별 COMMIT 위치, 테이블 → 영향 받는 시작점, 확인할 것 목록 | **쓰지 않는다** (전체 요약만 선택) |
 
+- 커서 → DML 연결의 근거: 루프 변수 필드(`FOR r IN c … INSERT … VALUES (r.id)`), FETCH/SELECT INTO 로 받은 변수
+  (`FETCH c BULK COLLECT INTO v_ids` → `FORALL … UPDATE … v_ids(i)`), `WHERE CURRENT OF c`, 커서 루프 안의 DML(약한 연결,
+  "루프 안"으로 따로 표시). 서브프로그램 전체를 한 번에 보므로 FETCH 와 INSERT 가 다른 조각에 있어도 이어진다.
+  패키지 전역 커서도 이름으로 찾아 읽는 테이블을 붙인다. 통합하면 테이블마다 "데이터가 들어오는 곳 / 나가는 곳" 이 생긴다.
 - **호출 관계와 CRUD 는 모델 답이 아니라 소스에서 뽑은 것**이다. 작은 모델이 테이블 이름을 지어내도 그래프는 틀리지 않는다.
   모델 없이(`--static`, 화면의 "모델 없이") 돌려도 통합 분석은 다 나온다.
 - 작은 모델 대비: 답 모양을 JSON 스키마로 묶고(Ollama `format`), 코드 펜스·끝 쉼표·잘린 답은 고쳐 읽고,
@@ -202,7 +207,8 @@ sqlstudio-analyze show --connection ERP-DEV --node ERP.ORDER_PKG.CLOSE_ORDER    
 ```
 units/ERP.ORDER_PKG.PACKAGE_BODY/unit.json             구조, 서브프로그램별 사실·요약, 단위 요약
 units/ERP.ORDER_PKG.PACKAGE_BODY/chunks/004-CLOSE_ORDER.json   조각: 코드(줄 번호), 정적 사실, 모델 답, 호출 기록
-integrated/graph.json  crud.json  findings.json  integrated.json  report.md (Mermaid 호출 그래프 포함)
+integrated/graph.json  crud.json  flows.json(커서 → DML)  statements.json(모든 SQL 문)  findings.json  integrated.json
+integrated/report.md   (Mermaid 호출 그래프, 커서 → DML 흐름 표 포함)
 ```
 
 조각 JSON 하나 (줄임):
@@ -211,7 +217,12 @@ integrated/graph.json  crud.json  findings.json  integrated.json  report.md (Mer
 {
   "chunk": { "id": "004-CLOSE_ORDER", "start_line": 20, "end_line": 45, "signature": "PROCEDURE CLOSE_ORDER(P_ID NUMBER)",
              "facts": { "tables": [{ "name": "ORDERS", "ops": "U", "lines": [27] }], "calls": [{ "name": "AUDIT_PKG.LOG", "lines": [25] }],
-                        "transactions": [{ "line": 33, "what": "COMMIT" }], "swallowed": [41] } },
+                        "transactions": [{ "line": 33, "what": "COMMIT" }], "swallowed": [41],
+                        "cursors": [{ "name": "C_OPEN", "kind": "declared", "reads": ["ORDERS"],
+                                      "feeds": [{ "table": "ORDER_LOG", "ops": "C", "line": 12, "via": "record R" }] }],
+                        "statements": [{ "line": 12, "kind": "INSERT", "writes": [{ "name": "ORDER_LOG", "ops": "C" }],
+                                         "fed_by": [{ "cursor": "C_OPEN", "via": "record R" }],
+                                         "text": "INSERT INTO ORDER_LOG(ID, AMT) VALUES(R.ID, R.AMOUNT)" }] } },
   "insight": { "summary": "주문을 마감하고 이력을 남긴다", "steps": ["합계 계산", "상태 변경"],
                "rules": ["합계 1000 초과면 감사 로그"], "risks": [{ "line": 41, "issue": "NO_DATA_FOUND 를 삼킨다" }] },
   "llm": { "model": "qwen2.5-coder:7b", "elapsed_ms": 8400, "attempts": 1, "repaired": ["JSON 앞뒤 글 제거"] }

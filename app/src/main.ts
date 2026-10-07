@@ -45,6 +45,14 @@ class Tab {
   runStarted = 0;
   lastError: string | undefined;
   private editorParts: HTMLElement[] = [];
+  /** 마지막으로 결과를 띄운 조회 (편집할 때 ROWID 를 붙여 다시 돈다) */
+  lastQuery: { sql: string; binds: [string, string | null][] } | null = null;
+  editTable: string | null = null;
+  readonly filterIn = h("input", { class: "grid-filter", placeholder: "거르기: 값 · 열=값 · 열~포함 · 열>값 (AND 로 여럿)" });
+  readonly editBtn = h("button", { class: "small", title: "단일 테이블 조회 결과를 고친다 (ROWID 로 다시 조회)" }, "편집");
+  readonly applyBtn = h("button", { class: "small primary", hidden: true }, "적용");
+  readonly discardBtn = h("button", { class: "small", hidden: true, title: "고친 것을 버린다" }, "되돌리기");
+  readonly delRowBtn = h("button", { class: "small", hidden: true, title: "선택한 행을 지울 행으로 표시 (다시 누르면 풀림, Delete 키)" }, "행 삭제");
   private dbg: DebugView | null = null;
   private an: AnalysisView | null = null;
   private mon: MonitorView | null = null;
@@ -97,7 +105,22 @@ class Tab {
     this.grid = new ResultGrid({
       onNeedMore: async () => (this.conn ? api.fetchMore(this.conn.id, 1000) : null),
       onStatus: (t) => { this.gridStatus.textContent = t; },
+      onDirty: (n) => {
+        this.applyBtn.textContent = n ? `적용 (${n})` : "적용";
+        this.applyBtn.disabled = !n;
+        this.discardBtn.disabled = !n;
+      },
     });
+    let ft = 0;
+    this.filterIn.addEventListener("input", () => {
+      clearTimeout(ft);
+      ft = window.setTimeout(() => this.grid.setFilter(this.filterIn.value), 150);
+    });
+    this.filterIn.addEventListener("keydown", (e) => { if (e.key === "Escape") { this.filterIn.value = ""; this.grid.setFilter(""); } });
+    this.editBtn.onclick = () => app.toggleGridEdit(this);
+    this.applyBtn.onclick = () => app.applyGridEdit(this);
+    this.discardBtn.onclick = () => this.grid.discardChanges();
+    this.delRowBtn.onclick = () => this.grid.toggleDeleteSelected();
     const gridPane = h("div", { class: "pane result" }, this.grid.el);
     this.panes.set("result", gridPane).set("output", this.output).set("plan", this.plan).set("desc", this.desc);
     const btn = (p: Pane, label: string) => {
@@ -107,6 +130,7 @@ class Tab {
     };
     const bottom = h("section", { class: "bottom" },
       h("nav", { class: "pane-tabs" }, btn("result", "결과"), btn("output", "출력"), btn("plan", "실행계획"), btn("desc", "구조"),
+        this.filterIn, this.editBtn, this.delRowBtn, this.applyBtn, this.discardBtn,
         h("span", { class: "spacer" }), this.gridStatus,
         h("button", { class: "small", title: "가져온 행을 CSV 로 복사", onclick: () => this.copyCsv() }, "CSV 복사")),
       gridPane, this.output, this.plan, this.desc);
@@ -435,6 +459,10 @@ class App {
     await this.running(t, async () => {
       try {
         const r = await api.execute(t.conn!.id, stmt.text, binds, confirmed);
+        if (r.outcome.type === "rows") {
+          t.lastQuery = { sql: stmt.text, binds };
+          this.endGridEdit(t);
+        }
         this.showResult(t, r);
       } catch (e) {
         this.showError(t, errOf(e), stmt.text, from);
@@ -565,6 +593,78 @@ class App {
   }
 
   /** 실행 중 표시 + 오래 걸리면 중지/버리기 안내 */
+  // ── 결과 편집 ─────────────────────────────────────
+
+  endGridEdit(t: Tab) {
+    t.editTable = null;
+    t.editBtn.textContent = "편집";
+    t.editBtn.classList.remove("editing");
+    t.applyBtn.hidden = true;
+    t.discardBtn.hidden = true;
+    t.delRowBtn.hidden = true;
+  }
+
+  async toggleGridEdit(t: Tab) {
+    if (!t.conn) return toast("먼저 접속하세요", "error");
+    if (t.editTable) {
+      if (t.grid.changeCount() && !(await confirmBox("편집 끝내기", "적용하지 않은 변경을 버릴까요?", "버리기"))) return;
+      t.grid.setEditable(null);
+      this.endGridEdit(t);
+      return;
+    }
+    if (!t.lastQuery) return toast("먼저 테이블을 조회하세요 (SELECT … FROM 테이블)", "error");
+    if (t.running) return;
+    try {
+      const e = await api.gridEditable(t.conn.id, t.lastQuery.sql);
+      await this.running(t, async () => {
+        const r = await api.execute(t.conn!.id, e.sql, t.lastQuery!.binds, false);
+        if (r.outcome.type !== "rows") throw new Error("조회 결과가 없습니다");
+        t.grid.setPage(r.outcome);
+        const cols = r.outcome.columns;
+        const rowidCol = cols.findIndex((c) => c.name === "SQLS_ROWID");
+        const names = new Set(e.columns.map((c) => c.toUpperCase()));
+        const bad = /LOB|^LONG|^RAW|^BFILE|ROWID|XMLTYPE|INTERVAL/i;
+        const editable = new Set(cols.map((c, i) => (i !== rowidCol && names.has(c.name.toUpperCase()) && !bad.test(c.type_name) ? i : -1)).filter((i) => i >= 0));
+        t.grid.setEditable({ rowidCol, editable });
+        t.editTable = e.table;
+        t.editBtn.textContent = "편집 끝";
+        t.editBtn.classList.add("editing");
+        t.applyBtn.hidden = false;
+        t.discardBtn.hidden = false;
+        t.delRowBtn.hidden = false;
+        t.applyBtn.disabled = true;
+        t.discardBtn.disabled = true;
+        t.show("result");
+        t.log(`${e.table} 편집 — 셀 더블클릭(또는 F2)으로 고치고, Delete 로 행 삭제 표시, '적용' 으로 문장 확인 후 실행. 커밋은 따로.`, "dim");
+      });
+    } catch (err) {
+      toast(errOf(err).message, "error");
+    }
+  }
+
+  async applyGridEdit(t: Tab) {
+    if (!t.conn || !t.editTable) return;
+    const ch = t.grid.changes();
+    if (!ch.edits.length && !ch.deletes.length) return;
+    try {
+      const plan = await api.gridApply(t.conn.id, t.editTable, ch, true);
+      const list = plan.done.map(([s]) => s);
+      const shown = list.slice(0, 30).join(";\n") + (list.length > 30 ? `;\n… 외 ${list.length - 30}개` : ";");
+      if (!(await confirmBox(`변경 ${list.length}건 실행`, `${shown}\n\n실행한 뒤 커밋해야 저장됩니다 (롤백으로 되돌릴 수 있습니다).`, "실행", false))) return;
+      const r = await api.gridApply(t.conn.id, t.editTable, ch, false);
+      t.txnPending = r.txn_pending;
+      for (const [s, n] of r.done) t.log(`${s} — ${n}행`, "ok");
+      t.log(`${r.done.length}건 적용 — 커밋 전입니다`, "warn");
+      t.grid.commitChanges();
+      toast(`${r.done.length}건 적용 — 커밋하면 저장됩니다`, "ok");
+    } catch (err) {
+      t.txnPending = true;
+      t.log(errOf(err).message, "err");
+      toast(errOf(err).message, "error", 8000);
+    }
+    this.refresh();
+  }
+
   private async running(t: Tab, f: () => Promise<void>) {
     t.running = true;
     t.runStarted = performance.now();

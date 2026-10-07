@@ -12,6 +12,7 @@
 pub mod complete;
 pub mod config;
 pub mod debug;
+pub mod edit;
 pub mod error;
 pub mod meta;
 pub mod monitor;

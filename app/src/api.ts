@@ -74,6 +74,9 @@ export const api = {
   connect: (profile: string, password?: string, remember?: boolean) => invoke<Connected>("connect", { profile, password, remember }),
   forgetPassword: (profile: string) => invoke<void>("forget_password", { profile }),
   disconnect: (id: number) => invoke<void>("disconnect", { id }),
+  gridEditable: (id: number, sql: string) => invoke<{ sql: string; table: string; columns: string[] }>("grid_editable", { id, sql }),
+  gridApply: (id: number, table: string, changes: { edits: unknown[]; deletes: string[] }, dryRun: boolean) =>
+    invoke<{ done: [string, number][]; txn_pending: boolean }>("grid_apply", { id, table, edits: changes.edits, deletes: changes.deletes, dryRun }),
   execute: (id: number, sql: string, binds: [string, string | null][], confirmed: boolean, pageSize?: number) =>
     invoke<ExecView>("execute", { args: { id, sql, binds, confirmed, page_size: pageSize } }),
   executeScript: (id: number, script: string, stopOnError: boolean, confirmed: boolean, onEvent: (e: ScriptEvent) => void) => {

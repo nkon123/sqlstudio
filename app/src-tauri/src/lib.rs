@@ -71,6 +71,8 @@ pub fn run() {
             analyze::analysis_dir,
             analyze::analysis_eval,
             db::forget_password,
+            db::grid_editable,
+            db::grid_apply,
             monitor::monitor_snapshot,
             monitor::monitor_detail,
             monitor::monitor_kill,

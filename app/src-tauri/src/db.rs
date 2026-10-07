@@ -452,3 +452,81 @@ pub fn forget_password(st: State<'_, AppState>, profile: String) {
     sqls_core::secret::delete(&sqls_core::secret::db_account(&profile));
     st.passwords.write().unwrap().remove(&profile.to_uppercase());
 }
+
+// ─────────────────────────────────────────────────────────────
+// 결과 그리드 편집
+// ─────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct EditableView {
+    /// ROWID 를 붙인 SELECT — 화면이 이것으로 다시 조회한다
+    sql: String,
+    table: String,
+    /// 테이블에 실제로 있는 열 (식·별칭 열은 편집하지 못한다)
+    columns: Vec<String>,
+}
+
+fn require_writable(st: &AppState, id: u64) -> R<()> {
+    let profile = st.sessions.lock().unwrap().get(&id).map(|s| s.profile.clone()).unwrap_or_default();
+    let ro = st.cfg.read().unwrap().profile(&profile).map(|p| p.read_only).unwrap_or(true);
+    if ro {
+        return Err(ErrView::msg("read_only", "읽기 전용 프로필에서는 결과를 편집할 수 없습니다"));
+    }
+    Ok(())
+}
+
+/// 이 SELECT 를 편집할 수 있는지 — 되면 ROWID 를 붙인 문장과 테이블의 열
+#[tauri::command]
+pub async fn grid_editable(st: State<'_, AppState>, id: u64, sql: String) -> R<EditableView> {
+    require_writable(&st, id)?;
+    let e = sqls_core::edit::editable(&sql).map_err(|m| ErrView::msg("invalid", m))?;
+    let (s, _, _) = st.session(id)?;
+    let d = sqls_core::meta::describe(&s, &e.table).await?;
+    if d.object_type != "TABLE" {
+        return Err(ErrView::msg("invalid", format!("{} 는 {} 입니다 — 테이블만 편집할 수 있습니다", e.table, d.object_type)));
+    }
+    Ok(EditableView { sql: e.sql, table: format!("{}.{}", d.owner, d.name), columns: d.columns.into_iter().map(|c| c.name).collect() })
+}
+
+#[derive(Serialize)]
+pub struct ApplyView {
+    /// 문장마다 (읽기용 문장, 바뀐 행 수)
+    done: Vec<(String, u64)>,
+    txn_pending: bool,
+}
+
+/// 편집 적용. `dry_run` 이면 문장만 만들어 돌려준다 (화면이 보여 주고 확인을 받는다).
+/// 한 문장이라도 1행이 아닌 행을 바꾸면 거기서 멈춘다 (다른 사람이 그 행을 바꿨거나 지웠다).
+#[tauri::command]
+pub async fn grid_apply(
+    st: State<'_, AppState>,
+    id: u64,
+    table: String,
+    edits: Vec<sqls_core::edit::RowEdit>,
+    deletes: Vec<String>,
+    dry_run: bool,
+) -> R<ApplyView> {
+    require_writable(&st, id)?;
+    let changes = sqls_core::edit::changes(&table, &edits, &deletes).map_err(|m| ErrView::msg("invalid", m))?;
+    let (s, txn, _) = st.session(id)?;
+    if dry_run {
+        return Ok(ApplyView { done: changes.into_iter().map(|c| (c.preview, 0)).collect(), txn_pending: txn.load(Ordering::Relaxed) });
+    }
+    let mut done = Vec::new();
+    for c in changes {
+        let r = s.execute(&c.sql, opts(None, c.binds.clone())).await?;
+        let n = match r.outcome {
+            ExecOutcome::Affected { rows } => rows,
+            _ => 0,
+        };
+        txn.store(true, Ordering::Relaxed);
+        if n != 1 {
+            return Err(ErrView::msg(
+                "invalid",
+                format!("{}\n→ {n}행이 바뀌었습니다 (1행이어야 합니다). 다른 세션이 그 행을 바꿨거나 지웠을 수 있습니다. 앞의 변경은 커밋 전이니 롤백할 수 있습니다.", c.preview),
+            ));
+        }
+        done.push((c.preview, n));
+    }
+    Ok(ApplyView { done, txn_pending: txn.load(Ordering::Relaxed) })
+}

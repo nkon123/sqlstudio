@@ -73,6 +73,19 @@ pub struct Statement {
 // 렉서 — 주석·문자열을 건너뛰며 "코드" 영역만 알려 준다.
 // ─────────────────────────────────────────────────────────────
 
+/// 주석·문자열·따옴표 식별자를 공백으로 바꾼 사본 (낱말 판정용)
+pub fn code_only(src: &str, out: &mut String) {
+    let mut last = 0usize;
+    scan_code(src, |i, c| {
+        if i > last {
+            out.extend(std::iter::repeat_n(' ', 1));
+        }
+        out.push(c);
+        last = i + c.len_utf8();
+        true
+    });
+}
+
 /// 바이트 단위로 훑으며 코드 영역의 문자만 콜백에 넘긴다.
 /// 주석·문자열·따옴표 식별자 안은 건너뛴다. 콜백은 (바이트 위치, 문자) 를 받는다.
 fn scan_code(src: &str, mut on_code: impl FnMut(usize, char) -> bool) {

@@ -36,6 +36,8 @@ pub struct ProfileView {
     profile: Profile,
     /// 환경변수에 비밀번호가 있어 묻지 않고 붙을 수 있는지
     has_env_password: bool,
+    /// OS 자격 증명 저장소에 비밀번호가 있는지
+    has_saved_password: bool,
 }
 
 #[tauri::command]
@@ -45,7 +47,11 @@ pub fn list_profiles(st: State<'_, AppState>) -> Vec<ProfileView> {
         .unwrap()
         .connections
         .iter()
-        .map(|p| ProfileView { has_env_password: p.password_from_env().is_some(), profile: p.clone() })
+        .map(|p| ProfileView {
+            has_env_password: p.password_from_env().is_some(),
+            has_saved_password: sqls_core::secret::get(&sqls_core::secret::db_account(&p.name)).is_some(),
+            profile: p.clone(),
+        })
         .collect()
 }
 
@@ -94,6 +100,8 @@ pub async fn connect(
     app: tauri::AppHandle,
     profile: String,
     password: Option<String>,
+    // 입력한 비밀번호를 OS 자격 증명 저장소에 둘지
+    remember: Option<bool>,
 ) -> R<Connected> {
     let p = st
         .cfg
@@ -107,19 +115,29 @@ pub async fn connect(
     let pw = typed
         .clone()
         .or_else(|| st.passwords.read().unwrap().get(&key).cloned())
-        .or_else(|| p.password_from_env())
+        .or_else(|| p.stored_password())
         .ok_or_else(|| ErrView::msg("password_required", "비밀번호를 입력하세요"))?;
+    let account = sqls_core::secret::db_account(&p.name);
     let session = match sqls_core::Session::connect(p.to_spec(pw.clone())).await {
         Ok(s) => s,
         Err(e) => {
-            // 기억해 둔 비밀번호가 틀렸으면 (ORA-01017) 잊는다
+            // 기억해 둔 비밀번호가 틀렸으면 (ORA-01017) 잊는다 — 저장소의 것도
             if matches!(e, sqls_core::Error::Db { code: 1017, .. }) {
                 st.passwords.write().unwrap().remove(&key);
+                if typed.is_none() {
+                    sqls_core::secret::delete(&account);
+                }
             }
             return Err(e.into());
         }
     };
     st.passwords.write().unwrap().insert(key, pw.clone());
+    // 접속에 성공한 비밀번호만 저장한다
+    if typed.is_some() && remember == Some(true) {
+        if let Err(e) = sqls_core::secret::set(&account, &pw) {
+            tracing::warn!("{}: {e}", p.name);
+        }
+    }
     // 자동완성 캐시는 프로필마다 하나 — 처음 접속이면 백그라운드로 읽기 시작한다
     crate::complete::ensure_hub(&st, &app, &p, &pw);
     let id = st.next_id();
@@ -426,4 +444,11 @@ pub fn set_mcp_settings(
         c.mcp.call_timeout_secs = call_timeout_secs.clamp(1, 3600);
     }
     st.save_config()
+}
+
+/// 저장해 둔 비밀번호를 지운다 (설정 화면)
+#[tauri::command]
+pub fn forget_password(st: State<'_, AppState>, profile: String) {
+    sqls_core::secret::delete(&sqls_core::secret::db_account(&profile));
+    st.passwords.write().unwrap().remove(&profile.to_uppercase());
 }

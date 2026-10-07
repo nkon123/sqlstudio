@@ -31,6 +31,7 @@ fn view(st: &AppState, p: &ProviderConfig) -> ProviderView {
         sqls_llm::ProviderKind::Ollama => true,
         _ => {
             st.api_keys.read().unwrap().contains_key(&p.name)
+                || sqls_core::secret::get(&sqls_core::secret::llm_account(&p.name)).is_some()
                 || p.api_key_env
                     .as_deref()
                     .or(match p.kind {
@@ -65,15 +66,21 @@ pub fn save_provider(st: State<'_, AppState>, provider: ProviderConfig, original
     st.save_config()
 }
 
-/// API 키는 파일에 쓰지 않는다. 이 실행 동안만 기억한다.
+/// API 키는 파일에 쓰지 않는다. 이 실행 동안 기억하고, `remember` 면 OS 자격 증명 저장소에도 둔다.
 #[tauri::command]
-pub fn set_api_key(st: State<'_, AppState>, provider: String, key: String) {
+pub fn set_api_key(st: State<'_, AppState>, provider: String, key: String, remember: Option<bool>) -> R<()> {
+    let account = sqls_core::secret::llm_account(&provider);
     let mut keys = st.api_keys.write().unwrap();
     if key.trim().is_empty() {
         keys.remove(&provider);
+        sqls_core::secret::delete(&account);
     } else {
         keys.insert(provider, key.trim().to_string());
+        if remember == Some(true) {
+            sqls_core::secret::set(&account, key.trim()).map_err(|e| ErrView::msg("invalid", e))?;
+        }
     }
+    Ok(())
 }
 
 pub(crate) fn provider(st: &AppState, name: &str) -> R<ProviderConfig> {
@@ -87,6 +94,8 @@ pub(crate) fn provider(st: &AppState, name: &str) -> R<ProviderConfig> {
         .ok_or_else(|| ErrView::msg("invalid", format!("AI 공급자가 없습니다: {name}")))?;
     if let Some(k) = st.api_keys.read().unwrap().get(name) {
         p.api_key = Some(k.clone());
+    } else if let Some(k) = sqls_core::secret::get(&sqls_core::secret::llm_account(name)) {
+        p.api_key = Some(k);
     }
     Ok(p)
 }

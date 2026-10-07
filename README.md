@@ -96,6 +96,16 @@ allowed_connections = ["ERP-DEV"]     # 비어 있으면 아무것도 노출하�
 **비밀번호와 API 키는 파일에 쓰지 않는다.** 접속할 때 묻고 그 실행 동안만 기억한다.
 또는 환경변수 `SQLSTUDIO_PW_<프로필 이름>` (예: `SQLSTUDIO_PW_ERP_DEV`) 를 쓴다.
 
+## 비밀번호
+
+설정 파일에는 쓰지 않는다. 찾는 순서: 환경변수 `SQLSTUDIO_PW_<접속이름>` → OS 자격 증명 저장소 → 접속 창에서 입력.
+
+- 접속 창의 **비밀번호 저장** 을 고르면 접속에 성공한 비밀번호만 **Windows 자격 증명 관리자**(macOS 키체인)에 둔다
+  (대상 이름 `SQLStudio` / `db:<접속이름>`). 틀리면(ORA-01017) 지우고 다시 묻는다. 설정 → 접속에서 지울 수 있다.
+- MCP 서버와 `sqlstudio-analyze` 도 같은 곳을 읽는다 — MCP 호스트 설정에 비밀번호를 적지 않아도 된다.
+- AI API 키도 같은 방식으로 저장할 수 있다 (`llm:<공급자>`).
+- 공용 PC 에서는 `SQLSTUDIO_NO_KEYRING=1` 로 끈다. Linux 는 커널 키링이라 로그아웃하면 사라진다.
+
 ## 단축키
 
 | 키 | 동작 |
@@ -286,7 +296,7 @@ JSON 함수 같은 12c+ 문법을 쓰지 말라고 지시한다.
     "sqlstudio": {
       "command": "C:\\Program Files\\SQLStudio\\sqlstudio-mcp.exe",
       "args": ["--config", "C:\\Users\\me\\AppData\\Roaming\\sqlstudio\\config.toml"],
-      "env": { "SQLSTUDIO_PW_ERP_DEV": "..." }
+      "env": { "SQLSTUDIO_PW_ERP_DEV": "... (앱에서 '비밀번호 저장' 을 했으면 이 줄은 필요 없다)" }
     }
   }
 }

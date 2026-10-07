@@ -42,7 +42,7 @@ pub type Connector = Arc<
 pub fn oracle_connector() -> Connector {
     Arc::new(|p: Profile| {
         Box::pin(async move {
-            let pw = p.password_from_env().ok_or_else(|| {
+            let pw = p.stored_password().ok_or_else(|| {
                 Error::Config(format!(
                     "'{}' 의 비밀번호가 없습니다. MCP 설정의 env 에 {} 를 넣으세요",
                     p.name,

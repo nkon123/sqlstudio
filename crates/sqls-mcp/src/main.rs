@@ -146,7 +146,7 @@ async fn run_check(cfg: &Config) -> ExitCode {
     let mut ok = true;
     for name in &cfg.mcp.allowed_connections {
         let Some(p) = cfg.profile(name) else { continue };
-        if p.password_from_env().is_none() {
+        if p.stored_password().is_none() {
             eprintln!("FAIL {name}: 비밀번호 환경변수 {} 가 없습니다", password_env_name(&p.name));
             ok = false;
             continue;

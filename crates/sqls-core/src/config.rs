@@ -5,7 +5,8 @@
 //!
 //! 비밀번호는 파일에 쓰지 않는다. 순서대로 찾는다:
 //! 1. 환경변수 `SQLSTUDIO_PW_<프로필 이름>` (영숫자 외 문자는 `_`, 대문자)
-//! 2. (앱) 접속 창에서 입력 — 메모리에만 둔다
+//! 2. OS 자격 증명 저장소 (앱 접속 창에서 "비밀번호 저장" 을 고른 경우) — [`crate::secret`]
+//! 3. (앱) 접속 창에서 입력 — 메모리에만 둔다
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -144,6 +145,11 @@ pub fn password_env_name(profile: &str) -> String {
 impl Profile {
     pub fn password_from_env(&self) -> Option<String> {
         std::env::var(password_env_name(&self.name)).ok().filter(|p| !p.is_empty())
+    }
+
+    /// 환경변수 → OS 자격 증명 저장소 순으로 찾은 비밀번호 (MCP 서버·분석 CLI 가 쓴다)
+    pub fn stored_password(&self) -> Option<String> {
+        self.password_from_env().or_else(|| crate::secret::get(&crate::secret::db_account(&self.name)))
     }
 
     pub fn to_spec(&self, password: String) -> ConnectSpec {

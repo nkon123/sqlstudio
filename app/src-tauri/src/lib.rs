@@ -70,6 +70,7 @@ pub fn run() {
             analyze::analysis_unit,
             analyze::analysis_dir,
             analyze::analysis_eval,
+            db::forget_password,
             monitor::monitor_snapshot,
             monitor::monitor_detail,
             monitor::monitor_kill,

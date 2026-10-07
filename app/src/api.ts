@@ -12,6 +12,7 @@ export interface Profile {
   name: string; user: string; connect_string: string;
   read_only?: boolean; as_sysdba?: boolean; call_timeout_secs?: number | null; color?: string | null;
   has_env_password?: boolean;
+  has_saved_password?: boolean;
 }
 export interface Connected {
   id: number; user: string; connect_string: string; server_version: string; read_only: boolean; color?: string | null;
@@ -70,7 +71,8 @@ export const api = {
   listProfiles: () => invoke<Profile[]>("list_profiles"),
   saveProfile: (profile: Profile, originalName?: string) => invoke<void>("save_profile", { profile, originalName }),
   deleteProfile: (name: string) => invoke<void>("delete_profile", { name }),
-  connect: (profile: string, password?: string) => invoke<Connected>("connect", { profile, password }),
+  connect: (profile: string, password?: string, remember?: boolean) => invoke<Connected>("connect", { profile, password, remember }),
+  forgetPassword: (profile: string) => invoke<void>("forget_password", { profile }),
   disconnect: (id: number) => invoke<void>("disconnect", { id }),
   execute: (id: number, sql: string, binds: [string, string | null][], confirmed: boolean, pageSize?: number) =>
     invoke<ExecView>("execute", { args: { id, sql, binds, confirmed, page_size: pageSize } }),
@@ -99,7 +101,7 @@ export const api = {
   mcpSnippet: () => invoke<string>("mcp_snippet"),
   listProviders: () => invoke<Provider[]>("list_providers"),
   saveProvider: (provider: Provider, originalName?: string) => invoke<void>("save_provider", { provider, originalName }),
-  setApiKey: (provider: string, key: string) => invoke<void>("set_api_key", { provider, key }),
+  setApiKey: (provider: string, key: string, remember?: boolean) => invoke<void>("set_api_key", { provider, key, remember }),
   testProvider: (name: string) => invoke<string[]>("test_provider", { name }),
   aiAsk: (args: {
     request_id: number; provider: string; task: Task; session_id?: number; sql?: string; question?: string;

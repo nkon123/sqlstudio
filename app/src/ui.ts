@@ -73,13 +73,17 @@ export async function confirmBox(title: string, text: string, okLabel = "실행"
   return r === true;
 }
 
-export async function passwordBox(profile: string, user: string): Promise<string | null> {
+export async function passwordBox(profile: string, user: string): Promise<{ password: string; remember: boolean } | null> {
   const input = h("input", { type: "password", autocomplete: "off", placeholder: "비밀번호" });
-  const r = await modal(`${profile} 접속`, h("label", { class: "field" }, `${user} 비밀번호`, input), [
+  const remember = h("input", { type: "checkbox" });
+  const body = h("div", {}, h("label", { class: "field" }, `${user} 비밀번호`, input),
+    h("label", { class: "check", title: "Windows 자격 증명 관리자(macOS 키체인)에 저장합니다. 설정 파일에는 쓰지 않습니다." },
+      remember, "비밀번호 저장 (OS 자격 증명 관리자)"));
+  const r = await modal(`${profile} 접속`, body, [
     { label: "취소", value: false },
     { label: "접속", value: true, kind: "primary" },
   ]);
-  return r ? input.value : null;
+  return r ? { password: input.value, remember: remember.checked } : null;
 }
 
 /** 바인드 변수 입력. 지난 값을 기억해 채워 준다. 빈 칸 + NULL 체크 = NULL. */

@@ -193,7 +193,7 @@ pub async fn debug_start(
         .unwrap()
         .get(&p.name.to_uppercase())
         .cloned()
-        .or_else(|| p.password_from_env())
+        .or_else(|| p.stored_password())
         .ok_or_else(|| ErrView::msg("password_required", "다시 접속한 뒤 디버그하세요"))?;
     if p.read_only {
         return Err(ErrView::msg(

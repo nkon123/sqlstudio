@@ -70,6 +70,8 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
+      - name: Windows 자격 증명 관리자 저장·읽기
+        run: cargo test -p sqls-core --lib secret -- --nocapture
       - name: MCP 서버·분석 CLI (설치 파일에 함께 넣는다)
         run: cargo build --release -p sqls-mcp -p sqls-analyze
       - name: 앱 + 설치 파일

@@ -15,6 +15,7 @@ pub mod debug;
 pub mod error;
 pub mod meta;
 pub mod monitor;
+pub mod secret;
 pub mod session;
 pub mod sql;
 

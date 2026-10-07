@@ -330,9 +330,10 @@ class App {
     if (t.conn) await this.disconnect(t);
     this.status(`${p.name} 접속 중…`);
     let password: string | undefined;
+    let remember = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const c = await api.connect(p.name, password);
+        const c = await api.connect(p.name, password, remember);
         t.conn = { ...c, profile: p.name };
         t.txnPending = false;
         t.refreshTitle();
@@ -350,7 +351,8 @@ class App {
           if (err.ora_code === 1017) toast("비밀번호가 틀렸습니다 (ORA-01017)", "error");
           const pw = await passwordBox(p.name, p.user);
           if (pw == null) { this.status("접속 취소"); return; }
-          password = pw;
+          password = pw.password;
+          remember = pw.remember;
           continue;
         }
         this.status("접속 실패");
@@ -867,7 +869,15 @@ class App {
         h("label", { class: "check" }, ro, "읽기 전용 (SELECT 만, 서버에서도 막음)"),
         h("label", { class: "check" }, useColor, "탭 색 표시 (운영 DB 는 빨강 권장)", color),
         field("호출 시간 상한(초)", timeout, "Oracle Client 18 이상에서만 동작"),
-        h("small", {}, "비밀번호는 저장하지 않습니다. 접속할 때 묻거나, 환경변수 SQLSTUDIO_PW_<이름> 을 씁니다."),
+        h("small", {}, "비밀번호는 설정 파일에 쓰지 않습니다. 접속할 때 묻거나(‘비밀번호 저장’ 을 고르면 OS 자격 증명 관리자에), 환경변수 SQLSTUDIO_PW_<이름> 을 씁니다."),
+        p?.has_saved_password ? h("div", { class: "row" }, h("span", {}, "저장된 비밀번호가 있습니다"),
+          h("button", { class: "small", onclick: async (e: Event) => {
+            e.preventDefault();
+            await api.forgetPassword(p.name).catch((err) => toast(errOf(err).message, "error"));
+            toast("저장된 비밀번호를 지웠습니다", "ok");
+            await refreshList();
+            (e.target as HTMLElement).parentElement?.remove();
+          } }, "지우기")) : "",
         h("div", { class: "row" },
           h("button", { class: "primary", onclick: async (e: Event) => {
             e.preventDefault();
@@ -913,7 +923,8 @@ class App {
       const base = h("input", { value: p?.base_url ?? "", placeholder: "비우면 기본값" });
       const model = h("input", { value: p?.model ?? "" });
       const keyEnv = h("input", { value: p?.api_key_env ?? "", placeholder: "예: ANTHROPIC_API_KEY" });
-      const key = h("input", { type: "password", placeholder: p?.has_key ? "(설정됨)" : "이 실행 동안만 기억" });
+      const key = h("input", { type: "password", placeholder: p?.has_key ? "(설정됨)" : "API 키" });
+      const keyRemember = h("input", { type: "checkbox" });
       const numCtx = h("input", { type: "number", value: p?.num_ctx ?? "", placeholder: "16384" });
       const effort = h("select", {}, ...["", "low", "medium", "high", "xhigh", "max"].map((x) => h("option", { value: x, selected: (p?.effort ?? "") === x }, x || "(기본)")));
       const fallbacks = h("input", { type: "checkbox", checked: p?.fallbacks ?? true });
@@ -927,13 +938,14 @@ class App {
       const persist = async () => {
         const np = collect();
         await api.saveProvider(np, p?.name);
-        if (key.value) await api.setApiKey(np.name, key.value);
+        if (key.value) await api.setApiKey(np.name, key.value, keyRemember.checked);
         return np;
       };
       form.replaceChildren(
         field("이름", name), field("종류", kind), field("주소", base, "Ollama: http://127.0.0.1:11434 · 사내 GPU 서버 주소도 됩니다"),
         field("모델", model, "예: qwen2.5-coder:14b, claude-opus-5-5"),
-        field("API 키 환경변수", keyEnv), field("API 키", key, "파일에 저장하지 않습니다"),
+        field("API 키 환경변수", keyEnv), field("API 키", key, "설정 파일에는 쓰지 않습니다"),
+        h("label", { class: "check" }, keyRemember, "OS 자격 증명 관리자에 저장 (끄면 이 실행 동안만)"),
         field("num_ctx (Ollama)", numCtx, "기본 컨텍스트(2~4K)는 스키마 문맥을 조용히 잘라 버립니다"),
         field("effort (Claude)", effort),
         h("label", { class: "check" }, fallbacks, "거절 시 대체 모델로 이어서 답하기 (Claude API 직통일 때만)"),

@@ -64,7 +64,7 @@ pub async fn monitor_kill(st: State<'_, AppState>, id: u64, sid: i64, serial: i6
         .unwrap()
         .get(&p.name.to_uppercase())
         .cloned()
-        .or_else(|| p.password_from_env())
+        .or_else(|| p.stored_password())
         .ok_or_else(|| ErrView::msg("password_required", "다시 접속한 뒤 시도하세요"))?;
     // 자기 자신은 막는다
     if let Ok((sess, _, _)) = st.session(id) {

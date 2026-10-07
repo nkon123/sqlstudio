@@ -9,10 +9,12 @@ oracle = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 toml = "0.8"
 tracing = "0.1"
 dirs = "6"
+# 비밀번호·API 키를 OS 자격 증명 저장소에 (Windows 자격 증명 관리자, macOS 키체인, Linux 커널 키링)
+keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

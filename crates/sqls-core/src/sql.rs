@@ -331,6 +331,28 @@ pub fn needs_confirmation(stmt: &str) -> Option<&'static str> {
     }
 }
 
+/// 운영 DB 에서 확인할 문장 — 데이터·구조·권한을 바꾸거나(PL/SQL 블록은 무엇을 할지 모르니 포함) 커밋하는 것
+pub fn needs_confirmation_on_production(stmt: &str) -> Option<&'static str> {
+    match classify(stmt) {
+        StmtKind::Dml => Some("운영 DB 입니다 — 데이터를 바꾸는 문장입니다."),
+        StmtKind::Ddl => Some("운영 DB 입니다 — 객체 구조나 권한을 바꾸는 문장입니다."),
+        StmtKind::Plsql => Some("운영 DB 입니다 — PL/SQL 블록·프로시저 호출은 데이터를 바꿀 수 있습니다."),
+        StmtKind::PlsqlUnit => Some("운영 DB 입니다 — 프로시저·패키지 등을 다시 컴파일합니다."),
+        StmtKind::Tcl if code_words(stmt).first().map(String::as_str) == Some("COMMIT") => Some("운영 DB 입니다 — 커밋하면 되돌릴 수 없습니다."),
+        _ => None,
+    }
+}
+
+/// 실행 전 확인 사유. 운영이면 운영 사유를 앞에 붙인다.
+pub fn confirm_reason(stmt: &str, production: bool) -> Option<String> {
+    let base = needs_confirmation(stmt);
+    let prod = if production { needs_confirmation_on_production(stmt) } else { None };
+    match (prod, base) {
+        (Some(p), Some(b)) => Some(format!("{p}\n{b}")),
+        (p, b) => p.or(b).map(str::to_string),
+    }
+}
+
 /// 코드 영역의 모든 단어 (대문자)
 fn code_words(src: &str) -> Vec<String> {
     let mut words = Vec::new();
@@ -578,6 +600,23 @@ mod tests {
         assert!(needs_confirmation("truncate table emp").is_some());
         assert!(needs_confirmation("select * from emp").is_none());
         assert!(needs_confirmation("insert into emp select * from emp2").is_none());
+    }
+
+    #[test]
+    fn production_confirmation() {
+        for s in ["insert into emp values (1)", "update emp set sal = 0 where id = 1", "merge into t using s on (1=1) when matched then update set a = 1",
+            "create table x (a number)", "grant select on emp to scott", "begin p_close_day; end;", "call p_close_day()",
+            "create or replace procedure p as begin null; end;", "commit"] {
+            assert!(confirm_reason(s, true).is_some(), "{s}");
+        }
+        for s in ["select * from emp", "with a as (select 1 from dual) select * from a", "rollback", "alter session set nls_date_format = 'YYYY'", "explain plan for select 1 from dual"] {
+            assert!(confirm_reason(s, true).is_none(), "{s}");
+        }
+        // 운영이 아니면 원래 규칙만
+        assert!(confirm_reason("update emp set sal = 0 where id = 1", false).is_none());
+        assert!(confirm_reason("drop table emp", false).is_some());
+        let both = confirm_reason("delete from emp", true).unwrap();
+        assert!(both.contains("운영") && both.contains("WHERE"), "{both}");
     }
 
     #[test]

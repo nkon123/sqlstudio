@@ -48,6 +48,9 @@ pub struct Profile {
     pub call_timeout_secs: Option<u64>,
     /// 화면에서 프로필을 구분하는 색 (운영=빨강 같은 식으로)
     pub color: Option<String>,
+    /// 운영 DB — 데이터·구조를 바꾸는 문장과 COMMIT 을 실행 전에 항상 확인한다 (서버 쪽에서 막는다)
+    #[serde(default)]
+    pub production: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -548,7 +548,7 @@ class App {
   private async currentStatement(t: Tab) {
     const text = t.editor.text();
     const sel = t.editor.selection();
-    const a = await api.analyze(text, utf16ToByte(text, t.editor.cursor()), sel || undefined);
+    const a = await api.analyze(text, utf16ToByte(text, t.editor.cursor()), sel || undefined, t.conn?.id);
     if (!a.statement) return null;
     const baseText = sel || text;
     const selFrom = sel ? t.editor.view.state.selection.main.from : 0;
@@ -771,7 +771,8 @@ class App {
       const plan = await api.gridApply(t.conn.id, t.editTable, ch, true);
       const list = plan.done.map(([s]) => s);
       const shown = list.slice(0, 30).join(";\n") + (list.length > 30 ? `;\n… 외 ${list.length - 30}개` : ";");
-      if (!(await confirmBox(`변경 ${list.length}건 실행`, `${shown}\n\n실행한 뒤 커밋해야 저장됩니다 (롤백으로 되돌릴 수 있습니다).`, "실행", false))) return;
+      const prod = t.conn.production ? `⚠ 운영 DB (${t.conn.user}@${t.conn.connect_string}) 입니다.\n\n` : "";
+      if (!(await confirmBox(`변경 ${list.length}건 실행`, `${prod}${shown}\n\n실행한 뒤 커밋해야 저장됩니다 (롤백으로 되돌릴 수 있습니다).`, "실행", !!prod))) return;
       const r = await api.gridApply(t.conn.id, t.editTable, ch, false);
       t.txnPending = r.txn_pending;
       for (const [s, n] of r.done) t.log(`${s} — ${n}행`, "ok");
@@ -855,7 +856,15 @@ class App {
     const t = this.need();
     if (!t || !t.conn) return;
     try {
-      await (kind === "commit" ? api.commit(t.conn.id) : api.rollback(t.conn.id));
+      if (kind === "commit") {
+        try {
+          await api.commit(t.conn.id);
+        } catch (e) {
+          if (errOf(e).kind !== "confirm_required") throw e;
+          if (!(await confirmBox("운영 DB 커밋", `${t.conn.user}@${t.conn.connect_string}\n\n${errOf(e).message}`, "커밋"))) return;
+          await api.commit(t.conn.id, true);
+        }
+      } else await api.rollback(t.conn.id);
       t.txnPending = false;
       t.log(kind === "commit" ? "커밋했습니다" : "롤백했습니다", "ok");
       this.status(kind === "commit" ? "커밋" : "롤백");
@@ -1152,7 +1161,8 @@ class App {
     this.btn.commit.disabled = !c || busy || !t?.txnPending;
     this.btn.rollback.disabled = !c || busy || !t?.txnPending;
     this.txnBadge.hidden = !t?.txnPending;
-    this.connBadge.textContent = c ? `${c.user}@${c.connect_string}${c.read_only ? " · 읽기 전용" : ""}` : "접속 안 됨";
+    this.connBadge.textContent = c ? `${c.production ? "운영 · " : ""}${c.user}@${c.connect_string}${c.read_only ? " · 읽기 전용" : ""}` : "접속 안 됨";
+    this.connBadge.classList.toggle("prod", !!c?.production);
     this.connBadge.style.background = c?.color ?? "";
     this.connBadge.classList.toggle("on", !!c);
     if (!busy) this.statusRight.textContent = c ? c.server_version : "";
@@ -1242,12 +1252,14 @@ class App {
       const user = h("input", { value: p?.user ?? "" });
       const cs = h("input", { value: p?.connect_string ?? "", placeholder: "host:1521/SERVICE 또는 TNS 별칭" });
       const ro = h("input", { type: "checkbox", checked: !!p?.read_only });
+      const prod = h("input", { type: "checkbox", checked: !!p?.production });
       const color = h("input", { type: "color", value: p?.color ?? "#3a7bd5" });
       const useColor = h("input", { type: "checkbox", checked: !!p?.color });
       const timeout = h("input", { type: "number", min: "0", value: p?.call_timeout_secs ?? "" , placeholder: "없음" });
       form.replaceChildren(
         field("이름", name), field("사용자", user), field("접속 문자열", cs, "11g 는 Instant Client 가 필요합니다 (19c 권장)"),
         h("label", { class: "check" }, ro, "읽기 전용 (SELECT 만, 서버에서도 막음)"),
+        h("label", { class: "check", title: "INSERT·UPDATE·DELETE·DDL·PL/SQL 블록·COMMIT 을 실행 전에 항상 확인합니다" }, prod, "운영 DB (바꾸는 문장·커밋 전에 항상 확인)"),
         h("label", { class: "check" }, useColor, "탭 색 표시 (운영 DB 는 빨강 권장)", color),
         field("호출 시간 상한(초)", timeout, "Oracle Client 18 이상에서만 동작"),
         h("small", {}, "비밀번호는 설정 파일에 쓰지 않습니다. 접속할 때 묻거나(‘비밀번호 저장’ 을 고르면 OS 자격 증명 관리자에), 환경변수 SQLSTUDIO_PW_<이름> 을 씁니다."),
@@ -1265,7 +1277,7 @@ class App {
             try {
               await api.saveProfile({
                 name: name.value.trim(), user: user.value.trim(), connect_string: cs.value.trim(),
-                read_only: ro.checked, color: useColor.checked ? color.value : null,
+                read_only: ro.checked, production: prod.checked, color: useColor.checked ? color.value : null,
                 call_timeout_secs: timeout.value ? Number(timeout.value) : null,
               }, p?.name);
               toast("저장했습니다", "ok");

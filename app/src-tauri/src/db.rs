@@ -92,6 +92,7 @@ pub struct Connected {
     server_version: String,
     read_only: bool,
     color: Option<String>,
+    production: bool,
 }
 
 #[tauri::command]
@@ -158,6 +159,7 @@ pub async fn connect(
         server_version: info.server_version,
         read_only: info.read_only,
         color: p.color.clone(),
+        production: p.production,
     })
 }
 
@@ -209,11 +211,20 @@ fn opts(page: Option<usize>, binds: Vec<(String, Option<String>)>) -> ExecOption
     }
 }
 
+/// 이 세션의 프로필이 운영 DB 인지 (모르면 운영으로 — 안전한 쪽)
+fn is_production(st: &AppState, id: u64) -> bool {
+    let profile = st.sessions.lock().unwrap().get(&id).map(|s| s.profile.clone());
+    match profile {
+        Some(p) => st.cfg.read().unwrap().profile(&p).map(|x| x.production).unwrap_or(true),
+        None => false,
+    }
+}
+
 #[tauri::command]
 pub async fn execute(st: State<'_, AppState>, args: ExecArgs) -> R<ExecView> {
     let (s, txn, _) = st.session(args.id)?;
     if !args.confirmed {
-        if let Some(why) = sql::needs_confirmation(&args.sql) {
+        if let Some(why) = sql::confirm_reason(&args.sql, is_production(&st, args.id)) {
             return Err(ErrView::msg("confirm_required", why));
         }
     }
@@ -258,9 +269,10 @@ pub async fn execute_script(
     let (s, txn, stop) = st.session(id)?;
     let stmts = sql::split_script(&script);
     if !confirmed {
+        let prod = is_production(&st, id);
         let risky: Vec<String> = stmts
             .iter()
-            .filter_map(|x| sql::needs_confirmation(&x.text).map(|why| format!("{}행: {why}", x.line)))
+            .filter_map(|x| sql::confirm_reason(&x.text, prod).map(|why| format!("{}행: {}", x.line, why.replace('\n', " "))))
             .collect();
         if !risky.is_empty() {
             return Err(ErrView::msg("confirm_required", risky.join("\n")));
@@ -338,8 +350,11 @@ pub fn abandon(st: State<'_, AppState>, id: u64) {
 }
 
 #[tauri::command]
-pub async fn commit(st: State<'_, AppState>, id: u64) -> R<()> {
+pub async fn commit(st: State<'_, AppState>, id: u64, confirmed: Option<bool>) -> R<()> {
     let (s, txn, _) = st.session(id)?;
+    if is_production(&st, id) && confirmed != Some(true) {
+        return Err(ErrView::msg("confirm_required", "운영 DB 입니다 — 커밋하면 되돌릴 수 없습니다."));
+    }
     s.commit().await?;
     txn.store(false, Ordering::Relaxed);
     Ok(())
@@ -364,17 +379,19 @@ pub async fn explain(st: State<'_, AppState>, id: u64, sql: String) -> R<Vec<Str
 pub struct Analyzed {
     statement: Option<sql::Statement>,
     binds: Vec<String>,
-    confirm: Option<&'static str>,
+    confirm: Option<String>,
 }
 
+/// `id` 를 주면 그 세션이 운영 DB 인지까지 보고 확인 사유를 만든다
 #[tauri::command]
-pub fn analyze_sql(text: String, cursor: Option<usize>, selection: Option<String>) -> Analyzed {
+pub fn analyze_sql(st: State<'_, AppState>, text: String, cursor: Option<usize>, selection: Option<String>, id: Option<u64>) -> Analyzed {
     let stmt = match selection.filter(|s| !s.trim().is_empty()) {
         Some(sel) => sql::split_script(&sel).into_iter().next(),
         None => sql::statement_at(&text, cursor.unwrap_or(0).min(text.len())),
     };
     let binds = stmt.as_ref().map(|s| sql::bind_names(&s.text)).unwrap_or_default();
-    let confirm = stmt.as_ref().and_then(|s| sql::needs_confirmation(&s.text));
+    let prod = id.is_some_and(|i| is_production(&st, i));
+    let confirm = stmt.as_ref().and_then(|s| sql::confirm_reason(&s.text, prod));
     Analyzed { statement: stmt, binds, confirm }
 }
 

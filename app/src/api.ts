@@ -11,11 +11,12 @@ export function errOf(e: unknown): ErrView {
 export interface Profile {
   name: string; user: string; connect_string: string;
   read_only?: boolean; as_sysdba?: boolean; call_timeout_secs?: number | null; color?: string | null;
+  production?: boolean;
   has_env_password?: boolean;
   has_saved_password?: boolean;
 }
 export interface Connected {
-  id: number; user: string; connect_string: string; server_version: string; read_only: boolean; color?: string | null;
+  id: number; user: string; connect_string: string; server_version: string; read_only: boolean; color?: string | null; production?: boolean;
 }
 export interface Column { name: string; type_name: string; nullable: boolean }
 export interface RowPage { columns: Column[]; rows: (string | null)[][]; has_more: boolean; fetched_total: number }
@@ -89,10 +90,10 @@ export const api = {
     invoke<number>("export_xlsx", { args: { path, columns, rows, sql } }),
   cancel: (id: number) => invoke<void>("cancel", { id }),
   abandon: (id: number) => invoke<void>("abandon", { id }),
-  commit: (id: number) => invoke<void>("commit", { id }),
+  commit: (id: number, confirmed = false) => invoke<void>("commit", { id, confirmed }),
   rollback: (id: number) => invoke<void>("rollback", { id }),
   explain: (id: number, sql: string) => invoke<string[]>("explain", { id, sql }),
-  analyze: (text: string, cursor: number, selection?: string) => invoke<Analyzed>("analyze_sql", { text, cursor, selection }),
+  analyze: (text: string, cursor: number, selection?: string, id?: number) => invoke<Analyzed>("analyze_sql", { text, cursor, selection, id }),
   listSchemas: (id: number) => invoke<string[]>("list_schemas", { id }),
   listObjects: (id: number, owner?: string, objectType?: string, nameLike?: string) =>
     invoke<ObjectEntry[]>("list_objects", { id, owner, objectType, nameLike }),

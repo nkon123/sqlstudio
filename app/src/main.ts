@@ -17,6 +17,7 @@ import { DebugView } from "./debugger";
 import { MonitorView } from "./monitor";
 import { SqlEditor } from "./editor";
 import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from "./format";
+import { GitPanel } from "./git";
 import { ResultGrid } from "./grid";
 import { alertBox, bindBox, confirmBox, field, h, modal, passwordBox, toast } from "./ui";
 
@@ -40,6 +41,8 @@ class Tab {
   conn: Conn | null = null;
   filePath: string | null = null;
   encoding = "utf-8";
+  /** 읽은 파일의 줄 끝 — 저장할 때 되돌린다 (편집기 안은 \n). CRLF 파일을 LF 로 바꿔 Git 에서 모든 줄이 바뀐 것처럼 보이지 않게 */
+  eol: "\n" | "\r\n" = "\n";
   dirty = false;
   txnPending = false;
   running = false;
@@ -253,6 +256,8 @@ class App {
   private browserObjs: ObjectEntry[] = [];
   private pickedTables = new Set<string>();
   private ai: AiPanel;
+  private git: GitPanel;
+  private gitBadge = h("span", { class: "git-badge" });
   private layout!: SideLayout;
   private timer = 0;
 
@@ -281,16 +286,39 @@ class App {
       b("save", "저장", "Ctrl+S", () => this.save()),
       b("format", "포맷", "SQL 정리 (Ctrl+Shift+F) — 선택 영역, 없으면 커서 위치 문장", () => this.formatSql()),
       h("span", { class: "sep" }),
-      b("toggleBrowser", "테이블", "왼쪽 테이블 영역 접기/펼치기 (Ctrl+Shift+1) · 경계선을 끌면 너비 조절", () => this.layout.toggle("left")),
+      b("toggleBrowser", "왼쪽", "왼쪽 영역(테이블·프로젝트) 접기/펼치기 (Ctrl+Shift+1) · 경계선을 끌면 너비 조절", () => this.layout.toggle("left")),
       b("toggleAi", "AI", "오른쪽 AI 영역 접기/펼치기 (Ctrl+Shift+3) · 경계선을 끌면 너비 조절", () => this.layout.toggle("right")),
       h("span", { class: "spacer" }),
       b("settings", "설정", "접속·AI·MCP 설정", () => this.settings()),
     );
-    const browser = h("aside", { class: "browser" },
+    const tablePane = h("div", { class: "side-pane" },
       h("div", { class: "browser-head" }, this.browserOwner, this.browserType),
       this.browserFilter,
       this.browserList,
       h("small", { class: "hint" }, "클릭: 구조 · 더블클릭: 이름 넣기 · 체크: AI 문맥에 포함"));
+    this.git = new GitPanel({
+      openPath: (p) => this.openPath(p),
+      tabsUnder: (root) => {
+        const r = normPath(root) + "/";
+        return this.tabs.filter((t) => t.filePath && normPath(t.filePath).startsWith(r)).map((t) => ({
+          path: t.filePath!, dirty: t.dirty, reload: () => this.reloadTab(t),
+        }));
+      },
+      onState: (text, title) => { this.gitBadge.textContent = text; this.gitBadge.title = title; },
+    });
+    // 왼쪽 영역: 테이블 | 프로젝트
+    const sideTabs = h("div", { class: "side-tabs" });
+    const panes: Record<string, HTMLElement> = { table: tablePane, git: this.git.el };
+    const showSide = (k: string) => {
+      for (const [n, el] of Object.entries(panes)) el.hidden = n !== k;
+      for (const b of sideTabs.children) b.classList.toggle("on", (b as HTMLElement).dataset.k === k);
+      try { localStorage.setItem("side.tab", k); } catch { /* 없어도 된다 */ }
+    };
+    for (const [k, label] of [["table", "테이블"], ["git", "프로젝트"]]) sideTabs.append(h("button", { "data-k": k, onclick: () => showSide(k) }, label));
+    const browser = h("aside", { class: "browser" }, sideTabs, tablePane, this.git.el);
+    let sideTab = "table";
+    try { sideTab = localStorage.getItem("side.tab") === "git" ? "git" : "table"; } catch { /* 기본 */ }
+    showSide(sideTab);
     this.ai = new AiPanel({
       context: () => this.aiContext(),
       insertSql: (s) => this.active?.editor.insert(s),
@@ -302,7 +330,7 @@ class App {
       this.btn[side === "left" ? "toggleBrowser" : "toggleAi"]?.classList.toggle("active", open);
     });
     root.append(toolbar, main,
-      h("footer", { class: "statusbar" }, this.statusLeft, h("span", { class: "spacer" }), this.compBadge, this.statusRight));
+      h("footer", { class: "statusbar" }, this.statusLeft, this.gitBadge, h("span", { class: "spacer" }), this.compBadge, this.statusRight));
 
     this.browserOwner.addEventListener("change", () => this.loadObjects());
     this.browserType.addEventListener("change", () => this.loadObjects());
@@ -941,6 +969,13 @@ class App {
   async openFile() {
     const path = await openDialog({ multiple: false, filters: [{ name: "SQL", extensions: ["sql", "pls", "pks", "pkb", "prc", "fnc", "trg", "vw", "txt"] }] });
     if (!path || Array.isArray(path)) return;
+    await this.openPath(path);
+  }
+
+  /** 파일을 탭으로 연다. 이미 열려 있으면 그 탭으로 */
+  async openPath(path: string) {
+    const open = this.tabs.find((t) => t.filePath && normPath(t.filePath) === normPath(path));
+    if (open) return this.activate(open);
     try {
       const f = await api.readFile(path);
       const cur = this.active;
@@ -948,12 +983,26 @@ class App {
       t.editor.setText(f.text);
       t.filePath = path;
       t.encoding = f.encoding;
+      t.eol = f.text.includes("\r\n") ? "\r\n" : "\n";
       t.setDirty(false);
       t.refreshTitle();
-      this.status(`열었습니다 (${f.encoding})`);
+      this.status(`열었습니다 (${f.encoding}${t.eol === "\r\n" ? " · CRLF" : ""})`);
     } catch (e) {
       toast(errOf(e).message, "error");
     }
+  }
+
+  /** 디스크에서 다시 읽는다 (Git 풀·브랜치 전환·되돌리기 뒤) */
+  private async reloadTab(t: Tab) {
+    if (!t.filePath) return;
+    const f = await api.readFile(t.filePath);
+    const eol = f.text.includes("\r\n") ? "\r\n" : "\n";
+    if (f.text.replace(/\r\n/g, "\n") === t.editor.text() && eol === t.eol) return;
+    t.editor.setText(f.text);
+    t.encoding = f.encoding;
+    t.eol = eol;
+    t.setDirty(false);
+    t.refreshTitle();
   }
 
   async save() {
@@ -965,11 +1014,13 @@ class App {
       if (!path) return;
     }
     try {
-      await api.writeFile(path, t.editor.text(), t.encoding);
+      const text = t.eol === "\r\n" ? t.editor.text().replace(/\r?\n/g, "\r\n") : t.editor.text();
+      await api.writeFile(path, text, t.encoding);
       t.filePath = path;
       t.setDirty(false);
       t.refreshTitle();
       this.status(`저장했습니다 (${t.encoding})`);
+      this.git.refreshSoon();
     } catch (e) {
       toast(errOf(e).message, "error");
     }
@@ -1253,6 +1304,11 @@ function hintFor(err: ErrView): string {
 }
 
 /** 왼쪽(테이블)·오른쪽(AI) 영역: 경계선을 끌어 너비 조절, 접기/펼치기, 상태는 다음 실행에도 유지 */
+/** 경로 비교용: 구분자·대소문자 무시 (Windows) */
+function normPath(p: string) {
+  return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
 class SideLayout {
   private w = { left: 240, right: 360 };
   private open = { left: true, right: true };

@@ -10,6 +10,7 @@ mod db;
 mod debug;
 mod export;
 mod files;
+mod git;
 mod monitor;
 mod state;
 
@@ -87,6 +88,22 @@ pub fn run() {
             files::read_sql_file,
             files::write_sql_file,
             files::write_binary_file,
+            git::git_version,
+            git::git_open,
+            git::git_clone,
+            git::git_status,
+            git::git_files,
+            git::git_diff,
+            git::git_commit,
+            git::git_identity,
+            git::git_set_identity,
+            git::git_discard,
+            git::git_branches,
+            git::git_switch,
+            git::git_fetch,
+            git::git_pull,
+            git::git_outgoing,
+            git::git_push,
             files::mcp_snippet,
             export::export_xlsx,
         ])

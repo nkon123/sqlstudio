@@ -13,9 +13,9 @@ type R<T> = Result<T, ErrView>;
 
 #[derive(Serialize)]
 pub struct SqlFile {
-    text: String,
+    pub(crate) text: String,
     /// "utf-8" | "utf-8-bom" | "cp949"
-    encoding: &'static str,
+    pub(crate) encoding: &'static str,
 }
 
 pub fn decode(bytes: &[u8]) -> SqlFile {

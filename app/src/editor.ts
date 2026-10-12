@@ -14,7 +14,8 @@
 
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, startCompletion, type CompletionSource } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab, toggleComment } from "@codemirror/commands";
-import { PLSQL, sql } from "@codemirror/lang-sql";
+import { sql } from "@codemirror/lang-sql";
+import { ORACLE, oracleHighlight } from "./oracle-dialect";
 import { snippetSource } from "./snippets";
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
@@ -120,7 +121,8 @@ export class SqlEditor {
           closeBrackets(),
           highlightActiveLine(),
           highlightSelectionMatches(),
-          syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+          syntaxHighlighting(oracleHighlight),
+          syntaxHighlighting(defaultHighlightStyle),
           // 후보는 백엔드가 구절을 보고 만든다 (언어 기본 자동완성은 쓰지 않는다)
           autocompletion({
             // 백엔드 후보(테이블·컬럼…) + 코드 조각 (접속 전에도)
@@ -130,7 +132,7 @@ export class SqlEditor {
             maxRenderedOptions: 100,
             closeOnBlur: true,
           }),
-          sql({ dialect: PLSQL, upperCaseKeywords: true }),
+          sql({ dialect: ORACLE, upperCaseKeywords: true }),
           marks,
           keymap.of([
             { key: "Ctrl-Enter", mac: "Cmd-Enter", run: run(actions.runStatement), preventDefault: true },

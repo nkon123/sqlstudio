@@ -72,7 +72,9 @@ export function sqlCompletion(sessionId: () => number | undefined): CompletionSo
     return {
       from: from + byteToUtf16(text, r.from),
       options: r.items.map(toCompletion),
-      validFor: VALID,
+      // 빈 낱말로 물었으면(공백·쉼표·점 뒤) 백엔드는 점수 상위 몇백 개만 준다 — 큰 테이블이면 컬럼이 자리를 채워
+      // 함수(DECODE …)가 빠진다. 첫 글자를 치면 다시 묻는다. 낱말이 있으면 그 안에서 화면이 거른다.
+      validFor: word.length ? VALID : /^$/,
     };
   };
 }

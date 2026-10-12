@@ -378,9 +378,10 @@ export class GitPanel {
       const { MergeView } = await import("@codemirror/merge");
       const { EditorView, lineNumbers } = await import("@codemirror/view");
       const { EditorState } = await import("@codemirror/state");
-      const { sql, PLSQL } = await import("@codemirror/lang-sql");
+      const { sql } = await import("@codemirror/lang-sql");
+      const { ORACLE, oracleHighlight } = await import("./oracle-dialect");
       const { syntaxHighlighting, defaultHighlightStyle } = await import("@codemirror/language");
-      const ext = [lineNumbers(), EditorView.editable.of(false), EditorState.readOnly.of(true), sql({ dialect: PLSQL }), syntaxHighlighting(defaultHighlightStyle, { fallback: true })];
+      const ext = [lineNumbers(), EditorView.editable.of(false), EditorState.readOnly.of(true), sql({ dialect: ORACLE }), syntaxHighlighting(oracleHighlight), syntaxHighlighting(defaultHighlightStyle)];
       box.append(head);
       const mv = h("div", { class: "git-merge" });
       box.append(mv);

@@ -2,6 +2,7 @@
   --bg: #f6f7f9; --panel: #ffffff; --line: #d9dde3; --text: #1d232b; --dim: #6b7480;
   --accent: #2f6fdd; --accent-text: #fff; --danger: #c62f3c; --ok: #1d8a4a; --warn: #b8730a;
   --sel: #cfe0ff; --odd: #f7f9fc; --hover: #eef2f8;
+  --hl-fn: #a05a00;
   --mono: ui-monospace, "D2Coding", Consolas, "Cascadia Mono", monospace;
   --sans: "Pretendard", "Malgun Gothic", system-ui, sans-serif;
   color-scheme: light;
@@ -11,6 +12,7 @@
     --bg: #16191e; --panel: #1d2127; --line: #313740; --text: #dfe3e8; --dim: #8d96a2;
     --accent: #4b8cf0; --sel: #2b3f63; --odd: #20252c; --hover: #262c34;
     --danger: #e0525e; --ok: #3cb371; --warn: #e0a030;
+    --hl-fn: #e0a860;
     color-scheme: dark;
   }
 }

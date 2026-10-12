@@ -681,6 +681,11 @@ pub fn analyze(src: &str, cursor: usize) -> Analysis {
                     if is_w(Some(&toks[q]), "INTO") {
                         break;
                     }
+                    // INSERT INTO t VALUES ( … — 값 목록이지 컬럼 목록이 아니다
+                    if is_w(Some(&toks[q]), "VALUES") || is_w(Some(&toks[q]), "SELECT") {
+                        names.clear();
+                        break;
+                    }
                     names.insert(0, toks[q].clone());
                 }
                 if is_w(Some(&toks[q]), "INTO") && !names.is_empty() {
@@ -1036,24 +1041,73 @@ pub const KEYWORDS: &[&str] = &[
     "ANY", "SOME", "ESCAPE", "NOCYCLE", "SIBLINGS",
 ];
 
+/// Oracle 내장 함수 (이름, 사용법). 11g 에서 쓸 수 있는 것 위주, 12c 이상은 표시.
 const FUNCTIONS: &[(&str, &str)] = &[
+    // NULL·조건
     ("NVL", "NVL(expr, 대체값)"), ("NVL2", "NVL2(expr, NULL 아닐 때, NULL 일 때)"),
     ("DECODE", "DECODE(expr, 값1, 결과1, ..., 기본값)"), ("COALESCE", "COALESCE(expr1, expr2, ...)"),
-    ("TO_CHAR", "TO_CHAR(값, 'YYYY-MM-DD')"), ("TO_DATE", "TO_DATE('문자', 'YYYY-MM-DD')"),
-    ("TO_NUMBER", "TO_NUMBER(문자)"), ("TRUNC", "TRUNC(날짜|숫자 [, 단위])"), ("ROUND", "ROUND(숫자 [, 자리])"),
-    ("SUBSTR", "SUBSTR(문자, 시작 [, 길이])"), ("INSTR", "INSTR(문자, 찾을 문자)"), ("LENGTH", "LENGTH(문자)"),
-    ("UPPER", "UPPER(문자)"), ("LOWER", "LOWER(문자)"), ("TRIM", "TRIM(문자)"), ("LPAD", "LPAD(문자, 길이, 채울 문자)"),
-    ("RPAD", "RPAD(문자, 길이, 채울 문자)"), ("REPLACE", "REPLACE(문자, 찾을, 바꿀)"),
-    ("REGEXP_LIKE", "REGEXP_LIKE(문자, 패턴)"), ("REGEXP_SUBSTR", "REGEXP_SUBSTR(문자, 패턴)"),
-    ("REGEXP_REPLACE", "REGEXP_REPLACE(문자, 패턴, 바꿀)"),
-    ("COUNT", "COUNT(*)"), ("SUM", "SUM(expr)"), ("AVG", "AVG(expr)"), ("MIN", "MIN(expr)"), ("MAX", "MAX(expr)"),
-    ("LISTAGG", "LISTAGG(expr, ',') WITHIN GROUP (ORDER BY ...)  — 11.2+"),
+    ("NULLIF", "NULLIF(a, b) — 같으면 NULL"), ("LNNVL", "LNNVL(조건)"), ("NANVL", "NANVL(n, 대체값)"),
+    ("GREATEST", "GREATEST(a, b, ...)"), ("LEAST", "LEAST(a, b, ...)"),
+    // 변환
+    ("TO_CHAR", "TO_CHAR(값, 'YYYY-MM-DD HH24:MI:SS')"), ("TO_DATE", "TO_DATE('문자', 'YYYY-MM-DD')"),
+    ("TO_NUMBER", "TO_NUMBER(문자 [, 형식])"), ("TO_TIMESTAMP", "TO_TIMESTAMP('문자', 'YYYY-MM-DD HH24:MI:SS.FF')"),
+    ("TO_TIMESTAMP_TZ", "TO_TIMESTAMP_TZ('문자', 형식)"), ("TO_CLOB", "TO_CLOB(문자)"), ("TO_NCHAR", "TO_NCHAR(값)"),
+    ("TO_NCLOB", "TO_NCLOB(문자)"), ("TO_BLOB", "TO_BLOB(raw)"), ("TO_DSINTERVAL", "TO_DSINTERVAL('DD HH:MI:SS')"),
+    ("TO_YMINTERVAL", "TO_YMINTERVAL('YY-MM')"), ("TO_MULTI_BYTE", "TO_MULTI_BYTE(문자)"), ("TO_SINGLE_BYTE", "TO_SINGLE_BYTE(문자)"),
+    ("CAST", "CAST(expr AS 형식)"), ("CONVERT", "CONVERT(문자, 대상 문자셋 [, 원래 문자셋])"),
+    ("HEXTORAW", "HEXTORAW(문자)"), ("RAWTOHEX", "RAWTOHEX(raw)"), ("ROWIDTOCHAR", "ROWIDTOCHAR(rowid)"),
+    ("CHARTOROWID", "CHARTOROWID(문자)"), ("NUMTODSINTERVAL", "NUMTODSINTERVAL(n, 'DAY'|'HOUR'|'MINUTE'|'SECOND')"),
+    ("NUMTOYMINTERVAL", "NUMTOYMINTERVAL(n, 'YEAR'|'MONTH')"), ("ASCIISTR", "ASCIISTR(문자)"), ("UNISTR", "UNISTR('\\ac00')"),
+    // 문자
+    ("SUBSTR", "SUBSTR(문자, 시작 [, 길이])"), ("SUBSTRB", "SUBSTRB(문자, 시작바이트 [, 바이트 수])"),
+    ("INSTR", "INSTR(문자, 찾을 문자 [, 시작 [, n번째]])"), ("INSTRB", "INSTRB(문자, 찾을 문자)"),
+    ("LENGTH", "LENGTH(문자)"), ("LENGTHB", "LENGTHB(문자) — 바이트 수"), ("UPPER", "UPPER(문자)"), ("LOWER", "LOWER(문자)"),
+    ("INITCAP", "INITCAP(문자)"), ("TRIM", "TRIM([LEADING|TRAILING|BOTH 문자 FROM] 문자)"), ("LTRIM", "LTRIM(문자 [, 지울 문자])"),
+    ("RTRIM", "RTRIM(문자 [, 지울 문자])"), ("LPAD", "LPAD(문자, 길이, 채울 문자)"), ("RPAD", "RPAD(문자, 길이, 채울 문자)"),
+    ("REPLACE", "REPLACE(문자, 찾을, 바꿀)"), ("TRANSLATE", "TRANSLATE(문자, 원래 글자들, 바꿀 글자들)"),
+    ("CONCAT", "CONCAT(a, b)"), ("CHR", "CHR(코드)"), ("ASCII", "ASCII(문자)"), ("SOUNDEX", "SOUNDEX(문자)"),
+    ("REVERSE", "REVERSE(문자)"), ("DUMP", "DUMP(expr [, 형식])"), ("VSIZE", "VSIZE(expr) — 바이트 수"),
+    ("REGEXP_LIKE", "REGEXP_LIKE(문자, 패턴 [, 'i'])"), ("REGEXP_SUBSTR", "REGEXP_SUBSTR(문자, 패턴 [, 시작 [, n번째]])"),
+    ("REGEXP_REPLACE", "REGEXP_REPLACE(문자, 패턴, 바꿀)"), ("REGEXP_INSTR", "REGEXP_INSTR(문자, 패턴)"),
+    ("REGEXP_COUNT", "REGEXP_COUNT(문자, 패턴) — 11g+"),
+    // 숫자
+    ("ROUND", "ROUND(숫자|날짜 [, 자리|단위])"), ("TRUNC", "TRUNC(날짜|숫자 [, 단위])"), ("CEIL", "CEIL(숫자)"),
+    ("FLOOR", "FLOOR(숫자)"), ("ABS", "ABS(숫자)"), ("MOD", "MOD(a, b)"), ("REMAINDER", "REMAINDER(a, b)"),
+    ("POWER", "POWER(a, b)"), ("SQRT", "SQRT(n)"), ("SIGN", "SIGN(n)"), ("EXP", "EXP(n)"), ("LN", "LN(n)"),
+    ("LOG", "LOG(밑, n)"), ("BITAND", "BITAND(a, b)"), ("WIDTH_BUCKET", "WIDTH_BUCKET(expr, 최소, 최대, 구간 수)"),
+    // 날짜
+    ("ADD_MONTHS", "ADD_MONTHS(날짜, 개월)"), ("MONTHS_BETWEEN", "MONTHS_BETWEEN(날짜1, 날짜2)"),
+    ("LAST_DAY", "LAST_DAY(날짜)"), ("NEXT_DAY", "NEXT_DAY(날짜, '월요일')"), ("EXTRACT", "EXTRACT(YEAR FROM 날짜)"),
+    ("CURRENT_DATE", "CURRENT_DATE"), ("CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP"), ("LOCALTIMESTAMP", "LOCALTIMESTAMP"),
+    ("SYSTIMESTAMP", "SYSTIMESTAMP"), ("SYSDATE", "SYSDATE"), ("NEW_TIME", "NEW_TIME(날짜, 'KST', 'GMT')"),
+    ("FROM_TZ", "FROM_TZ(timestamp, '+09:00')"), ("SYS_EXTRACT_UTC", "SYS_EXTRACT_UTC(timestamp)"),
+    ("DBTIMEZONE", "DBTIMEZONE"), ("SESSIONTIMEZONE", "SESSIONTIMEZONE"),
+    // 집계
+    ("COUNT", "COUNT(*) | COUNT(DISTINCT expr)"), ("SUM", "SUM(expr)"), ("AVG", "AVG(expr)"), ("MIN", "MIN(expr)"),
+    ("MAX", "MAX(expr)"), ("MEDIAN", "MEDIAN(expr)"), ("STDDEV", "STDDEV(expr)"), ("VARIANCE", "VARIANCE(expr)"),
+    ("LISTAGG", "LISTAGG(expr, ',') WITHIN GROUP (ORDER BY ...) — 11.2+"), ("XMLAGG", "XMLAGG(XMLELEMENT(E, expr || ',')).EXTRACT('//text()')"),
+    ("COLLECT", "COLLECT(expr)"), ("GROUPING", "GROUPING(expr)"), ("GROUPING_ID", "GROUPING_ID(a, b, ...)"),
+    ("CORR", "CORR(a, b)"), ("COVAR_POP", "COVAR_POP(a, b)"), ("REGR_SLOPE", "REGR_SLOPE(y, x)"),
+    ("APPROX_COUNT_DISTINCT", "APPROX_COUNT_DISTINCT(expr) — 12c+"),
+    // 분석 (OVER)
     ("ROW_NUMBER", "ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)"), ("RANK", "RANK() OVER (...)"),
-    ("DENSE_RANK", "DENSE_RANK() OVER (...)"), ("LAG", "LAG(expr [, n]) OVER (ORDER BY ...)"),
-    ("LEAD", "LEAD(expr [, n]) OVER (ORDER BY ...)"), ("ADD_MONTHS", "ADD_MONTHS(날짜, 개월)"),
-    ("MONTHS_BETWEEN", "MONTHS_BETWEEN(날짜1, 날짜2)"), ("LAST_DAY", "LAST_DAY(날짜)"),
-    ("GREATEST", "GREATEST(a, b, ...)"), ("LEAST", "LEAST(a, b, ...)"), ("ABS", "ABS(숫자)"), ("MOD", "MOD(a, b)"),
-    ("CAST", "CAST(expr AS 형식)"), ("EXTRACT", "EXTRACT(YEAR FROM 날짜)"), ("SYS_GUID", "SYS_GUID()"),
+    ("DENSE_RANK", "DENSE_RANK() OVER (...)"), ("NTILE", "NTILE(n) OVER (ORDER BY ...)"),
+    ("LAG", "LAG(expr [, n [, 기본값]]) OVER (ORDER BY ...)"), ("LEAD", "LEAD(expr [, n [, 기본값]]) OVER (ORDER BY ...)"),
+    ("FIRST_VALUE", "FIRST_VALUE(expr) OVER (...)"), ("LAST_VALUE", "LAST_VALUE(expr) OVER (... ROWS BETWEEN ...)"),
+    ("NTH_VALUE", "NTH_VALUE(expr, n) OVER (...) — 11.2+"), ("CUME_DIST", "CUME_DIST() OVER (...)"),
+    ("PERCENT_RANK", "PERCENT_RANK() OVER (...)"), ("RATIO_TO_REPORT", "RATIO_TO_REPORT(expr) OVER (...)"),
+    ("PERCENTILE_CONT", "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ...)"), ("PERCENTILE_DISC", "PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY ...)"),
+    // 계층
+    ("SYS_CONNECT_BY_PATH", "SYS_CONNECT_BY_PATH(expr, '/')"), ("CONNECT_BY_ROOT", "CONNECT_BY_ROOT expr"),
+    // 기타
+    ("SYS_GUID", "SYS_GUID()"), ("SYS_CONTEXT", "SYS_CONTEXT('USERENV', 'SESSION_USER')"), ("USERENV", "USERENV('SESSIONID')"),
+    ("UID", "UID"), ("USER", "USER"), ("ORA_HASH", "ORA_HASH(expr [, 최대 버킷])"), ("STANDARD_HASH", "STANDARD_HASH(expr, 'SHA256') — 12c+"),
+    ("EMPTY_CLOB", "EMPTY_CLOB()"), ("EMPTY_BLOB", "EMPTY_BLOB()"), ("BFILENAME", "BFILENAME('디렉터리', '파일')"),
+    ("XMLELEMENT", "XMLELEMENT(이름, expr)"), ("XMLTYPE", "XMLTYPE(문자)"), ("EXTRACTVALUE", "EXTRACTVALUE(xml, '/경로')"),
+    ("JSON_VALUE", "JSON_VALUE(json, '$.경로') — 12c+"), ("JSON_QUERY", "JSON_QUERY(json, '$.경로') — 12c+"),
+    ("JSON_OBJECT", "JSON_OBJECT('키' VALUE expr) — 12.2+"), ("JSON_ARRAYAGG", "JSON_ARRAYAGG(expr) — 12.2+"),
+    ("JSON_TABLE", "JSON_TABLE(json, '$[*]' COLUMNS (...)) — 12c+"), ("TREAT", "TREAT(expr AS 형식)"),
+    ("NLS_UPPER", "NLS_UPPER(문자)"), ("NLS_LOWER", "NLS_LOWER(문자)"), ("NLSSORT", "NLSSORT(문자, 'NLS_SORT=KOREAN_M')"),
 ];
 
 /// 구절 다음에 올 만한 키워드 (앞쪽이 먼저)
@@ -1478,8 +1532,13 @@ pub fn suggest(a: &Analysis, cache: &SchemaCache, limit: usize) -> Completion {
             }
             // 함수
             for (f, sig) in FUNCTIONS {
+                // SYSDATE·USER 처럼 키워드로도 나오는 것은 한 번만
+                if KEYWORDS.contains(f) {
+                    continue;
+                }
                 let l = out.case(f);
-                let apply = Some(format!("{l}("));
+                // 괄호 없이 쓰는 것(CURRENT_DATE, CONNECT_BY_ROOT …)은 이름만
+                let apply = sig.starts_with(&format!("{f}(")).then(|| format!("{l}("));
                 out.push(l, "function", 120, Some((*sig).into()), None, apply);
             }
         }

@@ -303,3 +303,24 @@ fn fast_on_large_schema() {
         assert!(items > 0);
     }
 }
+
+#[test]
+fn oracle_functions_everywhere() {
+    let c = cache();
+    for s in ["select dec| from emp", "select * from emp where dec|", "update emp set sal = dec|", "insert into emp values (dec|",
+        "insert into emp (empno, sal) values (1, dec|", "select * from emp order by dec|", "begin v := dec|", "select nvl(dec| from emp"] {
+        let r = at(s, &c);
+        assert!(has(&r, "decode"), "{s} → {:?} ({})", labels(&r, 5), r.context);
+    }
+    // INSERT … VALUES ( 는 컬럼 목록이 아니다
+    assert_ne!(at("insert into emp values (|", &c).context, "insert_columns");
+    assert_eq!(at("insert into emp (|", &c).context, "insert_columns");
+    // 괄호 없이 쓰는 함수는 이름만 넣는다, 키워드와 겹치는 것은 한 번만
+    let r = at("select current_da| from emp", &c);
+    let it = r.items.iter().find(|i| i.label == "current_date").expect("current_date");
+    assert!(it.apply.is_none());
+    let r = at("select sysd| from emp", &c);
+    assert_eq!(r.items.iter().filter(|i| i.label == "sysdate").count(), 1);
+    let r = at("select regexp_c| from emp", &c);
+    assert_eq!(r.items.iter().find(|i| i.label == "regexp_count").and_then(|i| i.apply.clone()).as_deref(), Some("regexp_count("));
+}

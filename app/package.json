@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "node scripts/notices.mjs && tsc --noEmit && vite build",
+    "notices": "node scripts/notices.mjs",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit"
   },

@@ -315,3 +315,8 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .dfd-title { font-family: var(--mono); font-weight: 600; word-break: break-all; }
 .dfd-legend { display: grid; gap: 3px; margin: 8px 0; }
 .dfd-sw { display: inline-block; width: 22px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+
+/* ── 설정 > 정보 ── */
+.about { display: flex; flex-direction: column; min-height: 0; }
+.about p { margin: 4px 0; }
+.about-notices { width: 100%; height: 52vh; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }

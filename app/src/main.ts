@@ -1020,6 +1020,7 @@ class App {
       "AI": () => this.providersPage(),
       "MCP": () => this.mcpPage(),
       "편집기": async () => this.editorPage(),
+      "정보": async () => this.aboutPage(),
     };
     const content = h("div", { class: "settings-content" });
     const showPage = async (name: string) => {
@@ -1032,6 +1033,16 @@ class App {
     await modal("설정", body, [{ label: "닫기", value: true, kind: "primary" }], { wide: true });
     await this.reloadProfiles();
     await this.ai.load();
+  }
+
+  private async aboutPage() {
+    const info = await api.appInfo();
+    return h("div", { class: "about" },
+      h("p", {}, h("strong", {}, `SQLStudio ${info.version}`)),
+      h("p", { class: "hint" }, `설정 파일: ${info.config_path}`),
+      h("h4", {}, "오픈소스 라이선스"),
+      h("p", { class: "hint" }, "이 프로그램에 포함된 오픈소스 구성 요소와 라이선스입니다. 설치 폴더의 THIRD_PARTY_NOTICES.html 과 같은 내용입니다."),
+      h("iframe", { class: "about-notices", src: "/third-party-notices.html", title: "오픈소스 라이선스 고지" }));
   }
 
   private editorPage() {

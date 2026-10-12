@@ -49,7 +49,6 @@ function explain(e: unknown): string {
 }
 
 export class GitPanel {
-  readonly el = h("div", { class: "git" });
   private repo: RepoInfo | null = null;
   private st: Status | null = null;
   private files: string[] = [];
@@ -68,12 +67,18 @@ export class GitPanel {
   private busy = false;
   private fetchTimer = 0;
   private refreshTimer = 0;
+  /** 패널이 보일 때만 트리를 그린다. 숨어 있는 동안 바뀌면 보일 때 그린다 */
+  private visible = false;
+  private treeStale = true;
+  /** 상태 읽기가 진행 중이면 겹쳐 부르지 않는다 */
+  private reading: Promise<void> | null = null;
 
-  constructor(private host: GitHost) {
+  constructor(private host: GitHost, readonly el: HTMLElement = h("div", { class: "git" })) {
     this.filterIn.addEventListener("input", () => this.renderTree());
     this.commitBtn.onclick = () => this.commit();
     this.msgIn.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.ctrlKey) { e.preventDefault(); this.commit(); } });
     this.branchSel.onchange = () => this.switchBranch();
+    // 창으로 돌아오면 상태만 가볍게 다시 본다 (파일 목록·브랜치는 바뀐 게 보일 때만)
     window.addEventListener("focus", () => this.refreshSoon());
     this.renderEmpty();
     const last = localStorage.getItem(LAST_KEY);
@@ -181,6 +186,11 @@ export class GitPanel {
         h("div", { class: "row" }, this.commitBtn, h("label", { class: "check" }, this.pushAfter, "커밋 후 푸시"))));
   }
 
+  setVisible(v: boolean) {
+    this.visible = v;
+    if (v && this.treeStale && this.repo) this.renderTree();
+  }
+
   /** 상태·파일·브랜치를 다시 읽는다 */
   async reload() {
     const r = this.repo;
@@ -192,32 +202,59 @@ export class GitPanel {
         invoke<Branches>("git_branches", { root: r.root }),
       ]);
       if (r !== this.repo) return;
-      this.st = st;
       this.files = files;
-      for (const f of st.files) if (!this.checked.has(f.path)) this.checked.set(f.path, f.code !== "?");
-      for (const k of [...this.checked.keys()]) if (!st.files.some((f) => f.path === k)) this.checked.delete(k);
       this.renderBranches(br);
-      this.renderState();
+      this.applyStatus(st);
       this.renderTree();
-      this.renderChanges();
     } catch (e) {
       toast(explain(e), "error", 8000);
     }
+  }
+
+  private applyStatus(st: Status) {
+    this.st = st;
+    for (const f of st.files) if (!this.checked.has(f.path)) this.checked.set(f.path, f.code !== "?");
+    for (const k of [...this.checked.keys()]) if (!st.files.some((f) => f.path === k)) this.checked.delete(k);
+    this.renderState();
+    this.renderChanges();
+  }
+
+  /** 가벼운 갱신: git status 하나만. 파일이 새로 생기거나 없어졌을 때만 파일 목록을 다시 읽는다 */
+  private async refreshStatus() {
+    const r = this.repo;
+    if (!r || this.busy) return;
+    if (this.reading) return this.reading;
+    this.reading = (async () => {
+      const st = await invoke<Status>("git_status", { root: r.root });
+      if (r !== this.repo) return;
+      const prev = this.st;
+      const key = (s: Status | null) => (s?.files ?? []).map((f) => `${f.code}${f.path}`).join("\n");
+      const branchChanged = prev?.branch !== st.branch;
+      if (key(prev) === key(st) && !branchChanged && prev?.ahead === st.ahead && prev?.behind === st.behind) return;
+      const known = new Set(this.files);
+      const filesChanged = st.files.some((f) => (f.code === "?" || f.code === "A" || f.code === "D" || f.code === "R") && !known.has(f.path))
+        || (prev?.files ?? []).some((f) => f.code === "?" && !st.files.some((x) => x.path === f.path));
+      if (branchChanged || filesChanged) return this.reload();
+      this.applyStatus(st);
+      this.renderTree();
+    })().catch(() => { /* 다음 갱신 때 다시 */ }).finally(() => { this.reading = null; });
+    return this.reading;
   }
 
   /** 파일 저장 뒤·창 포커스 때 — 몰려도 한 번만 */
   refreshSoon() {
     if (!this.repo || this.busy) return;
     clearTimeout(this.refreshTimer);
-    this.refreshTimer = window.setTimeout(() => this.reload(), 300);
+    this.refreshTimer = window.setTimeout(() => void this.refreshStatus(), 300);
   }
 
   private async fetchQuiet() {
     const r = this.repo;
-    if (!r?.remote || this.busy) return;
+    // 창이 최소화·뒤에 있으면 건너뛴다
+    if (!r?.remote || this.busy || document.hidden) return;
     try {
       await invoke("git_fetch", { root: r.root });
-      if (r === this.repo) this.reload();
+      if (r === this.repo) this.refreshStatus();
     } catch { /* 사내망 밖 등 — 조용히 넘긴다. 풀/푸시 때 알린다 */ }
   }
 
@@ -239,6 +276,8 @@ export class GitPanel {
   }
 
   private renderTree() {
+    if (!this.visible) { this.treeStale = true; return; }
+    this.treeStale = false;
     const st = this.st;
     const q = this.filterIn.value.trim().toLowerCase();
     const code = new Map((st?.files ?? []).map((f) => [f.path, f.code]));

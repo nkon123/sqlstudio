@@ -7,7 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { api, errOf, type Provider } from "./api";
-import { DfdView } from "./dfd";
+import type { DfdView } from "./dfd";
 import { confirmBox, h, toast } from "./ui";
 
 interface UnitRef { owner: string; name: string; unit_type: string }
@@ -307,7 +307,7 @@ export class AnalysisView {
     }
     if (this.view === "summary") return this.renderSummary(g);
     if (this.view === "calls") return this.renderCalls(g);
-    if (this.view === "dfd") return this.renderDfd(g);
+    if (this.view === "dfd") return void this.renderDfd(g);
     if (this.view === "tables") return this.renderTables(g);
     if (this.view === "quality") return void this.renderQuality();
     return this.renderFindings(g);
@@ -410,8 +410,14 @@ export class AnalysisView {
     this.content.replaceChildren(h("div", { class: "an-split" }, h("div", { class: "an-col" }, input, list), detail));
   }
 
-  private renderDfd(g: Integrated) {
-    this.dfd ??= new DfdView((id) => { this.view = "calls"; this.focusNode = id; this.render(); });
+  /** 흐름도 코드(그림 라이브러리 포함)는 이 탭을 처음 열 때 불러온다 — 시작 번들을 키우지 않게 */
+  private async renderDfd(g: Integrated) {
+    if (!this.dfd) {
+      this.content.replaceChildren(h("div", { class: "hint an-pad" }, "흐름도를 불러오는 중…"));
+      const { DfdView } = await import("./dfd");
+      this.dfd ??= new DfdView((id) => { this.view = "calls"; this.focusNode = id; this.render(); });
+      if (this.view !== "dfd") return;
+    }
     this.content.replaceChildren(this.dfd.el);
     if (this.dfdOf !== g || this.dfdFocus) {
       this.dfdOf = g;

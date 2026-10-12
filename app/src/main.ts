@@ -17,7 +17,7 @@ import { DebugView } from "./debugger";
 import { MonitorView } from "./monitor";
 import { SqlEditor } from "./editor";
 import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from "./format";
-import { GitPanel } from "./git";
+import type { GitPanel } from "./git";
 import { ResultGrid } from "./grid";
 import { alertBox, bindBox, confirmBox, field, h, modal, passwordBox, toast } from "./ui";
 
@@ -256,7 +256,10 @@ class App {
   private browserObjs: ObjectEntry[] = [];
   private pickedTables = new Set<string>();
   private ai: AiPanel;
-  private git: GitPanel;
+  /** 프로젝트(Git) 패널 — 처음 필요할 때 불러온다 (시작을 늦추지 않게) */
+  private git: GitPanel | null = null;
+  private gitPane = h("div", { class: "git" });
+  private gitLoading: Promise<GitPanel> | null = null;
   private gitBadge = h("span", { class: "git-badge" });
   private layout!: SideLayout;
   private timer = 0;
@@ -296,26 +299,18 @@ class App {
       this.browserFilter,
       this.browserList,
       h("small", { class: "hint" }, "클릭: 구조 · 더블클릭: 이름 넣기 · 체크: AI 문맥에 포함"));
-    this.git = new GitPanel({
-      openPath: (p) => this.openPath(p),
-      tabsUnder: (root) => {
-        const r = normPath(root) + "/";
-        return this.tabs.filter((t) => t.filePath && normPath(t.filePath).startsWith(r)).map((t) => ({
-          path: t.filePath!, dirty: t.dirty, reload: () => this.reloadTab(t),
-        }));
-      },
-      onState: (text, title) => { this.gitBadge.textContent = text; this.gitBadge.title = title; },
-    });
     // 왼쪽 영역: 테이블 | 프로젝트
     const sideTabs = h("div", { class: "side-tabs" });
-    const panes: Record<string, HTMLElement> = { table: tablePane, git: this.git.el };
+    const panes: Record<string, HTMLElement> = { table: tablePane, git: this.gitPane };
     const showSide = (k: string) => {
       for (const [n, el] of Object.entries(panes)) el.hidden = n !== k;
       for (const b of sideTabs.children) b.classList.toggle("on", (b as HTMLElement).dataset.k === k);
       try { localStorage.setItem("side.tab", k); } catch { /* 없어도 된다 */ }
+      if (k === "git") this.loadGit().then((g) => g.setVisible(true));
+      else this.git?.setVisible(false);
     };
     for (const [k, label] of [["table", "테이블"], ["git", "프로젝트"]]) sideTabs.append(h("button", { "data-k": k, onclick: () => showSide(k) }, label));
-    const browser = h("aside", { class: "browser" }, sideTabs, tablePane, this.git.el);
+    const browser = h("aside", { class: "browser" }, sideTabs, tablePane, this.gitPane);
     let sideTab = "table";
     try { sideTab = localStorage.getItem("side.tab") === "git" ? "git" : "table"; } catch { /* 기본 */ }
     showSide(sideTab);
@@ -378,6 +373,10 @@ class App {
     await this.reloadProfiles();
     await this.ai.load();
     this.newTab(false);
+    if (localStorage.getItem("git.last")) {
+      const later = (f: () => void) => ("requestIdleCallback" in window ? requestIdleCallback(f, { timeout: 4000 }) : setTimeout(f, 2000));
+      later(() => void this.loadGit());
+    }
     this.refresh();
     getCurrentWindow().onCloseRequested(async (e) => {
       const pending = this.tabs.filter((t) => t.txnPending);
@@ -972,6 +971,24 @@ class App {
     await this.openPath(path);
   }
 
+  /** 프로젝트 패널 모듈을 불러와 붙인다 (한 번만) */
+  private loadGit(): Promise<GitPanel> {
+    this.gitLoading ??= import("./git").then(({ GitPanel }) => {
+      this.git = new GitPanel({
+        openPath: (p) => this.openPath(p),
+        tabsUnder: (root) => {
+          const r = normPath(root) + "/";
+          return this.tabs.filter((t) => t.filePath && normPath(t.filePath).startsWith(r)).map((t) => ({
+            path: t.filePath!, dirty: t.dirty, reload: () => this.reloadTab(t),
+          }));
+        },
+        onState: (text, title) => { this.gitBadge.textContent = text; this.gitBadge.title = title; },
+      }, this.gitPane);
+      return this.git;
+    });
+    return this.gitLoading;
+  }
+
   /** 파일을 탭으로 연다. 이미 열려 있으면 그 탭으로 */
   async openPath(path: string) {
     const open = this.tabs.find((t) => t.filePath && normPath(t.filePath) === normPath(path));
@@ -1020,7 +1037,7 @@ class App {
       t.setDirty(false);
       t.refreshTitle();
       this.status(`저장했습니다 (${t.encoding})`);
-      this.git.refreshSoon();
+      this.git?.refreshSoon();
     } catch (e) {
       toast(errOf(e).message, "error");
     }

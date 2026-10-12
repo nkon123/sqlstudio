@@ -16,6 +16,7 @@ import { AnalysisView } from "./analysis";
 import { DebugView } from "./debugger";
 import { MonitorView } from "./monitor";
 import { SqlEditor } from "./editor";
+import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from "./format";
 import { ResultGrid } from "./grid";
 import { alertBox, bindBox, confirmBox, field, h, modal, passwordBox, toast } from "./ui";
 
@@ -143,6 +144,7 @@ class Tab {
       runScript: () => app.runScript(),
       explain: () => app.explain(),
       save: () => app.save(),
+      format: () => app.formatSql(),
     }, text, sqlCompletion(() => this.conn?.id));
     this.editor.view.dom.addEventListener("input", () => this.setDirty(true));
     dragSplit(splitter, editorHost);
@@ -251,6 +253,7 @@ class App {
   private browserObjs: ObjectEntry[] = [];
   private pickedTables = new Set<string>();
   private ai: AiPanel;
+  private layout!: SideLayout;
   private timer = 0;
 
   constructor(root: HTMLElement) {
@@ -276,6 +279,10 @@ class App {
       b("new", "새 탭", "새 에디터 (같은 접속으로)", () => this.newTab(true)),
       b("open", "열기", "SQL 파일 열기", () => this.openFile()),
       b("save", "저장", "Ctrl+S", () => this.save()),
+      b("format", "포맷", "SQL 정리 (Ctrl+Shift+F) — 선택 영역, 없으면 커서 위치 문장", () => this.formatSql()),
+      h("span", { class: "sep" }),
+      b("toggleBrowser", "테이블", "왼쪽 테이블 영역 접기/펼치기 (Ctrl+Shift+1) · 경계선을 끌면 너비 조절", () => this.layout.toggle("left")),
+      b("toggleAi", "AI", "오른쪽 AI 영역 접기/펼치기 (Ctrl+Shift+3) · 경계선을 끌면 너비 조절", () => this.layout.toggle("right")),
       h("span", { class: "spacer" }),
       b("settings", "설정", "접속·AI·MCP 설정", () => this.settings()),
     );
@@ -290,7 +297,11 @@ class App {
       replaceSql: (s) => this.replaceStatement(s),
     });
     const center = h("section", { class: "center" }, this.tabStrip, this.tabBodies);
-    root.append(toolbar, h("main", { class: "layout" }, browser, center, this.ai.el),
+    const main = h("main", { class: "layout" });
+    this.layout = new SideLayout(main, browser, center, this.ai.el, (side, open) => {
+      this.btn[side === "left" ? "toggleBrowser" : "toggleAi"]?.classList.toggle("active", open);
+    });
+    root.append(toolbar, main,
       h("footer", { class: "statusbar" }, this.statusLeft, h("span", { class: "spacer" }), this.compBadge, this.statusRight));
 
     this.browserOwner.addEventListener("change", () => this.loadObjects());
@@ -299,7 +310,32 @@ class App {
     this.browserFilter.addEventListener("input", () => { clearTimeout(ft); ft = window.setTimeout(() => this.loadObjects(), 250); });
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && this.active?.running) this.cancel();
+      if (e.ctrlKey && e.shiftKey && (e.code === "Digit1" || e.code === "Digit3")) {
+        e.preventDefault();
+        this.layout.toggle(e.code === "Digit1" ? "left" : "right");
+      }
     });
+  }
+
+  /** 선택 영역, 없으면 커서 위치 문장을 정리한다. 실행 취소 한 번으로 되돌린다. */
+  async formatSql() {
+    const t = this.active;
+    if (!t) return;
+    const view = t.editor.view;
+    if (view.state.selection.ranges.length > 1) return toast("여러 곳이 선택되어 있습니다 — Esc 로 하나로 만든 뒤 포맷하세요", "info");
+    const main = view.state.selection.main;
+    let from = main.from, to = main.to;
+    if (main.empty) {
+      const cur = await this.currentStatement(t);
+      if (!cur) return toast("포맷할 문장이 없습니다", "info");
+      ({ from, to } = cur);
+    }
+    const src = view.state.sliceDoc(from, to);
+    const r = formatSql(src);
+    if (!r.ok) return toast(r.reason, "error", 6000);
+    if (r.text === src) return toast("이미 정리되어 있습니다", "info");
+    view.dispatch({ changes: { from, to, insert: r.text }, selection: { anchor: from, head: from + r.text.length }, userEvent: "input.format", scrollIntoView: true });
+    t.editor.focus();
   }
 
   async start() {
@@ -983,6 +1019,7 @@ class App {
       "접속": () => this.profilesPage(),
       "AI": () => this.providersPage(),
       "MCP": () => this.mcpPage(),
+      "편집기": async () => this.editorPage(),
     };
     const content = h("div", { class: "settings-content" });
     const showPage = async (name: string) => {
@@ -995,6 +1032,46 @@ class App {
     await modal("설정", body, [{ label: "닫기", value: true, kind: "primary" }], { wide: true });
     await this.reloadProfiles();
     await this.ai.load();
+  }
+
+  private editorPage() {
+    const p = loadPrefs();
+    const sel = (cur: string, opts: [string, string][]) =>
+      h("select", {}, ...opts.map(([v, l]) => h("option", { value: v, selected: v === cur }, l))) as HTMLSelectElement;
+    const kw = sel(p.keywordCase, [["upper", "대문자 (SELECT)"], ["lower", "소문자 (select)"], ["preserve", "그대로"]]);
+    const ind = sel(String(p.indent), [["2", "2칸"], ["4", "4칸"]]);
+    const logic = sel(p.logicalBefore ? "before" : "after", [["before", "줄 앞 (AND x = 1)"], ["after", "줄 끝 (x = 1 AND)"]]);
+    const width = h("input", { type: "number", min: "20", max: "200", value: String(p.expressionWidth) }) as HTMLInputElement;
+    const preview = h("pre", { class: "format-preview" });
+    const sample = "select o.id, c.name, sum(o.amt) total from orders o join customers c on c.id = o.cust_id where o.dt >= trunc(sysdate) - 7 and c.grade in ('A','B') group by o.id, c.name order by total desc";
+    const read = (): FormatPrefs => ({
+      keywordCase: kw.value as FormatPrefs["keywordCase"],
+      indent: ind.value === "4" ? 4 : 2,
+      expressionWidth: Math.max(20, Math.min(200, Number(width.value) || DEFAULT_PREFS.expressionWidth)),
+      logicalBefore: logic.value === "before",
+    });
+    const update = () => {
+      const prefs = read();
+      savePrefs(prefs);
+      const r = formatSql(sample, prefs);
+      preview.textContent = r.ok ? r.text : r.reason;
+    };
+    for (const el of [kw, ind, logic, width]) el.addEventListener("change", update);
+    update();
+    return h("div", { class: "form" },
+      h("h3", {}, "SQL 포맷 (Ctrl+Shift+F)"),
+      field("키워드", kw), field("들여쓰기", ind), field("AND / OR 위치", logic),
+      field("괄호 식 한 줄 최대 길이", width, "이보다 길면 여러 줄로 나눕니다"),
+      h("small", {}, "바꾸면 바로 저장됩니다. 포맷 결과가 공백·대소문자 말고 원본과 달라지면 적용하지 않습니다. PL/SQL 블록은 아직 포맷하지 않습니다."),
+      field("미리 보기", preview),
+      h("h3", {}, "여러 곳 편집 (열 편집)"),
+      h("pre", { class: "format-preview" },
+        "Alt + 드래그          사각형(열) 선택\n" +
+        "Alt + Shift + 방향키   키보드로 사각형 선택\n" +
+        "Ctrl + 클릭           커서 추가\n" +
+        "Ctrl + D              같은 단어 하나 더 선택\n" +
+        "Esc                   커서 하나로"),
+    );
   }
 
   private async profilesPage() {
@@ -1162,6 +1239,77 @@ function hintFor(err: ErrView): string {
   ];
   const tip = tips.find(([re]) => re.test(m))?.[1];
   return tip ? `${m}\n\n${tip}` : m;
+}
+
+/** 왼쪽(테이블)·오른쪽(AI) 영역: 경계선을 끌어 너비 조절, 접기/펼치기, 상태는 다음 실행에도 유지 */
+class SideLayout {
+  private w = { left: 240, right: 360 };
+  private open = { left: true, right: true };
+
+  constructor(private root: HTMLElement, left: HTMLElement, center: HTMLElement, right: HTMLElement,
+    private onChange: (side: "left" | "right", open: boolean) => void) {
+    try {
+      const s = JSON.parse(localStorage.getItem("layout.sides") ?? "{}");
+      if (s.w) this.w = { ...this.w, ...s.w };
+      if (s.open) this.open = { ...this.open, ...s.open };
+    } catch { /* 기본값 */ }
+    root.append(left, this.splitter("left"), center, this.splitter("right"), right);
+    this.apply();
+  }
+
+  toggle(side: "left" | "right", open = !this.open[side]) {
+    this.open[side] = open;
+    this.apply();
+  }
+
+  private splitter(side: "left" | "right") {
+    const btn = h("button", { class: "vsplit-btn", title: "접기/펼치기 (경계선 더블클릭도 됨)", onclick: (e: Event) => { e.stopPropagation(); this.toggle(side); } });
+    const el = h("div", { class: `vsplit ${side}`, title: "끌어서 너비 조절 · 더블클릭: 접기/펼치기" }, btn);
+    el.addEventListener("dblclick", () => this.toggle(side));
+    el.addEventListener("mousedown", (e) => {
+      if (e.target === btn) return;
+      e.preventDefault();
+      const x0 = e.clientX;
+      const w0 = this.open[side] ? this.w[side] : 0;
+      document.body.classList.add("col-resizing");
+      const move = (ev: MouseEvent) => {
+        const dx = side === "left" ? ev.clientX - x0 : x0 - ev.clientX;
+        const max = Math.max(200, Math.min(800, window.innerWidth * 0.5));
+        const nw = w0 + dx;
+        if (nw < 80) {
+          this.open[side] = false;
+        } else {
+          this.open[side] = true;
+          this.w[side] = Math.round(Math.min(max, Math.max(160, nw)));
+        }
+        this.apply(false);
+      };
+      const up = () => {
+        document.body.classList.remove("col-resizing");
+        window.removeEventListener("mousemove", move);
+        window.removeEventListener("mouseup", up);
+        this.apply();
+      };
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+    });
+    return el;
+  }
+
+  private apply(save = true) {
+    const l = this.open.left ? `${this.w.left}px` : "0px";
+    const r = this.open.right ? `${this.w.right}px` : "0px";
+    this.root.style.gridTemplateColumns = `${l} 6px minmax(0, 1fr) 6px ${r}`;
+    this.root.classList.toggle("left-closed", !this.open.left);
+    this.root.classList.toggle("right-closed", !this.open.right);
+    for (const s of ["left", "right"] as const) {
+      const b = this.root.querySelector(`.vsplit.${s} .vsplit-btn`);
+      // 펼쳐져 있으면 접는 방향, 접혀 있으면 펼치는 방향
+      if (b) b.textContent = (s === "left") === this.open[s] ? "‹" : "›";
+      this.onChange(s, this.open[s]);
+    }
+    if (save) localStorage.setItem("layout.sides", JSON.stringify({ w: this.w, open: this.open }));
+  }
 }
 
 function dragSplit(handle: HTMLElement, top: HTMLElement) {

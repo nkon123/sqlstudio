@@ -1,7 +1,7 @@
 {
   "name": "sqlstudio-app",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -18,7 +18,8 @@
     "@codemirror/state": "^6.4.0",
     "@codemirror/view": "^6.34.0",
     "@tauri-apps/api": "^2.0.0",
-    "@tauri-apps/plugin-dialog": "^2.8.1"
+    "@tauri-apps/plugin-dialog": "^2.8.1",
+    "sql-formatter": "^15.9.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

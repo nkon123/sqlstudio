@@ -5,16 +5,23 @@
 //   F5               스크립트 전체 실행
 //   Ctrl+E           실행계획
 //   Ctrl+S           저장
+//   Ctrl+Shift+F     SQL 포맷 (선택 영역 또는 커서 문장)
+//
+// 여러 곳 편집 (열 편집):
+//   Alt+드래그            사각형(열) 선택
+//   Alt+Shift+방향키      키보드로 사각형 선택
+//   Ctrl+클릭             커서 추가 · Ctrl+D 같은 단어 하나 더 선택 · Esc 커서 하나로
 
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, startCompletion, type CompletionSource } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab, toggleComment } from "@codemirror/commands";
 import { PLSQL, sql } from "@codemirror/lang-sql";
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
+import type { Command } from "@codemirror/view";
 import { EditorSelection, EditorState, StateEffect, StateField } from "@codemirror/state";
 import {
   Decoration, type DecorationSet, EditorView, drawSelection, highlightActiveLine, highlightActiveLineGutter,
-  keymap, lineNumbers, rectangularSelection,
+  crosshairCursor, keymap, lineNumbers, rectangularSelection,
 } from "@codemirror/view";
 
 export interface EditorActions {
@@ -22,6 +29,42 @@ export interface EditorActions {
   runScript: () => void;
   explain: () => void;
   save: () => void;
+  format: () => void;
+}
+
+// ── 키보드 사각형 선택 (Alt+Shift+방향키) ─────────────────
+// 시작점(줄, 열)을 기억하고, 방향키로 끝점을 옮기며 줄마다 같은 열 범위를 선택한다.
+// 다른 방법으로 선택이 바뀌면 시작점을 새로 잡는다.
+const blockState = new WeakMap<EditorView, { aLine: number; aCol: number; hLine: number; hCol: number; sel: string }>();
+
+function blockMove(dLine: number, dCol: number): Command {
+  return (view) => {
+    const st = view.state;
+    const doc = st.doc;
+    let b = blockState.get(view);
+    if (!b || b.sel !== JSON.stringify(st.selection.toJSON())) {
+      const head = st.selection.main.head;
+      const line = doc.lineAt(head);
+      b = { aLine: line.number, aCol: head - line.from, hLine: line.number, hCol: head - line.from, sel: "" };
+    }
+    b.hLine = Math.min(doc.lines, Math.max(1, b.hLine + dLine));
+    b.hCol = Math.max(0, b.hCol + dCol);
+    const [l0, l1] = b.aLine <= b.hLine ? [b.aLine, b.hLine] : [b.hLine, b.aLine];
+    const ranges = [];
+    let main = 0;
+    for (let n = l0; n <= l1; n++) {
+      const ln = doc.line(n);
+      const a = ln.from + Math.min(b.aCol, ln.length);
+      const h = ln.from + Math.min(b.hCol, ln.length);
+      if (n === b.hLine) main = ranges.length;
+      ranges.push(EditorSelection.range(a, h));
+    }
+    const sel = EditorSelection.create(ranges, main);
+    view.dispatch({ selection: sel, scrollIntoView: true, userEvent: "select" });
+    b.sel = JSON.stringify(view.state.selection.toJSON());
+    blockState.set(view, b);
+    return true;
+  };
 }
 
 // 오류 위치 / 실행 중 문장 강조
@@ -63,7 +106,10 @@ export class SqlEditor {
           highlightActiveLineGutter(),
           history(),
           drawSelection(),
-          rectangularSelection(),
+          EditorState.allowMultipleSelections.of(true),
+          // Alt+드래그 사각형 선택, Alt 를 누르면 십자 커서
+          rectangularSelection({ eventFilter: (e) => e.altKey }),
+          crosshairCursor({ key: "Alt" }),
           indentOnInput(),
           bracketMatching(),
           closeBrackets(),
@@ -87,6 +133,11 @@ export class SqlEditor {
             { key: "Ctrl-e", mac: "Cmd-e", run: run(actions.explain), preventDefault: true },
             { key: "Ctrl-s", mac: "Cmd-s", run: run(actions.save), preventDefault: true },
             { key: "Ctrl-/", mac: "Cmd-/", run: toggleComment },
+            { key: "Ctrl-Shift-f", mac: "Cmd-Shift-f", run: run(actions.format), preventDefault: true },
+            { key: "Alt-Shift-ArrowUp", run: blockMove(-1, 0), preventDefault: true },
+            { key: "Alt-Shift-ArrowDown", run: blockMove(1, 0), preventDefault: true },
+            { key: "Alt-Shift-ArrowLeft", run: blockMove(0, -1), preventDefault: true },
+            { key: "Alt-Shift-ArrowRight", run: blockMove(0, 1), preventDefault: true },
             { key: "Ctrl-Space", run: startCompletion },
             ...closeBracketsKeymap,
             ...completionKeymap,

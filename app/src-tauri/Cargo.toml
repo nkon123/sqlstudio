@@ -1,6 +1,6 @@
 [package]
 name = "sqlstudio"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "SQLStudio desktop app"
 
@@ -24,3 +24,4 @@ toml = "0.8"
 encoding_rs = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rust_xlsxwriter = "0.99.1"

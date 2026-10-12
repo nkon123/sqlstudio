@@ -132,7 +132,8 @@ class Tab {
       h("nav", { class: "pane-tabs" }, btn("result", "결과"), btn("output", "출력"), btn("plan", "실행계획"), btn("desc", "구조"),
         this.filterIn, this.editBtn, this.delRowBtn, this.applyBtn, this.discardBtn,
         h("span", { class: "spacer" }), this.gridStatus,
-        h("button", { class: "small", title: "가져온 행을 CSV 로 복사", onclick: () => this.copyCsv() }, "CSV 복사")),
+        h("button", { class: "small", title: "가져온 행을 CSV 로 복사", onclick: () => this.copyCsv() }, "CSV 복사"),
+        h("button", { class: "small", title: "결과를 엑셀(.xlsx) 파일로 저장 — 보이는 열·정렬·필터 그대로", onclick: () => this.exportExcel() }, "엑셀")),
       gridPane, this.output, this.plan, this.desc);
     const splitter = h("div", { class: "splitter" });
     this.root = h("div", { class: "tab-body" }, editorHost, splitter, bottom);
@@ -178,6 +179,49 @@ class Tab {
     const span = h("span", { class: cls }, line + "\n");
     this.output.append(span);
     this.output.scrollTop = this.output.scrollHeight;
+  }
+
+  async exportExcel() {
+    if (!this.grid.rowCount()) return toast("내보낼 결과가 없습니다", "info");
+    const LIMIT = 1_048_575;
+    if (this.grid.hasMoreRows()) {
+      const choice = await modal<"all" | "loaded">("엑셀로 내보내기",
+        h("pre", { class: "modal-text" },
+          `지금 ${this.grid.rowCount().toLocaleString()}행을 가져왔고, 서버에 행이 더 남아 있습니다.\n\n` +
+          "전체를 내보내려면 남은 행을 모두 가져옵니다 (행이 많으면 시간이 걸립니다).\n엑셀 한 시트는 1,048,575행까지입니다."),
+        [{ label: "가져온 행만", value: "loaded" }, { label: "전체 가져와서 내보내기", value: "all", kind: "primary" }]);
+      if (!choice) return;
+      if (choice === "all") {
+        let stop = false;
+        const cancel = h("button", { class: "small", onclick: () => { stop = true; } }, "중지");
+        this.gridStatus.after(cancel);
+        try {
+          const r = await this.grid.loadAll(LIMIT, (n) => { this.gridStatus.textContent = `${n.toLocaleString()}행 가져오는 중…`; }, () => stop);
+          if (r === "cancelled") return toast("내보내기를 멈췄습니다 (가져온 행은 그리드에 남아 있습니다)", "info");
+          if (r === "limit") toast(`엑셀 한도(${LIMIT.toLocaleString()}행)까지만 내보냅니다`, "info", 6000);
+        } catch (e) {
+          return toast(errOf(e).message, "error");
+        } finally {
+          cancel.remove();
+        }
+      }
+    }
+    const data = this.grid.exportData();
+    if (!data.rows.length) return toast("필터에 맞는 행이 없습니다", "info");
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "_");
+    const base = this.filePath ? this.filePath.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "") : "result";
+    const path = await saveDialog({ filters: [{ name: "Excel", extensions: ["xlsx"] }], defaultPath: `${base}_${stamp}.xlsx` });
+    if (!path) return;
+    const rows = data.rows.length > LIMIT ? data.rows.slice(0, LIMIT) : data.rows;
+    this.gridStatus.textContent = `${rows.length.toLocaleString()}행을 엑셀로 쓰는 중…`;
+    try {
+      const n = await api.exportXlsx(path, data.columns, rows, this.lastQuery?.sql ?? null);
+      toast(`${n.toLocaleString()}행을 엑셀로 저장했습니다`, "ok");
+    } catch (e) {
+      toast(errOf(e).message, "error");
+    } finally {
+      this.grid.setFilter(this.filterIn.value);
+    }
   }
 
   copyCsv() {

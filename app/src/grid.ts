@@ -578,6 +578,43 @@ export class ResultGrid {
     return lines.join("\n");
   }
 
+  hasMoreRows() {
+    return this.hasMore;
+  }
+
+  /** 서버에 남은 행을 `limit` 행까지 모두 가져온다. 멈춘 이유를 돌려준다. */
+  async loadAll(limit: number, onProgress?: (n: number) => void, cancelled?: () => boolean): Promise<"done" | "limit" | "cancelled"> {
+    if (!this.opts.onNeedMore) return "done";
+    while (this.loading) await new Promise((r) => setTimeout(r, 50));
+    this.loading = true;
+    try {
+      while (this.hasMore) {
+        if (this.rows.length >= limit) return "limit";
+        if (cancelled?.()) return "cancelled";
+        const page = await this.opts.onNeedMore();
+        if (!page) { this.hasMore = false; break; }
+        for (const r of page.rows) this.rows.push(r);
+        this.hasMore = page.has_more;
+        onProgress?.(this.rows.length);
+      }
+      return "done";
+    } finally {
+      this.loading = false;
+      this.rebuildView();
+      this.update();
+      this.status();
+    }
+  }
+
+  /** 화면에 보이는 그대로 (정렬·필터·숨긴 열·고친 값 반영) */
+  exportData(): { columns: { name: string; type_name: string }[]; rows: (string | null)[][] } {
+    const cols = this.columns.map((_, i) => i).filter((i) => !this.hiddenCol(i));
+    return {
+      columns: cols.map((c) => ({ name: this.columns[c].name, type_name: this.columns[c].type_name })),
+      rows: this.view.map((r) => cols.map((c) => this.value(r, c))),
+    };
+  }
+
   /** 전체 결과를 CSV 로 (가져온 행까지) */
   toCsv(): string {
     const esc = (v: string | null) => (v == null ? "" : /[,\n"]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);

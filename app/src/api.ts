@@ -85,6 +85,8 @@ export const api = {
     return invoke<ScriptSummary>("execute_script", { id, script, stopOnError, confirmed, onEvent: ch });
   },
   fetchMore: (id: number, rows: number) => invoke<RowPage>("fetch_more", { id, rows }),
+  exportXlsx: (path: string, columns: { name: string; type_name: string }[], rows: (string | null)[][], sql: string | null) =>
+    invoke<number>("export_xlsx", { args: { path, columns, rows, sql } }),
   cancel: (id: number) => invoke<void>("cancel", { id }),
   abandon: (id: number) => invoke<void>("abandon", { id }),
   commit: (id: number) => invoke<void>("commit", { id }),

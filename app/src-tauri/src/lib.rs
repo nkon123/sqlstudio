@@ -8,6 +8,7 @@ mod analyze;
 mod complete;
 mod db;
 mod debug;
+mod export;
 mod files;
 mod monitor;
 mod state;
@@ -86,6 +87,7 @@ pub fn run() {
             files::read_sql_file,
             files::write_sql_file,
             files::mcp_snippet,
+            export::export_xlsx,
         ])
         .on_window_event(|window, event| {
             // 창을 닫으면 열린 세션을 모두 닫는다 (커밋 안 한 변경은 롤백)

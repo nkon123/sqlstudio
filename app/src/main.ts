@@ -3,6 +3,7 @@
 // 탭 하나 = 에디터 하나 + 세션 하나 + 결과 영역 하나. 탭끼리는 아무것도 공유하지 않는다
 // (한 탭의 긴 쿼리가 다른 탭을 묶지 않는다 — 세션마다 서버 쪽 스레드가 따로 있다).
 
+import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -19,6 +20,7 @@ import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from
 import type { GitPanel } from "./git";
 import { ResultGrid } from "./grid";
 import { aliasMap, showColumns } from "./colpopup";
+import { openHistory } from "./history";
 import { alertBox, bindBox, confirmBox, field, h, modal, passwordBox, toast } from "./ui";
 
 type Conn = Connected & { profile: string };
@@ -149,6 +151,7 @@ class Tab {
       save: () => app.save(),
       format: () => app.formatSql(),
       describe: () => app.describeAtCursor(),
+      history: () => app.showHistory(),
     }, text, sqlCompletion(() => this.conn?.id));
     this.editor.view.dom.addEventListener("input", () => this.setDirty(true));
     dragSplit(splitter, editorHost);
@@ -287,6 +290,7 @@ class App {
       h("span", { class: "sep" }),
       b("new", "새 탭", "새 에디터 (같은 접속으로)", () => this.newTab(true)),
       b("open", "열기", "SQL 파일 열기", () => this.openFile()),
+      b("history", "이력", "SQL 실행 이력 (F8) — 실행한 문장을 찾아 다시 쓴다", () => this.showHistory()),
       b("save", "저장", "Ctrl+S", () => this.save()),
       b("format", "포맷", "SQL 정리 (Ctrl+Shift+F) — 선택 영역, 없으면 커서 위치 문장", () => this.formatSql()),
       h("span", { class: "sep" }),
@@ -1078,6 +1082,23 @@ class App {
     return this.gitLoading;
   }
 
+  /** F8: 실행 이력 */
+  showHistory() {
+    const t = this.active;
+    openHistory({
+      profile: t?.conn?.profile,
+      insert: (sql) => {
+        const cur = this.active;
+        if (!cur) return void this.newTab(true, sql);
+        const v = cur.editor.view;
+        const line = v.state.doc.lineAt(v.state.selection.main.head);
+        cur.editor.insert(line.text.trim() ? `\n${sql}\n` : sql);
+        v.focus();
+      },
+      newTab: (sql) => void this.newTab(true, sql),
+    });
+  }
+
   /** 파일을 탭으로 연다. 이미 열려 있으면 그 탭으로 */
   async openPath(path: string) {
     const open = this.tabs.find((t) => t.filePath && normPath(t.filePath) === normPath(path));
@@ -1227,6 +1248,21 @@ class App {
     };
     for (const el of [kw, ind, logic, width]) el.addEventListener("change", update);
     update();
+    // 실행 이력 켜기/끄기·지우기
+    const histOn = h("input", { type: "checkbox" });
+    const histDir = h("small", {});
+    const histBox = h("div", {},
+      h("label", { class: "check" }, histOn, "실행한 SQL 을 이 PC 에 남기기 (바인드 값은 남기지 않음)"), histDir,
+      h("div", { class: "row" }, h("button", { onclick: async (e: Event) => {
+        e.preventDefault();
+        if (!(await confirmBox("실행 이력 지우기", "남겨 둔 실행 이력을 모두 지웁니다. 되돌릴 수 없습니다.", "지우기"))) return;
+        await invoke("history_clear").then(() => toast("지웠습니다", "ok")).catch((err) => toast(errOf(err).message, "error"));
+      } }, "이력 모두 지우기")));
+    invoke<{ enabled: boolean; keep_months: number; dir: string }>("history_settings").then((s) => {
+      histOn.checked = s.enabled;
+      histDir.textContent = `위치: ${s.dir} · 최근 ${s.keep_months}달만 남김`;
+    }).catch(() => {});
+    histOn.onchange = () => invoke("set_history_enabled", { enabled: histOn.checked }).catch((err) => toast(errOf(err).message, "error"));
     return h("div", { class: "form" },
       h("h3", {}, "SQL 포맷 (Ctrl+Shift+F)"),
       field("키워드", kw), field("들여쓰기", ind), field("AND / OR 위치", logic),
@@ -1240,6 +1276,8 @@ class App {
         "Ctrl + 클릭           커서 추가\n" +
         "Ctrl + D              같은 단어 하나 더 선택\n" +
         "Esc                   커서 하나로"),
+      h("h3", {}, "SQL 실행 이력 (F8)"),
+      histBox,
     );
   }
 

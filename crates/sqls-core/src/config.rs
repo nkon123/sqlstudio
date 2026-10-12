@@ -26,6 +26,31 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default, rename = "llm")]
     pub llm_providers: Vec<toml::Value>,
+    #[serde(default)]
+    pub history: HistoryConfig,
+}
+
+/// SQL 실행 이력 (앱) — 이 PC 의 설정 폴더 history\ 에 남긴다
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 남길 달 수 (0 이면 지우지 않음)
+    #[serde(default = "default_keep_months")]
+    pub keep_months: u32,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self { enabled: true, keep_months: default_keep_months() }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_keep_months() -> u32 {
+    12
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

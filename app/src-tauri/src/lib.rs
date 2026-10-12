@@ -11,6 +11,7 @@ mod debug;
 mod export;
 mod files;
 mod git;
+mod history;
 mod monitor;
 mod state;
 
@@ -37,6 +38,10 @@ pub fn run() {
             db::connect,
             db::disconnect,
             db::tns_list,
+            db::history_search,
+            db::history_clear,
+            db::history_settings,
+            db::set_history_enabled,
             db::set_tns_admin,
             db::execute,
             db::execute_script,

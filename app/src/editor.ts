@@ -32,6 +32,8 @@ export interface EditorActions {
   format: () => void;
   /** F4 — 커서의 테이블 컬럼 팝업 */
   describe: () => void;
+  /** F8 — SQL 실행 이력 */
+  history: () => void;
 }
 
 // ── 키보드 사각형 선택 (Alt+Shift+방향키) ─────────────────
@@ -137,6 +139,7 @@ export class SqlEditor {
             { key: "Ctrl-/", mac: "Cmd-/", run: toggleComment },
             { key: "Ctrl-Shift-f", mac: "Cmd-Shift-f", run: run(actions.format), preventDefault: true },
             { key: "F4", run: run(actions.describe), preventDefault: true },
+            { key: "F8", run: run(actions.history), preventDefault: true },
             { key: "Alt-Shift-ArrowUp", run: blockMove(-1, 0), preventDefault: true },
             { key: "Alt-Shift-ArrowDown", run: blockMove(1, 0), preventDefault: true },
             { key: "Alt-Shift-ArrowLeft", run: blockMove(0, -1), preventDefault: true },

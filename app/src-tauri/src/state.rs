@@ -22,6 +22,8 @@ pub struct OpenSession {
 
 pub struct AppState {
     pub cfg: RwLock<Config>,
+    /// SQL 실행 이력 (F8)
+    pub history: crate::history::History,
     pub config_error: Option<String>,
     pub sessions: Mutex<HashMap<u64, OpenSession>>,
     pub next_id: AtomicU64,
@@ -51,7 +53,10 @@ impl AppState {
             tracing::error!("Oracle Client 초기화 실패: {e}");
         }
         let providers = providers_from(&cfg);
+        let hist_dir = sqls_core::config::config_path().parent().map(|p| p.join("history")).unwrap_or_else(|| "history".into());
+        let history = crate::history::History::new(hist_dir, cfg.history.enabled, cfg.history.keep_months);
         Self {
+            history,
             cfg: RwLock::new(cfg),
             config_error,
             sessions: Mutex::new(HashMap::new()),

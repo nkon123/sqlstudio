@@ -163,6 +163,39 @@ pub async fn connect(
     })
 }
 
+// ── 실행 이력 (F8) ─────────────────────────────────
+
+#[tauri::command]
+pub fn history_search(st: State<'_, AppState>, query: Option<String>, profile: Option<String>, limit: Option<usize>) -> Vec<crate::history::Row> {
+    st.history.search(query.as_deref().unwrap_or(""), profile.as_deref().filter(|p| !p.is_empty()), limit.unwrap_or(300).clamp(1, 2000))
+}
+
+#[tauri::command]
+pub fn history_clear(st: State<'_, AppState>) -> R<()> {
+    st.history.clear().map_err(|e| ErrView::msg("io", e.to_string()))
+}
+
+#[derive(Serialize)]
+pub struct HistorySettings {
+    enabled: bool,
+    keep_months: u32,
+    dir: String,
+}
+
+#[tauri::command]
+pub fn history_settings(st: State<'_, AppState>) -> HistorySettings {
+    let c = st.cfg.read().unwrap().history.clone();
+    let dir = sqls_core::config::config_path().parent().map(|p| p.join("history").display().to_string()).unwrap_or_default();
+    HistorySettings { enabled: c.enabled, keep_months: c.keep_months, dir }
+}
+
+#[tauri::command]
+pub fn set_history_enabled(st: State<'_, AppState>, enabled: bool) -> R<()> {
+    st.history.set_enabled(enabled);
+    st.cfg.write().unwrap().history.enabled = enabled;
+    st.save_config()
+}
+
 /// tnsnames.ora 별칭 목록 (프로필 화면의 접속 문자열 고르기)
 #[derive(Serialize)]
 pub struct TnsView {
@@ -257,6 +290,31 @@ fn is_production(st: &AppState, id: u64) -> bool {
     }
 }
 
+/// 실행 이력에 남긴다 (기록은 다른 스레드가 한다 — 실행을 늦추지 않는다)
+fn remember(st: &AppState, id: u64, user: &str, sql_text: &str, r: &Result<sqls_core::session::ExecResult, sqls_core::Error>, started: std::time::Instant) {
+    if !st.history.enabled() {
+        return;
+    }
+    let profile = st.sessions.lock().unwrap().get(&id).map(|s| s.profile.clone()).unwrap_or_default();
+    let (kind, ms, rows, error) = match r {
+        Ok(x) => (
+            serde_json::to_value(x.kind).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(),
+            x.elapsed_ms,
+            match &x.outcome {
+                ExecOutcome::Rows(p) => Some(p.rows.len() as u64),
+                ExecOutcome::Affected { rows } => Some(*rows),
+                _ => None,
+            },
+            None,
+        ),
+        Err(e) => {
+            let m = e.to_string();
+            (String::new(), started.elapsed().as_millis() as u64, None, Some(m.chars().take(300).collect()))
+        }
+    };
+    st.history.record(crate::history::Entry { t: crate::history::now(), profile, user: user.to_string(), sql: sql_text.trim().to_string(), kind, ms, rows, error });
+}
+
 #[tauri::command]
 pub async fn execute(st: State<'_, AppState>, args: ExecArgs) -> R<ExecView> {
     let (s, txn, _) = st.session(args.id)?;
@@ -265,7 +323,10 @@ pub async fn execute(st: State<'_, AppState>, args: ExecArgs) -> R<ExecView> {
             return Err(ErrView::msg("confirm_required", why));
         }
     }
-    let r = s.execute(&args.sql, opts(args.page_size, args.binds)).await?;
+    let started = std::time::Instant::now();
+    let r = s.execute(&args.sql, opts(args.page_size, args.binds)).await;
+    remember(&st, args.id, &s.info().user, &args.sql, &r, started);
+    let r = r?;
     track_txn(r.kind, &r.outcome, &txn);
     if matches!(r.kind, StmtKind::Ddl | StmtKind::PlsqlUnit) {
         crate::complete::after_ddl(&st, args.id);
@@ -325,7 +386,10 @@ pub async fn execute_script(
         }
         let preview: String = stmt.text.lines().next().unwrap_or("").chars().take(120).collect();
         let _ = on_event.send(ScriptEvent::Started { index, total, line: stmt.line, kind: stmt.kind, preview });
-        match s.execute(&stmt.text, opts(Some(200), vec![])).await {
+        let started = std::time::Instant::now();
+        let res = s.execute(&stmt.text, opts(Some(200), vec![])).await;
+        remember(&st, id, &s.info().user, &stmt.text, &res, started);
+        match res {
             Ok(r) => {
                 ok += 1;
                 track_txn(r.kind, &r.outcome, &txn);

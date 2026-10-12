@@ -402,3 +402,22 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .tns-box .warn { color: var(--warn); }
 .tns-hint { color: var(--dim); font-family: var(--mono); }
 .tns-hint:empty { display: none; }
+
+/* ── SQL 실행 이력 (F8) ── */
+.hist { display: flex; flex-direction: column; gap: 6px; }
+.hist-bar { display: flex; align-items: center; gap: 8px; }
+.hist-bar .check { margin: 0; white-space: nowrap; font-size: 12px; }
+.hist-q { flex: 1; }
+.hist-info { color: var(--dim); font-size: 12px; white-space: nowrap; }
+.hist-main { display: grid; grid-template-columns: 55% 1fr; gap: 6px; height: 52vh; }
+.hist-list { overflow: auto; border: 1px solid var(--line); border-radius: 4px; font-size: 12px; }
+.hist-row { display: flex; gap: 6px; align-items: center; padding: 2px 6px; cursor: default; white-space: nowrap; border-bottom: 1px solid var(--line); }
+.hist-row:hover { background: var(--hover); }
+.hist-row.sel { background: var(--sel); }
+.hist-t { color: var(--dim); font-family: var(--mono); min-width: 74px; }
+.hist-p { color: var(--dim); max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
+.hist-s { color: var(--ok); width: 10px; }
+.hist-row.err .hist-s { color: var(--danger); }
+.hist-sql { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.hist-n { color: var(--accent); font-size: 11px; }
+.hist-preview { margin: 0; overflow: auto; border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font: 12px/1.45 var(--mono); white-space: pre-wrap; background: var(--bg); }

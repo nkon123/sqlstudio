@@ -82,6 +82,7 @@ pub fn run() {
             ai::list_providers,
             ai::save_provider,
             ai::set_api_key,
+            ai::ai_ack_remote,
             ai::test_provider,
             ai::ai_ask,
             ai::ai_cancel,

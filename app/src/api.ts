@@ -47,7 +47,7 @@ export interface Provider {
   name: string; kind: ProviderKind; base_url?: string | null; model: string; api_key_env?: string | null;
   max_tokens?: number; temperature?: number | null; num_ctx?: number | null; keep_alive?: string | null;
   effort?: string | null; fallbacks?: boolean; connect_timeout_secs?: number; idle_timeout_secs?: number;
-  remote?: boolean; has_key?: boolean;
+  remote?: boolean; remote_ok?: boolean; has_key?: boolean;
 }
 export type Task = "generate" | "explain" | "optimize" | "fix" | "chat";
 export interface ChatMsg { role: "user" | "assistant"; content: string }

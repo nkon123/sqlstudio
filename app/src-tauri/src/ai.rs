@@ -23,6 +23,8 @@ pub struct ProviderView {
     cfg: ProviderConfig,
     /// 데이터가 이 PC 밖으로 나가는지
     remote: bool,
+    /// 외부면 지금 주소로 전송 동의를 받았는지
+    remote_ok: bool,
     has_key: bool,
 }
 
@@ -42,7 +44,7 @@ fn view(st: &AppState, p: &ProviderConfig) -> ProviderView {
                     .is_some_and(|k| !k.is_empty())
         }
     };
-    ProviderView { remote: p.is_remote(), has_key, cfg: p.clone() }
+    ProviderView { remote: p.is_remote(), remote_ok: p.remote_ok(), has_key, cfg: p.clone() }
 }
 
 #[tauri::command]
@@ -58,10 +60,24 @@ pub fn save_provider(st: State<'_, AppState>, provider: ProviderConfig, original
     {
         let mut list = st.providers.write().unwrap();
         let key = original_name.unwrap_or_else(|| provider.name.clone());
+        let mut provider = provider;
+        // 동의 기록은 화면이 보낸 값을 믿지 않는다 — 원래 기록을 주소가 같을 때만 이어 간다
+        provider.remote_ack = list.iter().find(|p| p.name == key).and_then(|p| p.remote_ack.clone()).filter(|a| *a == provider.base_url());
         match list.iter_mut().find(|p| p.name == key) {
             Some(p) => *p = provider,
             None => list.push(provider),
         }
+    }
+    st.save_config()
+}
+
+/// 외부 전송 동의 — 확인 창에서 "계속"을 눌렀을 때. 지금 주소로 기록하고 설정 파일에 남긴다.
+#[tauri::command]
+pub fn ai_ack_remote(st: State<'_, AppState>, provider: String) -> R<()> {
+    {
+        let mut list = st.providers.write().unwrap();
+        let p = list.iter_mut().find(|p| p.name == provider).ok_or_else(|| ErrView::msg("invalid", format!("AI 공급자가 없습니다: {provider}")))?;
+        p.remote_ack = Some(p.base_url());
     }
     st.save_config()
 }
@@ -151,6 +167,10 @@ pub struct AiAnswer {
 #[tauri::command]
 pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<AiEvent>) -> R<AiAnswer> {
     let p = provider(&st, &args.provider)?;
+    // 외부 전송 동의는 여기서 확인한다 (화면 확인만으로는 우회될 수 있다)
+    if !p.remote_ok() {
+        return Err(ErrView::msg("remote_consent", format!("'{}' ({}) 은 외부 서버입니다. 전송 동의가 필요합니다.", p.name, p.base_url())));
+    }
     let status = |t: &str| {
         let _ = on_event.send(AiEvent::Status { text: t.into() });
     };

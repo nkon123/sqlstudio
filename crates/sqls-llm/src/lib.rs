@@ -81,6 +81,10 @@ pub struct ProviderConfig {
     /// Claude API 직통에서만 동작한다 (사내 게이트웨이/클라우드 경유면 끈다).
     #[serde(default = "default_true")]
     pub fallbacks: bool,
+    /// 외부 전송에 동의한 주소 — 사용자가 확인 창에서 "계속"을 누른 그때의 base_url.
+    /// 주소가 바뀌면 다시 묻는다. 앱(백엔드)이 보내기 직전에 확인한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_ack: Option<String>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -114,6 +118,7 @@ impl ProviderConfig {
             keep_alive: None,
             effort: None,
             fallbacks: true,
+            remote_ack: None,
         }
     }
 
@@ -142,10 +147,23 @@ impl ProviderConfig {
         std::env::var(env).ok().filter(|k| !k.is_empty())
     }
 
-    /// 데이터가 이 PC 밖으로 나가는 공급자인지 — 화면에 경고를 띄우는 데 쓴다.
+    /// 데이터가 이 PC 밖으로 나가는 공급자인지. 주소를 해석해 호스트가 루프백(127.0.0.0/8, ::1, localhost)일 때만 로컬.
+    /// 글자 포함으로 보지 않는다 — "http://localhost.evil.com", "http://127.0.0.1@evil.com" 은 외부다. 못 읽는 주소도 외부로 본다.
     pub fn is_remote(&self) -> bool {
-        let u = self.base_url();
-        !(u.contains("://127.0.0.1") || u.contains("://localhost") || u.contains("://[::1]"))
+        let Ok(u) = reqwest::Url::parse(&self.base_url()) else { return true };
+        let Some(host) = u.host_str() else { return true };
+        if host.eq_ignore_ascii_case("localhost") {
+            return false;
+        }
+        match host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
+            Ok(ip) => !ip.is_loopback(),
+            Err(_) => true,
+        }
+    }
+
+    /// 외부 공급자면 지금 주소로 동의를 받았는지
+    pub fn remote_ok(&self) -> bool {
+        !self.is_remote() || self.remote_ack.as_deref() == Some(self.base_url().as_str())
     }
 }
 

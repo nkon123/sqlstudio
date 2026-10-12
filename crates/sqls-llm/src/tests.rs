@@ -218,4 +218,25 @@ fn remote_detection() {
     c.base_url = Some("http://gpu-server:11434".into());
     assert!(c.is_remote());
     assert!(ProviderConfig::new("a", ProviderKind::Anthropic, "x").is_remote());
+    // 글자 포함으로 속이는 주소는 외부
+    for u in ["http://localhost.evil.com:11434", "http://127.0.0.1.nip.io", "http://127.0.0.1@evil.com", "http://evil.com/?x=://localhost", "not a url"] {
+        c.base_url = Some(u.into());
+        assert!(c.is_remote(), "{u}");
+    }
+    for u in ["http://localhost:11434", "http://LOCALHOST:8080/v1", "http://127.0.0.1:11434", "http://127.1.2.3", "http://[::1]:11434"] {
+        c.base_url = Some(u.into());
+        assert!(!c.is_remote(), "{u}");
+    }
+}
+
+#[test]
+fn remote_consent_follows_the_address() {
+    let mut c = ProviderConfig::new("o", ProviderKind::Ollama, "x");
+    assert!(c.remote_ok(), "로컬은 동의가 필요 없다");
+    c.base_url = Some("http://gpu.corp.local:11434".into());
+    assert!(!c.remote_ok());
+    c.remote_ack = Some("http://gpu.corp.local:11434".into());
+    assert!(c.remote_ok());
+    c.base_url = Some("http://other.example.com:11434".into());
+    assert!(!c.remote_ok(), "주소가 바뀌면 다시 묻는다");
 }

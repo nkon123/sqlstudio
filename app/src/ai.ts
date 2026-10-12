@@ -1,5 +1,6 @@
 // AI 패널 — 공급자 선택, 작업 버튼, 스트리밍 답, "에디터에 넣기".
 
+import { invoke } from "@tauri-apps/api/core";
 import { api, errOf, type ChatMsg, type Provider, type Task } from "./api";
 import { confirmBox, h, toast } from "./ui";
 
@@ -101,15 +102,19 @@ export class AiPanel {
     if (p.remote && !p.has_key && p.kind !== "ollama") {
       return toast(`${p.name}: API 키가 없습니다. 설정에서 입력하세요`, "error");
     }
-    // 외부 전송은 공급자마다 처음 한 번 확인한다
-    const ackKey = `ai.ack.${p.name}`;
-    if (p.remote && !localStorage.getItem(ackKey)) {
+    // 외부 전송은 공급자·주소마다 처음 한 번 확인한다. 동의는 백엔드가 설정 파일에 남기고 보내기 직전에 다시 확인한다.
+    if (p.remote && !p.remote_ok) {
       const ok = await confirmBox("외부 AI 로 전송",
         `${p.name} (${p.base_url ?? p.kind}) 은 이 PC 밖의 서버입니다.\n\n` +
         "전송되는 것: 에디터의 SQL, 관련 테이블 구조(컬럼·주석·인덱스), 실행계획, 오류 메시지\n" +
         "전송되지 않는 것: 조회 결과 데이터, 비밀번호\n\n회사 보안 정책에 맞는지 확인하세요.", "계속", false);
       if (!ok) return;
-      localStorage.setItem(ackKey, "1");
+      try {
+        await invoke("ai_ack_remote", { provider: p.name });
+        p.remote_ok = true;
+      } catch (e) {
+        return toast(errOf(e).message, "error");
+      }
     }
 
     const ctx = this.host.context();
@@ -169,6 +174,8 @@ export class AiPanel {
       if (this.history.length > 12) this.history = this.history.slice(-12);
     } catch (e) {
       const err = errOf(e);
+      // 설정 파일에서 동의가 지워졌거나 주소가 바뀐 경우 — 다음 질문 때 다시 묻는다
+      if (err.kind === "remote_consent") p.remote_ok = false;
       out.classList.remove("streaming");
       out.classList.add("error");
       body.textContent = (text ? text + "\n\n" : "") + err.message;

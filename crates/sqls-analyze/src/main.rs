@@ -214,7 +214,7 @@ async fn cmd_run(a: &Args) -> Result<(), String> {
     } else if let Some(c) = &a.connection {
         let p = cfg.profile(c).ok_or(format!("접속 '{c}' 이 설정에 없습니다"))?;
         let pw = p.stored_password().ok_or(format!("비밀번호가 없습니다 — 환경변수 {} 를 두거나, 앱에서 '비밀번호 저장' 으로 접속해 두세요", password_env_name(&p.name)))?;
-        sqls_core::session::init_client(cfg.oracle.client_lib_dir.clone()).map_err(|e| format!("Oracle Client: {e}"))?;
+        sqls_core::session::init_client(cfg.oracle.client_lib_dir.clone(), cfg.oracle.tns_admin.clone()).map_err(|e| format!("Oracle Client: {e}"))?;
         let mut spec = p.to_spec(pw);
         // 사전 조회만 한다
         spec.read_only = true;

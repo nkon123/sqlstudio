@@ -158,11 +158,16 @@ static CLIENT_INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 ///
 /// 11g(11.2) 서버에는 Instant Client 가 반드시 있어야 한다. 19c 클라이언트를 권장한다
 /// (11.2 서버에 붙고, call_timeout 도 지원한다).
-pub fn init_client(lib_dir: Option<PathBuf>) -> Result<()> {
+pub fn init_client(lib_dir: Option<PathBuf>, tns_admin: Option<PathBuf>) -> Result<()> {
     let r = CLIENT_INIT.get_or_init(|| {
         let mut p = oracle::InitParams::new();
         if let Some(dir) = &lib_dir {
             p.oracle_client_lib_dir(dir.as_os_str())
+                .map_err(|e| e.to_string())?;
+        }
+        // tnsnames.ora 위치 (TNS_ADMIN 과 같다) — 별칭으로 접속할 때 쓴다
+        if let Some(dir) = &tns_admin {
+            p.oracle_client_config_dir(dir.as_os_str())
                 .map_err(|e| e.to_string())?;
         }
         p.init().map(|_| ()).map_err(|e| e.to_string())
@@ -352,7 +357,7 @@ impl Session {
 }
 
 fn open(spec: &ConnectSpec) -> Result<(Connection, SessionInfo)> {
-    init_client(None)?;
+    init_client(None, None)?;
     let mut c = Connector::new(&spec.user, &spec.password, &spec.connect_string);
     if spec.as_sysdba {
         c.privilege(Privilege::Sysdba);

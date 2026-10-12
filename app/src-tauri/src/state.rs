@@ -47,7 +47,7 @@ impl AppState {
             // 설정이 깨져도 앱은 뜬다 — 화면에 오류를 보여 주고 고치게 한다
             Err(e) => (Config::default(), Some(e.to_string())),
         };
-        if let Err(e) = sqls_core::session::init_client(cfg.oracle.client_lib_dir.clone()) {
+        if let Err(e) = sqls_core::session::init_client(cfg.oracle.client_lib_dir.clone(), cfg.oracle.tns_admin.clone()) {
             tracing::error!("Oracle Client 초기화 실패: {e}");
         }
         let providers = providers_from(&cfg);

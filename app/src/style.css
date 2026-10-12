@@ -396,3 +396,9 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .cp-nn { color: var(--dim); }
 .cp-def { font-family: var(--mono); color: var(--dim); }
 .cp-empty { padding: 12px; color: var(--dim); }
+
+/* ── 접속 설정: tnsnames.ora ── */
+.tns-box { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; padding: 4px 0 8px; border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+.tns-box .warn { color: var(--warn); }
+.tns-hint { color: var(--dim); font-family: var(--mono); }
+.tns-hint:empty { display: none; }

@@ -28,6 +28,8 @@ export type Outcome =
   | { type: "skipped"; reason: string };
 export interface ExecView { kind: StmtKind; outcome: Outcome; elapsed_ms: number; output: string[]; txn_pending: boolean }
 export interface Statement { text: string; kind: StmtKind; start: number; end: number; line: number }
+export interface TnsEntry { alias: string; host?: string | null; port?: string | null; service?: string | null }
+export interface TnsView { dir?: string | null; configured?: string | null; entries: TnsEntry[]; error?: string | null }
 export interface Analyzed { statement: Statement | null; binds: string[]; confirm: string | null }
 export interface ObjectEntry { owner: string; name: string; object_type: string; status: string; last_ddl_time: string }
 export interface ColumnDesc { name: string; data_type: string; nullable: boolean; default?: string | null; comment?: string | null }
@@ -74,6 +76,8 @@ export const api = {
   deleteProfile: (name: string) => invoke<void>("delete_profile", { name }),
   connect: (profile: string, password?: string, remember?: boolean) => invoke<Connected>("connect", { profile, password, remember }),
   forgetPassword: (profile: string) => invoke<void>("forget_password", { profile }),
+  tnsList: () => invoke<TnsView>("tns_list"),
+  setTnsAdmin: (dir: string | null) => invoke<void>("set_tns_admin", { dir }),
   disconnect: (id: number) => invoke<void>("disconnect", { id }),
   gridEditable: (id: number, sql: string) => invoke<{ sql: string; table: string; columns: string[] }>("grid_editable", { id, sql }),
   gridApply: (id: number, table: string, changes: { edits: unknown[]; deletes: string[] }, dryRun: boolean) =>

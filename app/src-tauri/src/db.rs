@@ -163,6 +163,43 @@ pub async fn connect(
     })
 }
 
+/// tnsnames.ora 별칭 목록 (프로필 화면의 접속 문자열 고르기)
+#[derive(Serialize)]
+pub struct TnsView {
+    /// 찾은 폴더
+    dir: Option<String>,
+    /// 설정에 지정한 폴더 (있으면)
+    configured: Option<String>,
+    entries: Vec<sqls_core::tns::TnsEntry>,
+    error: Option<String>,
+}
+
+#[tauri::command]
+pub fn tns_list(st: State<'_, AppState>) -> TnsView {
+    let o = st.cfg.read().unwrap().oracle.clone();
+    let configured = o.tns_admin.as_ref().map(|p| p.display().to_string());
+    let Some(dir) = sqls_core::tns::locate(o.tns_admin.as_deref(), o.client_lib_dir.as_deref()) else {
+        return TnsView { dir: None, configured, entries: Vec::new(), error: None };
+    };
+    match sqls_core::tns::load(&dir) {
+        Ok(entries) => TnsView { dir: Some(dir.display().to_string()), configured, entries, error: None },
+        Err(e) => TnsView { dir: Some(dir.display().to_string()), configured, entries: Vec::new(), error: Some(e.to_string()) },
+    }
+}
+
+/// tnsnames.ora 폴더 지정 (비우면 지움). Oracle Client 는 시작할 때 한 번 읽으므로 다시 시작해야 접속에 쓰인다.
+#[tauri::command]
+pub fn set_tns_admin(st: State<'_, AppState>, dir: Option<String>) -> R<()> {
+    let dir = dir.map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).map(std::path::PathBuf::from);
+    if let Some(d) = &dir {
+        if !d.join("tnsnames.ora").is_file() {
+            return Err(ErrView::msg("invalid", format!("{} 에 tnsnames.ora 가 없습니다", d.display())));
+        }
+    }
+    st.cfg.write().unwrap().oracle.tns_admin = dir;
+    st.save_config()
+}
+
 #[tauri::command]
 pub fn disconnect(st: State<'_, AppState>, id: u64) {
     if let Some(s) = st.sessions.lock().unwrap().remove(&id) {

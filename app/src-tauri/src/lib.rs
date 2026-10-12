@@ -36,6 +36,8 @@ pub fn run() {
             db::delete_profile,
             db::connect,
             db::disconnect,
+            db::tns_list,
+            db::set_tns_admin,
             db::execute,
             db::execute_script,
             db::fetch_more,

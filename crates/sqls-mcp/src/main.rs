@@ -62,7 +62,7 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    if let Err(e) = sqls_core::session::init_client(cfg.oracle.client_lib_dir.clone()) {
+    if let Err(e) = sqls_core::session::init_client(cfg.oracle.client_lib_dir.clone(), cfg.oracle.tns_admin.clone()) {
         eprintln!("Oracle Client 를 불러올 수 없습니다: {e}\n\
                    Instant Client 19 이상을 설치하고 [oracle] client_lib_dir 을 지정하거나 PATH 에 넣으세요.");
         return ExitCode::from(1);

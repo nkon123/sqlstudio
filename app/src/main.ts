@@ -7,8 +7,7 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   api, byteToUtf16, errOf, utf16ToByte,
-  type Connected, type ErrView, type ExecView, type ObjectEntry, type Profile, type Provider, type TableDesc,
-} from "./api";
+  type Connected, type ErrView, type ExecView, type ObjectEntry, type Profile, type Provider, type TableDesc, type TnsEntry, type TnsView } from "./api";
 import { AiPanel } from "./ai";
 import { listen } from "@tauri-apps/api/event";
 import { sqlCompletion } from "./completion";
@@ -1247,17 +1246,34 @@ class App {
   private async profilesPage() {
     const list = h("div", { class: "list" });
     const form = h("div", { class: "form" });
+    // tnsnames.ora 별칭 — 접속 문자열 칸에서 고른다
+    const tns = await api.tnsList().catch(() => ({ entries: [] } as TnsView));
+    const tnsList = h("datalist", { id: "tns-aliases" }, ...tns.entries.map((e) => h("option", { value: e.alias }, [e.host, e.port].filter(Boolean).join(":") + (e.service ? `/${e.service}` : ""))));
+    const where = (e: TnsEntry) => `${e.host ?? "?"}${e.port ? `:${e.port}` : ""}${e.service ? `/${e.service}` : ""}`;
     const edit = (p?: Profile) => {
       const name = h("input", { value: p?.name ?? "" });
       const user = h("input", { value: p?.user ?? "" });
-      const cs = h("input", { value: p?.connect_string ?? "", placeholder: "host:1521/SERVICE 또는 TNS 별칭" });
+      const cs = h("input", { value: p?.connect_string ?? "", placeholder: tns.entries.length ? `TNS 별칭 (${tns.entries.length}개에서 고르기) 또는 host:1521/SERVICE` : "host:1521/SERVICE 또는 TNS 별칭" });
+      cs.setAttribute("list", "tns-aliases");
+      const csHint = h("small", { class: "tns-hint" });
+      const showHint = () => {
+        const e = tns.entries.find((x) => x.alias === cs.value.trim().toUpperCase());
+        csHint.textContent = e ? `TNS ${e.alias} → ${where(e)}` : "";
+      };
+      cs.addEventListener("input", () => {
+        showHint();
+        // 새 접속에서 별칭을 고르면 이름도 채운다
+        const e = tns.entries.find((x) => x.alias === cs.value.trim().toUpperCase());
+        if (e && !p && !name.value.trim()) name.value = e.alias;
+      });
+      showHint();
       const ro = h("input", { type: "checkbox", checked: !!p?.read_only });
       const prod = h("input", { type: "checkbox", checked: !!p?.production });
       const color = h("input", { type: "color", value: p?.color ?? "#3a7bd5" });
       const useColor = h("input", { type: "checkbox", checked: !!p?.color });
       const timeout = h("input", { type: "number", min: "0", value: p?.call_timeout_secs ?? "" , placeholder: "없음" });
       form.replaceChildren(
-        field("이름", name), field("사용자", user), field("접속 문자열", cs, "11g 는 Instant Client 가 필요합니다 (19c 권장)"),
+        field("이름", name), field("사용자", user), field("접속 문자열", cs, "11g 는 Instant Client 가 필요합니다 (19c 권장)"), csHint,
         h("label", { class: "check" }, ro, "읽기 전용 (SELECT 만, 서버에서도 막음)"),
         h("label", { class: "check", title: "INSERT·UPDATE·DELETE·DDL·PL/SQL 블록·COMMIT 을 실행 전에 항상 확인합니다" }, prod, "운영 DB (바꾸는 문장·커밋 전에 항상 확인)"),
         h("label", { class: "check" }, useColor, "탭 색 표시 (운영 DB 는 빨강 권장)", color),
@@ -1301,7 +1317,23 @@ class App {
     };
     await refreshList();
     if (!this.profiles.length) edit();
-    return h("div", { class: "split" }, list, form);
+    const pickTns = async (e: Event) => {
+      e.preventDefault();
+      const d = await openDialog({ directory: true, title: "tnsnames.ora 가 있는 폴더" });
+      if (!d || Array.isArray(d)) return;
+      try {
+        await api.setTnsAdmin(d);
+        toast("저장했습니다 — 프로그램을 다시 시작하면 이 폴더의 별칭으로 접속합니다", "ok", 6000);
+      } catch (err) { toast(errOf(err).message, "error"); }
+    };
+    const tnsBox = h("div", { class: "tns-box" },
+      h("strong", {}, "tnsnames.ora "),
+      tns.dir ? h("span", { title: tns.dir }, `${tns.dir} · 별칭 ${tns.entries.length}개${tns.configured ? "" : " (자동으로 찾음)"}`)
+        : h("span", { class: "warn" }, "찾지 못했습니다 — TNS_ADMIN·ORACLE_HOME·Instant Client 폴더를 봤습니다"),
+      tns.error ? h("span", { class: "warn" }, ` · 읽기 실패: ${tns.error}`) : "",
+      h("button", { class: "small", onclick: pickTns }, "폴더 지정"),
+      tns.configured ? h("button", { class: "small", onclick: async (e: Event) => { e.preventDefault(); await api.setTnsAdmin(null); toast("지정을 지웠습니다 — 다시 시작하면 기본 위치를 씁니다", "ok"); } }, "지정 해제") : "");
+    return h("div", {}, tnsBox, tnsList, h("div", { class: "split" }, list, form));
   }
 
   private async providersPage() {

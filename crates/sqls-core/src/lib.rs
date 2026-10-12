@@ -19,6 +19,7 @@ pub mod monitor;
 pub mod secret;
 pub mod session;
 pub mod sql;
+pub mod tns;
 
 pub use error::{Error, ErrorInfo, Result};
 pub use session::{Column, ConnectSpec, ExecOptions, ExecOutcome, ExecResult, RowPage, Session};

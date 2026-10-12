@@ -32,6 +32,9 @@ pub struct Config {
 pub struct OracleConfig {
     /// Instant Client 폴더. 비우면 PATH 에서 찾는다.
     pub client_lib_dir: Option<PathBuf>,
+    /// tnsnames.ora·sqlnet.ora 가 있는 폴더 (TNS_ADMIN 과 같음). 비우면 Oracle Client 기본 위치
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tns_admin: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -18,7 +18,7 @@ export class AiPanel {
   private select = h("select", { class: "ai-provider" });
   private badge = h("span", { class: "badge" });
   private log = h("div", { class: "ai-log" });
-  private input = h("textarea", { class: "ai-input", rows: 3, placeholder: "무엇을 할까요? 예) 최근 7일 주문을 고객별로 합계 (Ctrl+Enter)" });
+  private input = h("textarea", { class: "ai-input", rows: 3, placeholder: "무엇을 할까요? 예) 최근 7일 주문을 고객별로 합계\n(Ctrl+Enter 보내기 · 어디서든 Ctrl+K 로 여기로 · Esc 편집기로)" });
   private statusEl = h("div", { class: "ai-status" });
   private stopBtn = h("button", { class: "danger", disabled: true }, "중지");
   private history: ChatMsg[] = [];
@@ -51,6 +51,12 @@ export class AiPanel {
         this.ask(this.history.length ? "chat" : "generate");
       }
     });
+  }
+
+  /** Ctrl+K — 입력칸으로. 이미 쓴 글은 전체 선택해 바로 고쳐 쓰게 */
+  focus() {
+    this.input.focus();
+    this.input.select();
   }
 
   async load() {

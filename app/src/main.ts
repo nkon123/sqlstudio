@@ -19,6 +19,7 @@ import { SqlEditor } from "./editor";
 import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from "./format";
 import type { GitPanel } from "./git";
 import { ResultGrid } from "./grid";
+import { aliasMap, showColumns } from "./colpopup";
 import { alertBox, bindBox, confirmBox, field, h, modal, passwordBox, toast } from "./ui";
 
 type Conn = Connected & { profile: string };
@@ -148,6 +149,7 @@ class Tab {
       explain: () => app.explain(),
       save: () => app.save(),
       format: () => app.formatSql(),
+      describe: () => app.describeAtCursor(),
     }, text, sqlCompletion(() => this.conn?.id));
     this.editor.view.dom.addEventListener("input", () => this.setDirty(true));
     dragSplit(splitter, editorHost);
@@ -290,7 +292,7 @@ class App {
       b("format", "포맷", "SQL 정리 (Ctrl+Shift+F) — 선택 영역, 없으면 커서 위치 문장", () => this.formatSql()),
       h("span", { class: "sep" }),
       b("toggleBrowser", "왼쪽", "왼쪽 영역(테이블·프로젝트) 접기/펼치기 (Ctrl+Shift+1) · 경계선을 끌면 너비 조절", () => this.layout.toggle("left")),
-      b("toggleAi", "AI", "오른쪽 AI 영역 접기/펼치기 (Ctrl+Shift+3) · 경계선을 끌면 너비 조절", () => this.layout.toggle("right")),
+      b("toggleAi", "AI", "오른쪽 AI 영역 접기/펼치기 (Ctrl+Shift+3) · AI 입력칸으로 바로: Ctrl+K · 경계선을 끌면 너비 조절", () => this.layout.toggle("right")),
       h("span", { class: "spacer" }),
       b("settings", "설정", "접속·AI·MCP 설정", () => this.settings()),
     );
@@ -298,7 +300,7 @@ class App {
       h("div", { class: "browser-head" }, this.browserOwner, this.browserType),
       this.browserFilter,
       this.browserList,
-      h("small", { class: "hint" }, "클릭: 구조 · 더블클릭: 이름 넣기 · 체크: AI 문맥에 포함"));
+      h("small", { class: "hint" }, "클릭: 구조 · 우클릭: 컬럼 팝업 · 더블클릭: 이름 넣기 · 체크: AI 문맥에 포함"));
     // 왼쪽 영역: 테이블 | 프로젝트
     const sideTabs = h("div", { class: "side-tabs" });
     const panes: Record<string, HTMLElement> = { table: tablePane, git: this.gitPane };
@@ -331,6 +333,18 @@ class App {
     this.browserType.addEventListener("change", () => this.loadObjects());
     let ft = 0;
     this.browserFilter.addEventListener("input", () => { clearTimeout(ft); ft = window.setTimeout(() => this.loadObjects(), 250); });
+    // Ctrl+K: AI 입력칸으로 (오른쪽 영역이 접혀 있으면 펼친다). AI 입력칸에서 Esc: 편집기로
+    window.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === "KeyK") {
+        e.preventDefault();
+        e.stopPropagation();
+        this.layout.toggle("right", true);
+        this.ai.focus();
+      }
+    }, true);
+    this.ai.el.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && (e.target as HTMLElement).tagName === "TEXTAREA") { e.preventDefault(); this.active?.editor.view.focus(); }
+    });
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && this.active?.running) this.cancel();
       if (e.ctrlKey && e.shiftKey && (e.code === "Digit1" || e.code === "Digit3")) {
@@ -913,6 +927,7 @@ class App {
       const row = h("div", { class: `obj ${o.status === "INVALID" ? "invalid" : ""}`, title: `${o.object_type} · ${o.status} · ${o.last_ddl_time}` },
         check, h("span", {}, o.name));
       row.addEventListener("click", () => this.showObject(o));
+      if (tableLike) row.addEventListener("contextmenu", (e) => { e.preventDefault(); this.popupColumns(`"${o.owner}"."${o.name}"`, { x: e.clientX, y: e.clientY }); });
       row.addEventListener("dblclick", () => t?.editor.insert(o.owner === t.conn?.user ? o.name : q));
       frag.append(row);
     }
@@ -944,6 +959,71 @@ class App {
     }
   }
 
+  // ── 컬럼 팝업 ────────────────────────────────────
+
+  private openColumns(d: TableDesc, at?: { x: number; y: number }, alias?: string) {
+    showColumns(d, {
+      at, alias,
+      insert: (s) => { const t = this.active; if (!t) return; t.editor.insert(s); t.editor.view.focus(); },
+      ddl: async () => { const t = this.active; if (t?.conn) this.newTab(true, await api.getDdl(t.conn.id, d.object_type, `"${d.owner}"."${d.name}"`)); },
+    });
+  }
+
+  /** 이름으로 찾아 팝업 (사전 조회 세션으로 — 작업 세션에서 쿼리가 돌고 있어도 기다리지 않는다) */
+  private async popupColumns(name: string, at?: { x: number; y: number }, alias?: string) {
+    const t = this.active;
+    if (!t?.conn) return toast("먼저 접속하세요", "error");
+    try {
+      this.openColumns(await api.describe(t.conn.id, name), at, alias);
+    } catch (e) {
+      toast(errOf(e).message, "error");
+    }
+  }
+
+  /** F4: 커서 위치의 테이블(또는 별칭·스키마.테이블·별칭.컬럼)의 컬럼 팝업 */
+  async describeAtCursor() {
+    const t = this.active;
+    if (!t?.conn) return toast("먼저 접속하세요", "error");
+    const view = t.editor.view;
+    const pos = view.state.selection.main.head;
+    const line = view.state.doc.lineAt(pos);
+    const s = line.text;
+    const ch = /[\w$#."]/;
+    let a = pos - line.from, b = a;
+    while (a > 0 && ch.test(s[a - 1])) a--;
+    while (b < s.length && ch.test(s[b])) b++;
+    const raw = s.slice(a, b);
+    const parts = raw.replace(/"/g, "").split(".").filter(Boolean);
+    if (!parts.length) return toast("커서를 테이블 이름(또는 별칭) 위에 두고 F4", "info");
+    const cur = Math.min(parts.length - 1, (s.slice(a, pos).match(/\./g) ?? []).length);
+    const doc = view.state.doc;
+    const around = doc.sliceString(Math.max(0, pos - 30000), Math.min(doc.length, pos + 30000));
+    const aliases = aliasMap(around);
+    const word = parts[cur];
+    // 시도 순서: 스키마.테이블 → 별칭 → (별칭.컬럼이면) 앞쪽 별칭/테이블 → 그 낱말
+    const tries: { name: string; alias?: string }[] = [];
+    if (cur >= 1) tries.push({ name: parts.slice(cur - 1, cur + 1).join(".") });
+    if (aliases.has(word.toUpperCase())) tries.push({ name: aliases.get(word.toUpperCase())!, alias: word });
+    if (cur >= 1) {
+      const p = parts[cur - 1];
+      tries.push(aliases.has(p.toUpperCase()) ? { name: aliases.get(p.toUpperCase())!, alias: p } : { name: p });
+    }
+    tries.push({ name: word });
+    if (cur === 0 && parts.length > 1) tries.push({ name: parts.slice(0, 2).join(".") });
+    const c = view.coordsAtPos(pos);
+    const at = c ? { x: c.left, y: c.bottom } : undefined;
+    let last: unknown = null;
+    for (const x of tries) {
+      try {
+        const d = await api.describe(t.conn.id, x.name);
+        return this.openColumns(d, at, x.alias);
+      } catch (e) {
+        last = e;
+      }
+    }
+    toast(`'${raw}' 를 테이블·뷰로 찾지 못했습니다${last ? ` — ${errOf(last).message}` : ""}`, "error");
+  }
+
   private renderDesc(t: Tab, d: TableDesc) {
     const rows = d.columns.map((c) => h("tr", {},
       h("td", {}, d.primary_key.includes(c.name) ? "🔑" : ""), h("td", {}, c.name), h("td", {}, c.data_type),
@@ -956,6 +1036,7 @@ class App {
         d.num_rows ? h("small", {}, ` · 통계 ${Number(d.num_rows).toLocaleString()}행 (${d.last_analyzed ?? "?"})`) : null),
       h("div", { class: "desc-actions" },
         h("button", { onclick: () => t.editor.insert(`SELECT ${cols}\n  FROM ${d.owner}.${d.name}\n WHERE ROWNUM <= 100`) }, "SELECT 넣기"),
+        h("button", { title: "떠 있는 창으로 — 띄운 채 SQL 을 쓴다 (편집기에서 F4)", onclick: () => this.openColumns(d) }, "팝업"),
         h("button", { onclick: async () => { if (t.conn) this.newTab(true, await api.getDdl(t.conn.id, d.object_type, `"${d.owner}"."${d.name}"`)); } }, "DDL")),
       h("table", { class: "desc-table" }, h("thead", {}, h("tr", {}, ...["", "컬럼", "형식", "", "기본값", "설명"].map((x) => h("th", {}, x)))), h("tbody", {}, ...rows)),
       d.indexes.length ? h("div", { class: "desc-idx" }, h("strong", {}, "인덱스"),

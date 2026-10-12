@@ -368,3 +368,30 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .git-merge .cm-editor { font-family: var(--mono); }
 .git-badge { font-family: var(--mono); }
 .git-badge:empty { display: none; }
+
+/* ── 컬럼 팝업 ── */
+.cp-win { position: fixed; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.22); resize: both; overflow: hidden; min-width: 360px; min-height: 160px; outline: none; font-size: 12px; }
+.cp-win:focus-within, .cp-win:focus { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.cp-head { display: flex; align-items: center; gap: 4px; padding: 5px 8px; background: var(--hover); cursor: move; user-select: none; white-space: nowrap; overflow: hidden; }
+.cp-head strong { font-family: var(--mono); }
+.cp-dim { color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
+.cp-x { border: 0; background: none; font-size: 16px; line-height: 1; padding: 0 4px; }
+.cp-tools { display: flex; align-items: center; gap: 4px; padding: 4px 6px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.cp-tab { padding: 1px 8px; font-size: 12px; }
+.cp-tab.on { background: var(--sel); border-color: var(--accent); }
+.cp-filter { width: 160px; padding: 1px 6px; }
+.cp-count { color: var(--dim); }
+.cp-body { flex: 1; overflow: auto; min-height: 0; }
+.cp-grid { width: 100%; border-collapse: collapse; }
+.cp-grid th { position: sticky; top: 0; background: var(--panel); text-align: left; color: var(--dim); font-weight: 600; border-bottom: 1px solid var(--line); padding: 2px 6px; white-space: nowrap; }
+.cp-grid th.sortable { cursor: pointer; }
+.cp-grid td { padding: 1px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; user-select: none; }
+.cp-grid td.num { text-align: right; color: var(--dim); font-family: var(--mono); }
+.cp-grid tr:nth-child(even) td { background: var(--odd); }
+.cp-grid tr.sel td { background: var(--sel); }
+.cp-name { font-family: var(--mono); }
+.cp-pk { display: inline-block; font-size: 10px; font-weight: 700; color: #b8730a; border: 1px solid currentColor; border-radius: 3px; padding: 0 2px; margin-right: 4px; }
+.cp-nn { color: var(--dim); }
+.cp-def { font-family: var(--mono); color: var(--dim); }
+.cp-empty { padding: 12px; color: var(--dim); }

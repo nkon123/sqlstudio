@@ -398,6 +398,12 @@ pub async fn list_objects(
 
 #[tauri::command]
 pub async fn describe(st: State<'_, AppState>, id: u64, name: String) -> R<meta::TableDesc> {
+    // 사전 조회 세션(자동완성용, 읽기 전용)이 준비돼 있으면 그쪽으로 — 작업 세션에서 긴 쿼리가 돌고 있어도 기다리지 않는다
+    if let Ok(hub) = crate::complete::hub_for(&st, id) {
+        if let Some(s) = hub.session() {
+            return Ok(meta::describe(s, &name).await?);
+        }
+    }
     let (s, _, _) = st.session(id)?;
     Ok(meta::describe(&s, &name).await?)
 }

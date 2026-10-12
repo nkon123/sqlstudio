@@ -1,0 +1,91 @@
+name: release
+
+# v* 태그를 올리면 Windows 설치 파일을 만들어 "초안(draft)" 릴리스에 붙인다.
+# 공개(Publish)는 사람이 확인하고 누른다. 수동 실행(workflow_dispatch)은 설치 파일만 아티팩트로 남긴다.
+#
+# 코드 서명: 저장소 비밀값 WINDOWS_CERT_PFX(base64) 와 WINDOWS_CERT_PASSWORD 가 있으면 설치 파일에 서명한다.
+# 없으면 서명 없이 만든다 (SmartScreen 경고). 자세한 것은 docs/RELEASE.md.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: 태그와 앱 버전 확인
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $ver = (Get-Content app/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          if ($ver -ne $tag) { Write-Error "tauri.conf.json 버전($ver)과 태그($tag)가 다릅니다"; exit 1 }
+
+      - name: 프런트엔드 의존성
+        working-directory: app
+        run: npm ci
+
+      - name: 테스트 (DB 없이)
+        # provider_down_stops_quickly 는 Windows 러너에서 시간 상한을 넘기곤 한다 (리눅스 CI 에서 돈다)
+        run: cargo test --workspace -- --skip provider_down_stops_quickly
+
+      - name: MCP 서버·분석 CLI (설치 파일에 함께 넣는다)
+        run: cargo build --release -p sqls-mcp -p sqls-analyze
+
+      - name: 설치 파일 (라이선스 고지 생성 → 화면 빌드 → NSIS)
+        working-directory: app
+        run: npx tauri build
+
+      - name: 서명 (인증서가 있을 때만)
+        if: env.CERT != ''
+        env:
+          CERT: ${{ secrets.WINDOWS_CERT_PFX }}
+          CERT_PW: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT))
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          Get-ChildItem target/release/bundle/nsis/*.exe | ForEach-Object {
+            & $signtool.FullName sign /f $pfx /p $env:CERT_PW /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          Remove-Item $pfx
+
+      - name: SHA256
+        shell: pwsh
+        run: |
+          Get-ChildItem target/release/bundle/nsis/*.exe | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content -Encoding ascii target/release/bundle/nsis/SHA256SUMS.txt
+          Get-Content target/release/bundle/nsis/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SQLStudio-setup
+          path: |
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/nsis/SHA256SUMS.txt
+
+      - name: 초안 릴리스
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem target/release/bundle/nsis/*.exe, target/release/bundle/nsis/SHA256SUMS.txt | ForEach-Object { $_.FullName }
+          gh release create "${{ github.ref_name }}" $files --draft --title "${{ github.ref_name }}" --generate-notes

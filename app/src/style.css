@@ -421,3 +421,13 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .hist-sql { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
 .hist-n { color: var(--accent); font-size: 11px; }
 .hist-preview { margin: 0; overflow: auto; border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font: 12px/1.45 var(--mono); white-space: pre-wrap; background: var(--bg); }
+
+/* ── 설정 > 편집기: 코드 조각 ── */
+.snip { display: flex; flex-direction: column; gap: 6px; }
+.snip-main { display: grid; grid-template-columns: 200px 1fr; gap: 8px; min-height: 180px; }
+.snip-list { display: flex; flex-direction: column; overflow: auto; max-height: 240px; border: 1px solid var(--line); border-radius: 4px; }
+.snip-list .list-item { text-align: left; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.snip-list .list-item.active { background: var(--sel); }
+.snip-form { display: flex; flex-direction: column; gap: 6px; }
+.snip-form .row { margin: 0; }
+.snip-body { width: 100%; font: 12px/1.45 var(--mono); resize: vertical; }

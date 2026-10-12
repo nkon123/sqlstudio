@@ -15,6 +15,7 @@
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, startCompletion, type CompletionSource } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab, toggleComment } from "@codemirror/commands";
 import { PLSQL, sql } from "@codemirror/lang-sql";
+import { snippetSource } from "./snippets";
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import type { Command } from "@codemirror/view";
@@ -122,7 +123,8 @@ export class SqlEditor {
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           // 후보는 백엔드가 구절을 보고 만든다 (언어 기본 자동완성은 쓰지 않는다)
           autocompletion({
-            override: complete ? [complete] : [],
+            // 백엔드 후보(테이블·컬럼…) + 코드 조각 (접속 전에도)
+            override: complete ? [complete, snippetSource] : [snippetSource],
             activateOnTyping: true,
             activateOnTypingDelay: 20,
             maxRenderedOptions: 100,

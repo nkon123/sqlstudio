@@ -21,6 +21,7 @@ import type { GitPanel } from "./git";
 import { ResultGrid } from "./grid";
 import { aliasMap, showColumns } from "./colpopup";
 import { openHistory } from "./history";
+import { DEFAULT_SNIPPETS, loadSnippets, parse as parseSnippets, saveSnippets, snippets, type Snip } from "./snippets";
 import { alertBox, bindBox, confirmBox, field, h, modal, passwordBox, toast } from "./ui";
 
 type Conn = Connected & { profile: string };
@@ -385,6 +386,7 @@ class App {
       this.showCompletionStatus(e.payload);
     });
     const info = await api.appInfo();
+    void loadSnippets(info.config_path);
     this.statusLeft.textContent = `SQLStudio ${info.version} · 설정: ${info.config_path}`;
     if (info.config_error) await alertBox("설정 파일 오류", `${info.config_error}\n\n기본 설정으로 시작합니다. 설정 화면에서 저장하면 파일을 다시 씁니다.`);
     await this.reloadProfiles();
@@ -1278,7 +1280,82 @@ class App {
         "Esc                   커서 하나로"),
       h("h3", {}, "SQL 실행 이력 (F8)"),
       histBox,
+      h("h3", {}, "코드 조각"),
+      this.snippetEditor(),
     );
+  }
+
+  /** 코드 조각 목록·편집·가져오기/내보내기 */
+  private snippetEditor() {
+    let items: Snip[] = snippets().map((s) => ({ ...s }));
+    let cur = -1;
+    const listEl = h("div", { class: "snip-list" });
+    const key = h("input", { placeholder: "줄임말 (예: sel)", style: "width:120px" });
+    const desc = h("input", { placeholder: "설명", style: "flex:1" });
+    const body = h("textarea", { rows: 7, class: "snip-body", placeholder: "SELECT ${*}\n  FROM ${table}" });
+    const persist = async (next: Snip[], msg = "저장했습니다") => {
+      try { await saveSnippets(next); items = next.map((s) => ({ ...s })); render(); toast(msg, "ok"); }
+      catch (err) { toast(errOf(err).message, "error"); }
+    };
+    const render = () => {
+      listEl.replaceChildren(...items.map((s, i) => {
+        const b = h("button", { class: `list-item${i === cur ? " active" : ""}`, onclick: (e: Event) => { e.preventDefault(); pick(i); } },
+          h("code", {}, s.key), h("small", {}, ` ${s.desc}`));
+        return b;
+      }));
+    };
+    const pick = (i: number) => {
+      cur = i;
+      const s = items[i];
+      key.value = s?.key ?? ""; desc.value = s?.desc ?? ""; body.value = s?.body ?? "";
+      render();
+    };
+    const btn = (label: string, f: () => void, cls = "") => h("button", { class: cls, onclick: (e: Event) => { e.preventDefault(); f(); } }, label);
+    const box = h("div", { class: "snip" },
+      h("small", {}, "편집기에서 줄임말을 치면 자동완성에 뜹니다. 고르면 틀이 들어가고 ${이름} 칸을 Tab 으로 옮겨 다니며 채웁니다 (이름이 같은 칸은 함께 바뀜)."),
+      h("div", { class: "snip-main" }, listEl,
+        h("div", { class: "snip-form" },
+          h("div", { class: "row" }, key, desc), body,
+          h("div", { class: "row" },
+            btn("저장", () => {
+              const k = key.value.trim();
+              if (!k || !body.value.trim()) return toast("줄임말과 내용을 채우세요", "error");
+              const next = items.slice();
+              const dup = next.findIndex((s, i) => i !== cur && s.key.toLowerCase() === k.toLowerCase());
+              if (dup >= 0) return toast(`'${k}' 는 이미 있습니다`, "error");
+              const s = { key: k, desc: desc.value.trim(), body: body.value };
+              if (cur >= 0) next[cur] = s; else { next.push(s); cur = next.length - 1; }
+              persist(next);
+            }, "primary"),
+            btn("새 조각", () => pick(-1)),
+            btn("삭제", async () => {
+              if (cur < 0) return;
+              if (!(await confirmBox("조각 삭제", `'${items[cur].key}' 를 지울까요?`, "삭제"))) return;
+              const next = items.filter((_, i) => i !== cur); cur = -1; key.value = desc.value = body.value = "";
+              persist(next, "지웠습니다");
+            }, "danger")))),
+      h("div", { class: "row" },
+        btn("내보내기", async () => {
+          const path = await saveDialog({ filters: [{ name: "JSON", extensions: ["json"] }], defaultPath: "sqlstudio-snippets.json" });
+          if (!path) return;
+          await api.writeFile(path, JSON.stringify({ snippets: items }, null, 2), "utf-8").then(() => toast("내보냈습니다 — 팀원은 '가져오기'로 씁니다", "ok")).catch((err) => toast(errOf(err).message, "error"));
+        }),
+        btn("가져오기", async () => {
+          const path = await openDialog({ multiple: false, filters: [{ name: "JSON", extensions: ["json"] }] });
+          if (!path || Array.isArray(path)) return;
+          try {
+            const got = parseSnippets((await api.readFile(path)).text);
+            // 같은 줄임말은 가져온 것으로 바꾸고 나머지는 더한다
+            const next = items.filter((s) => !got.some((g) => g.key.toLowerCase() === s.key.toLowerCase())).concat(got);
+            persist(next, `${got.length}개 가져왔습니다`);
+          } catch (err) { toast(`가져오지 못했습니다: ${errOf(err).message}`, "error"); }
+        }),
+        btn("기본 조각으로", async () => {
+          if (!(await confirmBox("기본 조각으로", "지금 조각을 지우고 기본 조각으로 되돌립니다.", "되돌리기"))) return;
+          cur = -1; persist(DEFAULT_SNIPPETS.map((s) => ({ ...s })), "기본 조각으로 되돌렸습니다");
+        })));
+    render();
+    return box;
   }
 
   private async profilesPage() {

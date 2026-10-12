@@ -300,3 +300,18 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .grid-cell.dirty { background: color-mix(in srgb, var(--warn) 25%, transparent) !important; }
 .grid-row.deleted .grid-cell { text-decoration: line-through; color: var(--danger); }
 .grid-input { box-sizing: border-box; height: 20px; font: inherit; padding: 0 3px; border: 1px solid var(--accent); }
+
+/* ── 데이터 흐름도 ── */
+.an-main.an-wide { grid-template-columns: 0 1fr; }
+.an-main.an-wide .an-left { visibility: hidden; border: 0; }
+.dfd { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.dfd-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 4px 8px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.dfd-toolbar .check { margin: 0; gap: 4px; }
+.dfd-body { flex: 1; display: grid; grid-template-columns: 1fr 260px; min-height: 0; }
+.dfd-canvas { min-height: 0; min-width: 0; background: var(--bg); }
+.dfd-side { border-left: 1px solid var(--line); overflow: auto; font-size: 12px; }
+.dfd-side h4 { margin: 8px 0 2px; font-size: 12px; color: var(--dim); }
+.dfd-side .hint { color: var(--dim); margin: 4px 0; }
+.dfd-title { font-family: var(--mono); font-weight: 600; word-break: break-all; }
+.dfd-legend { display: grid; gap: 3px; margin: 8px 0; }
+.dfd-sw { display: inline-block; width: 22px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }

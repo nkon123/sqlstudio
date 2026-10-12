@@ -69,6 +69,43 @@ pub fn write_sql_file(path: String, text: String, encoding: String) -> R<()> {
     Ok(())
 }
 
+/// 이미지 같은 바이너리 저장. 본문은 바이트 그대로 받고 (JSON 으로 바꾸면 몇 배로 커진다),
+/// 경로는 "path" 헤더에 URI 인코딩해서 받는다 (헤더는 ASCII 만 된다).
+#[tauri::command]
+pub fn write_binary_file(request: tauri::ipc::Request<'_>) -> R<()> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err(ErrView::msg("invalid", "바이트 본문이 아닙니다"));
+    };
+    let path = request
+        .headers()
+        .get("path")
+        .and_then(|v| v.to_str().ok())
+        .and_then(percent_decode)
+        .ok_or_else(|| ErrView::msg("invalid", "저장 경로가 없습니다"))?;
+    let tmp = format!("{path}.sqlstudio-tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| ErrView::msg("io", format!("{tmp}: {e}")))?;
+    std::fs::rename(&tmp, &path).map_err(|e| ErrView::msg("io", format!("{path}: {e}")))?;
+    Ok(())
+}
+
+/// encodeURIComponent 의 반대
+fn percent_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok().filter(|p| !p.is_empty())
+}
+
 /// Claude Desktop / Claude Code / Cursor 에 붙여 넣을 MCP 설정
 #[tauri::command]
 pub fn mcp_snippet(st: State<'_, AppState>) -> String {
@@ -97,6 +134,13 @@ pub fn mcp_snippet(st: State<'_, AppState>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_decode_korean_path() {
+        assert_eq!(percent_decode("C%3A%5C%EB%B3%B4%EA%B3%A0%5Cdfd.png").as_deref(), Some(r"C:\보고\dfd.png"));
+        assert_eq!(percent_decode("%E"), None);
+        assert_eq!(percent_decode(""), None);
+    }
 
     #[test]
     fn cp949_roundtrip() {

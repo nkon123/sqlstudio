@@ -86,6 +86,7 @@ pub fn run() {
             ai::ai_cancel,
             files::read_sql_file,
             files::write_sql_file,
+            files::write_binary_file,
             files::mcp_snippet,
             export::export_xlsx,
         ])

@@ -7,6 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { api, errOf, type Provider } from "./api";
+import { DfdView } from "./dfd";
 import { confirmBox, h, toast } from "./ui";
 
 interface UnitRef { owner: string; name: string; unit_type: string }
@@ -40,7 +41,7 @@ interface UnitResult {
 }
 interface Chunk { id: string; part: number; parts: number; start_line: number; end_line: number; signature: string; context: string; code: string; facts: Facts; subprogram?: string | null }
 interface ChunkResult { chunk: Chunk; insight?: Insight | null; error?: string | null; raw?: string | null; llm?: { model: string; elapsed_ms: number; attempts: number; repaired?: string[] } | null }
-interface Node { id: string; unit: string; path: string; kind: string; signature: string; start_line: number; end_line: number; public?: boolean | null; summary?: string | null; complexity: number; commits: boolean }
+interface Node { id: string; unit: string; path: string; kind: string; signature: string; start_line: number; end_line: number; public?: boolean | null; summary?: string | null; complexity: number; commits: boolean; trigger_on?: string | null; trigger_events?: string | null }
 interface Edge { from: string; to: string; resolved: boolean; external?: string | null; lines: number[] }
 interface TableRow { table: string; by: Record<string, string>; impacted_entries: string[]; fed_from?: string[]; feeds_into?: string[] }
 interface Flow { node: string; unit: string; cursor: string; cursor_kind: string; from: string[]; to: string; ops: string; line: number; via: string; cursor_summary?: string | null }
@@ -54,7 +55,7 @@ type Progress =
   | { type: "fetch"; run: number; index: number; total: number; key: string; error?: string | null }
   | { type: "finished"; run: number; error?: string | null; units: number; nodes: number; tables: number; findings: number; dir: string };
 
-type View = "summary" | "calls" | "tables" | "findings" | "quality";
+type View = "summary" | "calls" | "dfd" | "tables" | "findings" | "quality";
 const keyOf = (u: UnitRef) => `${u.owner}.${u.name}.${u.unit_type.replace(/ /g, "_")}`;
 const when = (t?: number | null) => (t ? new Date(t * 1000).toLocaleString() : "");
 const short = (id: string) => id.split(".").slice(1).join(".");
@@ -85,6 +86,11 @@ export class AnalysisView {
   private run: number | null = null;
   private selectedUnit: string | null = null;
   private unlisten: (() => void) | null = null;
+  private main: HTMLElement;
+  private dfd: DfdView | null = null;
+  /** DFD 에 넘긴 결과 (같으면 다시 그리지 않는다) */
+  private dfdOf: Integrated | null = null;
+  private dfdFocus: string | null = null;
 
   constructor(private sessionId: () => number | undefined, private onClose: () => void) {
     this.startBtn.onclick = () => this.start();
@@ -114,6 +120,7 @@ export class AnalysisView {
     };
     tab("summary", "요약");
     tab("calls", "호출 관계");
+    tab("dfd", "데이터 흐름도");
     tab("tables", "테이블");
     tab("findings", "확인할 것");
     tab("quality", "품질");
@@ -122,9 +129,9 @@ export class AnalysisView {
       h("table", { class: "an-list" },
         h("thead", {}, h("tr", {}, h("th", {}, this.allBox), h("th", {}, "형식"), h("th", {}, "이름"), h("th", {}, "분석"))),
         this.listEl));
+    this.main = h("div", { class: "an-main" }, left, h("div", { class: "an-right" }, nav, this.content));
     this.el = h("div", { class: "debugger analysis", hidden: true }, toolbar,
-      h("div", { class: "an-progress" }, this.bar),
-      h("div", { class: "an-main" }, left, h("div", { class: "an-right" }, nav, this.content)));
+      h("div", { class: "an-progress" }, this.bar), this.main);
   }
 
   async open(owner?: string, name?: string) {
@@ -290,6 +297,8 @@ export class AnalysisView {
 
   private render() {
     for (const [v, b] of this.navBtns) b.classList.toggle("active", v === this.view);
+    // 그림은 넓게 — 단위 목록을 접는다
+    this.main.classList.toggle("an-wide", this.view === "dfd");
     const g = this.g;
     if (!g) {
       this.content.replaceChildren(h("div", { class: "hint" },
@@ -298,6 +307,7 @@ export class AnalysisView {
     }
     if (this.view === "summary") return this.renderSummary(g);
     if (this.view === "calls") return this.renderCalls(g);
+    if (this.view === "dfd") return this.renderDfd(g);
     if (this.view === "tables") return this.renderTables(g);
     if (this.view === "quality") return void this.renderQuality();
     return this.renderFindings(g);
@@ -400,13 +410,24 @@ export class AnalysisView {
     this.content.replaceChildren(h("div", { class: "an-split" }, h("div", { class: "an-col" }, input, list), detail));
   }
 
+  private renderDfd(g: Integrated) {
+    this.dfd ??= new DfdView((id) => { this.view = "calls"; this.focusNode = id; this.render(); });
+    this.content.replaceChildren(this.dfd.el);
+    if (this.dfdOf !== g || this.dfdFocus) {
+      this.dfdOf = g;
+      this.dfd.setData(g, this.dfdFocus);
+      this.dfdFocus = null;
+    }
+  }
+
   private nodeDetail(g: Integrated, id: string): HTMLElement {
     const n = g.nodes.find((x) => x.id === id);
     const callers = g.edges.filter((e) => e.to === id);
     const callees = g.edges.filter((e) => e.from === id);
     const tables = g.tables.filter((t) => t.by[id]);
     const box = h("div", { class: "an-pad" },
-      h("div", { class: "an-head" }, h("strong", {}, id)),
+      h("div", { class: "an-head" }, h("strong", {}, id),
+        h("button", { class: "small", title: "이 서브프로그램을 가운데에 두고 데이터 흐름도로 본다", onclick: () => { this.dfdFocus = id; this.view = "dfd"; this.render(); } }, "흐름도")),
       n ? h("div", { class: "an-sig" }, `${n.signature}   (${n.start_line}~${n.end_line}행, 복잡도 ${n.complexity}${n.commits ? ", COMMIT/ROLLBACK" : ""})`) : "",
       n?.summary ? h("p", {}, n.summary) : "");
     box.append(h("h4", {}, `부르는 곳 ${callers.length}`),

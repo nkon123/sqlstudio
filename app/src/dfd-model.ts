@@ -1,0 +1,195 @@
+// 데이터 흐름도(DFD) 모델 — 통합 분석 결과(integrated.json)에서 그릴 노드·선을 만든다. 화면(DOM)과 무관.
+//
+// 1) 바탕 그래프: 프로시저·트리거·테이블과 읽기/쓰기/호출/트리거 발동/커서 흐름 선 (분석 결과 그대로)
+// 2) 보기 모델: 가운데·깊이로 자르고, 보고서형으로 단순화한다
+//    - 요소별 칸: 입력 테이블 | 처리 | 출력 테이블 — 모든 선이 왼쪽 → 오른쪽으로만 흐른다
+//    - 읽히고 쓰이기도 하는 테이블은 입력 칸에 "읽기용 사본"을 하나 더 둔다 → 되돌아가는 선이 없다
+//    - 같은 두 노드 사이 같은 종류 선은 하나로 합친다 (라벨 C,U)
+//    - 처리간 호출·테이블 흐름선은 읽기·쓰기 선과 같은 내용이라 기본으로 숨긴다
+
+export interface DfdSourceNode { id: string; kind: string; summary?: string | null; signature?: string; trigger_on?: string | null; trigger_events?: string | null; commits?: boolean }
+export interface DfdSourceEdge { from: string; to: string; resolved: boolean; lines: number[] }
+export interface DfdSourceTable { table: string; by: Record<string, string>; fed_from?: string[]; feeds_into?: string[] }
+export interface DfdSource { nodes: DfdSourceNode[]; edges: DfdSourceEdge[]; tables: DfdSourceTable[] }
+
+export type NodeType = "proc" | "trig" | "table";
+export type EdgeKind = "read" | "write" | "call" | "trig" | "flow";
+
+export interface BaseNode { id: string; type: NodeType; label: string; summary?: string; commits?: boolean }
+export interface BaseEdge { s: string; t: string; kind: EdgeKind; label: string; lines?: number[] }
+export interface Base { nodes: Map<string, BaseNode>; edges: BaseEdge[]; owner: string }
+
+export interface ViewOptions {
+  /** null 이면 전체 */
+  center: string | null;
+  /** 0 이면 끝까지 */
+  depth: number;
+  showCalls: boolean;
+  showFlows: boolean;
+  hidden: Set<string>;
+}
+export interface ViewNode { id: string; ref: string; type: NodeType; label: string; lane: number; copy: boolean; center: boolean; more: boolean }
+export interface ViewEdge { id: string; source: string; target: string; kind: EdgeKind; label: string }
+export interface View { nodes: ViewNode[]; edges: ViewEdge[] }
+
+export const LANES = ["입력 테이블", "처리", "출력 테이블"];
+
+/** 가장 많이 나오는 스키마 — 라벨에서 뗀다 */
+function mainOwner(ids: string[]): string {
+  const n = new Map<string, number>();
+  for (const id of ids) { const o = id.split(".")[0]; n.set(o, (n.get(o) ?? 0) + 1); }
+  return [...n].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+}
+
+function labelOf(id: string, owner: string): string {
+  const parts = id.split(".");
+  const rest = parts[0] === owner && parts.length > 1 ? parts.slice(1) : parts;
+  // 패키지.프로시저 → 두 줄
+  return rest.length >= 2 ? `${rest.slice(0, -1).join(".")}\n${rest[rest.length - 1]}` : rest.join(".");
+}
+
+/** "OWNER.PKG.PROC"(·중첩) → "OWNER.PKG". 단독 프로시저 "OWNER.PROC" 는 그대로 */
+export function packageOf(id: string): string {
+  const p = id.split(".");
+  return p.length >= 3 ? p.slice(0, 2).join(".") : id;
+}
+
+/** byPackage: 처리를 패키지 하나로 묶는다 (프로시저가 많을 때 큰 그림) */
+export function buildBase(g: DfdSource, byPackage = false): Base {
+  const owner = mainOwner([...g.nodes.map((n) => n.id), ...g.tables.map((t) => t.table)]);
+  const trig = new Set(g.nodes.filter((n) => n.kind === "TRIGGER").map((n) => n.id));
+  const key = (id: string) => (byPackage && !trig.has(id) ? packageOf(id) : id);
+  const nodes = new Map<string, BaseNode>();
+  const add = (raw: string, type: NodeType, extra: Partial<BaseNode> = {}) => {
+    const id = type === "table" ? raw : key(raw);
+    const grouped = id !== raw;
+    const cur = nodes.get(id);
+    if (!cur) nodes.set(id, { id, type, label: labelOf(id, owner), ...(grouped ? { commits: extra.commits } : extra) });
+    else if (grouped && extra.commits) cur.commits = true;
+    return id;
+  };
+  for (const n of g.nodes) add(n.id, n.kind === "TRIGGER" ? "trig" : "proc", { summary: n.summary ?? undefined, commits: n.commits });
+  const edges: BaseEdge[] = [];
+  for (const t of g.tables) {
+    add(t.table, "table");
+    for (const [raw, ops] of Object.entries(t.by)) {
+      const n = add(raw, "proc"); // (전역)·(초기화) 처럼 노드 목록에 없는 것
+      if (ops.includes("R")) edges.push({ s: t.table, t: n, kind: "read", label: "R" });
+      const w = ops.replace(/R/g, "");
+      if (w) edges.push({ s: n, t: t.table, kind: "write", label: w.split("").join(",") });
+    }
+  }
+  for (const e of g.edges) {
+    if (!e.resolved) continue;
+    const s = key(e.from), t = key(e.to);
+    if (s === t || !nodes.has(s) || !nodes.has(t)) continue;
+    edges.push({ s, t, kind: "call", label: "", lines: e.lines });
+  }
+  for (const n of g.nodes) {
+    if (!n.trigger_on) continue;
+    add(n.trigger_on, "table");
+    edges.push({ s: n.trigger_on, t: n.id, kind: "trig", label: n.trigger_events ?? "" });
+  }
+  const flows = new Set<string>();
+  for (const t of g.tables) {
+    for (const src of t.fed_from ?? []) {
+      const k = `${src}>${t.table}`;
+      if (flows.has(k) || src === t.table) continue;
+      flows.add(k);
+      add(src, "table");
+      edges.push({ s: src, t: t.table, kind: "flow", label: "" });
+    }
+  }
+  // 묶으면 같은 선이 여러 번 생긴다 — 합친다
+  const merged = new Map<string, BaseEdge>();
+  for (const e of edges) {
+    const k = `${e.s}|${e.t}|${e.kind}`;
+    const m = merged.get(k);
+    if (!m) { merged.set(k, { ...e }); continue; }
+    const labels = new Set([...m.label.split(","), ...e.label.split(",")].filter(Boolean));
+    m.label = ["C", "R", "U", "D"].filter((x) => labels.has(x)).concat([...labels].filter((x) => !"CRUD".includes(x))).join(",");
+    if (e.lines) m.lines = [...new Set([...(m.lines ?? []), ...e.lines])].sort((a, b) => a - b);
+  }
+  return { nodes, edges: [...merged.values()], owner };
+}
+
+/** 선이 가장 많이 붙는 노드 — 처음 열 때 가운데 후보 */
+export function busiest(b: Base): string | null {
+  const deg = new Map<string, number>();
+  for (const e of b.edges) if (e.kind !== "flow") for (const x of [e.s, e.t]) deg.set(x, (deg.get(x) ?? 0) + 1);
+  return [...deg].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+}
+
+export function buildView(b: Base, o: ViewOptions): View {
+  const typeOf = (id: string) => b.nodes.get(id)?.type;
+  let edges = b.edges.filter((e) => {
+    if (o.hidden.has(e.s) || o.hidden.has(e.t)) return false;
+    if (e.kind === "flow") return o.showFlows;
+    if (e.kind === "call") return o.showCalls;
+    return true;
+  });
+  // 가운데에서 depth 단계 (방향 무시)
+  let keep: Map<string, number>;
+  if (o.center && b.nodes.has(o.center)) {
+    keep = new Map([[o.center, 0]]);
+    const adj = new Map<string, string[]>();
+    for (const e of edges) {
+      (adj.get(e.s) ?? adj.set(e.s, []).get(e.s)!).push(e.t);
+      (adj.get(e.t) ?? adj.set(e.t, []).get(e.t)!).push(e.s);
+    }
+    const q = [o.center];
+    while (q.length) {
+      const x = q.shift()!;
+      const d = keep.get(x)!;
+      if (o.depth && d >= o.depth) continue;
+      for (const y of adj.get(x) ?? []) if (!keep.has(y)) { keep.set(y, d + 1); q.push(y); }
+    }
+  } else {
+    keep = new Map();
+    for (const e of edges) { keep.set(e.s, 1); keep.set(e.t, 1); }
+  }
+  // 화면 밖으로 이어지는 선이 있으면 "더 있음" 표시
+  const more = new Set<string>();
+  for (const e of b.edges) {
+    if (o.hidden.has(e.s) || o.hidden.has(e.t)) continue;
+    if (keep.has(e.s) !== keep.has(e.t)) more.add(keep.has(e.s) ? e.s : e.t);
+  }
+  edges = edges.filter((e) => keep.has(e.s) && keep.has(e.t));
+
+  // 쓰이는 테이블 → 출력 칸. 그 테이블에서 나가는 선은 입력 칸의 사본에서 나가게 한다
+  const written = new Set(edges.filter((e) => typeOf(e.t) === "table" && typeOf(e.s) !== "table").map((e) => e.t));
+  for (const e of edges) if (e.kind === "flow" && !written.has(e.t)) written.add(e.t);
+  const copies = new Set<string>();
+  const out: ViewEdge[] = [];
+  const merged = new Map<string, ViewEdge>();
+  for (const e of edges) {
+    let s = e.s;
+    if (written.has(s)) { s = `${s}@in`; copies.add(e.s); }
+    const k = `${s}|${e.t}|${e.kind}`;
+    const m = merged.get(k);
+    if (m) {
+      for (const l of e.label.split(",")) if (l && !m.label.split(",").includes(l)) m.label = m.label ? `${m.label},${l}` : l;
+      continue;
+    }
+    const v: ViewEdge = { id: `e${out.length}`, source: s, target: e.t, kind: e.kind, label: e.label };
+    merged.set(k, v);
+    out.push(v);
+  }
+  const nodes: ViewNode[] = [];
+  const mk = (id: string, ref: string, copy: boolean) => {
+    const n = b.nodes.get(ref)!;
+    const lane = n.type === "table" ? (copy || !written.has(ref) ? 0 : 2) : 1;
+    nodes.push({ id, ref, type: n.type, label: n.label, lane, copy, center: ref === o.center, more: more.has(ref) });
+  };
+  for (const id of keep.keys()) {
+    if (!b.nodes.has(id)) continue;
+    mk(id, id, false);
+    if (copies.has(id)) mk(`${id}@in`, id, true);
+  }
+  return { nodes, edges: out };
+}
+
+/** 노드 하나에 붙은 바탕 선 (상세 패널용) */
+export function edgesOf(b: Base, id: string) {
+  return { ins: b.edges.filter((e) => e.t === id), outs: b.edges.filter((e) => e.s === id) };
+}

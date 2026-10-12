@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DFD 마인드맵 시안</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/elkjs@0.9.3/lib/elk.bundled.js"></script>
+<style>
+:root { --bg:#f6f7f9; --panel:#fff; --line:#d9dde3; --text:#1d232b; --dim:#6b7480; --accent:#2f6fdd;
+  --read:#2f6fdd; --write:#e07a1f; --call:#8a93a0; --flow:#7a4fd0; --trig:#c62f3c; --manual:#0f9d75; }
+@media (prefers-color-scheme: dark) { :root { --bg:#16191e; --panel:#1d2127; --line:#313740; --text:#dfe3e8; --dim:#8d96a2; --accent:#4b8cf0; } }
+* { box-sizing: border-box; }
+html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font:13px/1.45 "Malgun Gothic", system-ui, sans-serif; }
+#app { display:grid; grid-template-rows:auto 1fr; height:100%; }
+header { display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:6px 8px; background:var(--panel); border-bottom:1px solid var(--line); }
+header .sep { width:1px; height:20px; background:var(--line); margin:0 4px; }
+header .spacer { flex:1; }
+button, select, input, textarea { font:inherit; color:inherit; background:var(--panel); border:1px solid var(--line); border-radius:5px; padding:4px 8px; }
+button { cursor:pointer; } button:hover { border-color:var(--accent); }
+button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+main { display:grid; grid-template-columns:1fr 300px; min-height:0; }
+#cy { min-height:0; }
+aside { border-left:1px solid var(--line); background:var(--panel); padding:10px; overflow:auto; display:flex; flex-direction:column; gap:10px; }
+aside h3 { margin:0; font-size:14px; }
+aside h4 { margin:6px 0 2px; font-size:12px; color:var(--dim); }
+.legend { display:grid; grid-template-columns:28px 1fr; gap:4px 6px; align-items:center; font-size:12px; }
+.sw { height:3px; border-radius:2px; } .sw.dash { background:repeating-linear-gradient(90deg, currentColor 0 5px, transparent 5px 9px) !important; height:3px; }
+.badge { display:inline-block; padding:1px 6px; border-radius:9px; font-size:11px; background:var(--bg); border:1px solid var(--line); }
+.ev { font-family:Consolas, monospace; font-size:11.5px; background:var(--bg); border:1px solid var(--line); border-radius:4px; padding:6px; white-space:pre-wrap; }
+.hint { color:var(--dim); font-size:12px; }
+.row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+#toast { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); background:#222; color:#fff; padding:6px 12px; border-radius:6px; opacity:0; transition:opacity .2s; pointer-events:none; }
+#toast.show { opacity:.92; }
+@media (max-width: 760px) { main { grid-template-columns:1fr; grid-template-rows:1fr 240px; } aside { border-left:0; border-top:1px solid var(--line); } }
+</style>
+</head>
+<body>
+<div id="app">
+<header>
+  <strong>DFD 시안</strong>
+  <span class="sep"></span>
+  가운데 <select id="center"></select>
+  깊이 <select id="depth"><option>1</option><option selected>2</option><option>3</option></select>
+  <button id="layoutReport" class="on" title="왼쪽 원천 → 오른쪽 결과, 직각 선, 겹침 최소화 (보고서용)">보고서형(직각)</button>
+  <button id="layoutTree" title="가운데에서 좌우로 뻗는 마인드맵, 자유 곡선">마인드맵</button>
+  <button id="layoutRadial" title="가운데에서 퍼지는 방사형, 자유 곡선">방사형</button>
+  <label title="프로시저 → 프로시저 호출선 (보고서형에서 기본 숨김)"><input type="checkbox" id="optCall"> 처리간 호출</label>
+  <label title="테이블 → 테이블 흐름선. 읽기·쓰기 선과 같은 내용이라 기본 숨김"><input type="checkbox" id="optFlow"> 테이블 흐름</label>
+  <span class="sep"></span>
+  <input id="addName" list="allNames" placeholder="테이블·프로시저 추가 (이름)" style="width:200px">
+  <datalist id="allNames"></datalist>
+  <button id="addBtn">추가</button>
+  <button id="connectBtn" title="노드 두 개를 차례로 클릭해 연결">연결하기</button>
+  <button id="groupBtn" title="Shift+클릭으로 여러 개 고른 뒤 묶기">묶기</button>
+  <button id="undoBtn" title="Ctrl+Z">되돌리기</button>
+  <span class="spacer"></span>
+  <button id="reanalyze" title="코드가 바뀐 상황을 흉내 낸다">다시 분석(흉내)</button>
+  <button id="pngBtn">PNG</button>
+</header>
+<main>
+  <div id="cy"></div>
+  <aside>
+    <div id="detail"><h3>사용법</h3>
+      <p class="hint">노드 클릭: 상세 · 더블클릭: 가지 펼치기/접기 · 끌기: 위치 고정 · 빈 곳 끌기: 화면 이동 · 휠: 확대<br>
+      위 입력칸으로 테이블을 추가하고 "연결하기"로 붙여 보세요. 직접 넣은 것은 초록 점선으로 그려집니다.</p></div>
+    <div>
+      <h4>범례</h4>
+      <div class="legend">
+        <div class="sw" style="background:var(--read)"></div><div>읽기 (테이블 → 처리)</div>
+        <div class="sw" style="background:var(--write)"></div><div>쓰기 C/U/D (처리 → 테이블)</div>
+        <div class="sw dash" style="color:var(--call)"></div><div>호출 (처리 → 처리)</div>
+        <div class="sw" style="background:var(--flow);height:5px"></div><div>데이터 흐름 (테이블 → 테이블)</div>
+        <div class="sw" style="background:var(--trig)"></div><div>트리거 발동</div>
+        <div class="sw dash" style="color:var(--manual)"></div><div>사람이 넣은 연결 (근거 없음)</div>
+      </div>
+      <h4>모양</h4>
+      <div class="hint">▭ 둥근 상자 = 처리(프로시저) · ═ 위아래 줄 = 테이블(저장소) · ▢ 각진 상자 = 외부 · ◇ = 트리거</div>
+    </div>
+  </aside>
+</main>
+</div>
+<div id="toast"></div>
+<script>
+// ── 가짜 분석 결과 (실제로는 integrated.json 에서 계산) ─────────────────
+const NODES = [
+  { id:'APP_ORDER', label:'주문 앱', type:'ext' },
+  { id:'JOB_CLOSE', label:'일마감 배치(JOB)', type:'ext' },
+  { id:'ORDER_PKG.CREATE_ORDER', label:'ORDER_PKG\nCREATE_ORDER', type:'proc', summary:'주문을 만들고 재고를 잡고 결제를 요청한다.' },
+  { id:'ORDER_PKG.CANCEL_ORDER', label:'ORDER_PKG\nCANCEL_ORDER', type:'proc', summary:'주문을 취소하고 재고·결제를 되돌린다.' },
+  { id:'STOCK_PKG.RESERVE', label:'STOCK_PKG\nRESERVE', type:'proc', summary:'상품 재고를 차감한다.' },
+  { id:'PAY_PKG.APPROVE', label:'PAY_PKG\nAPPROVE', type:'proc', summary:'결제를 승인하고 결제 내역을 남긴다. COMMIT 함.' },
+  { id:'BATCH_PKG.CLOSE_DAY', label:'BATCH_PKG\nCLOSE_DAY', type:'proc', summary:'당일 주문을 마감 테이블로 옮긴다 (커서 → INSERT).' },
+  { id:'TRG_ORDERS_AIU', label:'TRG_ORDERS_AIU', type:'trig', summary:'주문이 바뀌면 이력을 남긴다.' },
+  { id:'ORDERS', label:'ORDERS', type:'table' }, { id:'ORDER_ITEMS', label:'ORDER_ITEMS', type:'table' },
+  { id:'CUSTOMERS', label:'CUSTOMERS', type:'table' }, { id:'PRODUCTS', label:'PRODUCTS', type:'table' },
+  { id:'STOCK', label:'STOCK', type:'table' }, { id:'PAYMENTS', label:'PAYMENTS', type:'table' },
+  { id:'ORDER_HIST', label:'ORDER_HIST', type:'table' }, { id:'DAILY_CLOSE', label:'DAILY_CLOSE', type:'table' },
+  { id:'CODE_TBL', label:'CODE_TBL', type:'table' },
+];
+const EDGES = [
+  ['APP_ORDER','ORDER_PKG.CREATE_ORDER','call',''], ['APP_ORDER','ORDER_PKG.CANCEL_ORDER','call',''],
+  ['JOB_CLOSE','BATCH_PKG.CLOSE_DAY','call',''],
+  ['CUSTOMERS','ORDER_PKG.CREATE_ORDER','read','R'], ['PRODUCTS','ORDER_PKG.CREATE_ORDER','read','R'], ['CODE_TBL','ORDER_PKG.CREATE_ORDER','read','R'],
+  ['ORDER_PKG.CREATE_ORDER','ORDERS','write','C'], ['ORDER_PKG.CREATE_ORDER','ORDER_ITEMS','write','C'],
+  ['ORDER_PKG.CREATE_ORDER','STOCK_PKG.RESERVE','call',''], ['ORDER_PKG.CREATE_ORDER','PAY_PKG.APPROVE','call',''],
+  ['STOCK','STOCK_PKG.RESERVE','read','R'], ['STOCK_PKG.RESERVE','STOCK','write','U'],
+  ['ORDERS','PAY_PKG.APPROVE','read','R'], ['PAY_PKG.APPROVE','PAYMENTS','write','C'],
+  ['ORDERS','ORDER_PKG.CANCEL_ORDER','read','R'], ['ORDER_PKG.CANCEL_ORDER','ORDERS','write','U'],
+  ['ORDER_PKG.CANCEL_ORDER','STOCK','write','U'], ['ORDER_PKG.CANCEL_ORDER','PAYMENTS','write','U'],
+  ['ORDERS','TRG_ORDERS_AIU','trig','AFTER INS/UPD'], ['TRG_ORDERS_AIU','ORDER_HIST','write','C'],
+  ['ORDERS','BATCH_PKG.CLOSE_DAY','read','R'], ['ORDER_ITEMS','BATCH_PKG.CLOSE_DAY','read','R'], ['BATCH_PKG.CLOSE_DAY','DAILY_CLOSE','write','C'],
+  ['ORDERS','DAILY_CLOSE','flow','CLOSE_DAY 커서 c_today'], ['ORDER_ITEMS','DAILY_CLOSE','flow','CLOSE_DAY 커서 c_today'],
+];
+const EVIDENCE = (e) => {
+  const lines = { read:'SELECT … FROM '+e.s+' WHERE …', write:{C:'INSERT INTO '+e.t+' (…) VALUES (…)',U:'UPDATE '+e.t+' SET … WHERE …',D:'DELETE FROM '+e.t}[e.label] ?? '', call: e.t+'(…);', trig:'CREATE TRIGGER '+e.t+' AFTER INSERT OR UPDATE ON '+e.s, flow:'FOR r IN c_today LOOP\n  INSERT INTO '+e.t+' VALUES (r.…);\nEND LOOP;' }[e.kind];
+  const ln = 40 + (e.s.length * 7 + e.t.length * 3) % 400;
+  return (e.kind === 'trig' ? 'ALL_TRIGGERS: ' : 'ORDER_PKG 본문 ') + ln + '행\n' + (lines || '');
+};
+
+// ── 상태: 자동 층 + 수정 층 ─────────────────────────
+const edits = { added:[], addedEdges:[], hidden:new Set(), labels:{}, notes:{}, pinned:{}, groups:[] };
+const undoStack = [];
+const snapshot = () => JSON.stringify({ ...edits, hidden:[...edits.hidden], pos:cy.nodes().map(n => [n.id(), n.position()]) });
+function pushUndo() { undoStack.push(snapshot()); if (undoStack.length > 50) undoStack.shift(); }
+
+const cs = getComputedStyle(document.documentElement);
+const v = (n) => cs.getPropertyValue(n).trim();
+const cy = cytoscape({
+  container: document.getElementById('cy'),
+  wheelSensitivity: 0.25,
+  style: [
+    { selector:'node', style:{ label:'data(label)', 'text-wrap':'wrap', 'text-valign':'center', 'text-halign':'center', 'font-size':11, color:v('--text'),
+      'background-color':v('--panel'), 'border-width':2, 'border-color':v('--line'), width:'data(w)', height:'data(h)', shape:'round-rectangle' } },
+    { selector:'node[type="proc"]', style:{ 'border-color':'#2f6fdd', 'background-color':'#e8f0fd', color:'#1d232b' } },
+    { selector:'node[type="table"]', style:{ shape:'rectangle', 'border-width':0, 'background-color':'#fff4e6', color:'#1d232b',
+      'border-style':'solid', 'underlay-color':'#e07a1f', 'underlay-opacity':0, 'outline-width':0,
+      'background-image':'linear-gradient', } },
+    { selector:'node[type="table"]', style:{ 'border-width':2, 'border-color':'#e07a1f', 'border-style':'double', 'border-cap':'butt' } },
+    { selector:'node[type="ext"]', style:{ shape:'rectangle', 'border-color':'#6b7480', 'background-color':'#eef0f3', color:'#1d232b', 'font-weight':'bold' } },
+    { selector:'node[type="trig"]', style:{ shape:'diamond', 'border-color':'#c62f3c', 'background-color':'#fdeaec', color:'#1d232b' } },
+    { selector:'node[?manual]', style:{ 'border-style':'dashed', 'border-color':v('--manual') } },
+    { selector:'node[?center]', style:{ 'border-width':4, 'font-weight':'bold', 'font-size':13 } },
+    { selector:'node[?collapsed]', style:{ 'background-blacken':-0.1, 'border-style':'dotted', label:(n)=> n.data('label') + '  ＋' } },
+    { selector:'node:selected', style:{ 'overlay-color':v('--accent'), 'overlay-opacity':0.15 } },
+    { selector:'$node > node', style:{} },
+    { selector:'node[type="group"]', style:{ shape:'round-rectangle', 'background-opacity':0.06, 'background-color':v('--accent'), 'border-color':v('--accent'), 'border-style':'dashed',
+      label:'data(label)', 'text-valign':'top', 'text-halign':'center', 'font-weight':'bold', padding:'18px', color:v('--text') } },
+    { selector:'edge', style:{ width:2, 'curve-style':'bezier', 'target-arrow-shape':'triangle', 'arrow-scale':0.9, label:'data(label)', 'font-size':10,
+      'text-background-color':v('--bg'), 'text-background-opacity':0.85, 'text-background-padding':'2px', color:v('--text') } },
+    { selector:'edge[kind="read"]', style:{ 'line-color':'#2f6fdd', 'target-arrow-color':'#2f6fdd' } },
+    { selector:'edge[kind="write"]', style:{ 'line-color':'#e07a1f', 'target-arrow-color':'#e07a1f' } },
+    { selector:'edge[kind="call"]', style:{ 'line-color':'#8a93a0', 'target-arrow-color':'#8a93a0', 'line-style':'dashed' } },
+    { selector:'edge[kind="flow"]', style:{ 'line-color':'#7a4fd0', 'target-arrow-color':'#7a4fd0', width:4, 'curve-style':'unbundled-bezier', 'control-point-distances':60 } },
+    { selector:'edge[kind="trig"]', style:{ 'line-color':'#c62f3c', 'target-arrow-color':'#c62f3c' } },
+    { selector:'edge[?manual]', style:{ 'line-color':v('--manual'), 'target-arrow-color':v('--manual'), 'line-style':'dashed', 'line-dash-pattern':[6,4] } },
+    { selector:'edge[?gone]', style:{ opacity:0.35, 'line-style':'dotted' } },
+    { selector:'edge[?fresh]', style:{ width:4 } },
+    { selector:'edge.ortho', style:{ 'curve-style':'segments', 'edge-distances':'endpoints', 'segment-radius':6, 'line-cap':'square', label:'', 'target-label':'data(tag)',
+      'target-text-offset':22, 'target-text-margin-y':-8, 'font-size':10, 'text-background-color':v('--bg'), 'text-background-opacity':0.9, 'text-background-padding':'1px' } },
+    { selector:'edge.ortho.straight', style:{ 'curve-style':'straight' } },
+    { selector:'edge.ortho[kind="flow"]', style:{ width:3 } },
+    { selector:'node[?copy]', style:{ 'border-style':'dashed' } },
+    { selector:'node', style:{ 'z-index-compare':'manual', 'z-index':10 } },
+    { selector:'edge', style:{ 'z-index-compare':'manual', 'z-index':5 } },
+    { selector:'node[type="lane"]', style:{ shape:'rectangle', 'z-index':0, events:'no', 'background-color':v('--text'), 'background-opacity':0.035,
+      'border-width':0, label:'data(label)', 'text-valign':'top', 'text-halign':'center', 'text-margin-y':26, 'font-size':13, 'font-weight':'bold', color:v('--dim') } },
+    { selector:'.dim', style:{ opacity:0.12 } },
+    { selector:'.faded', style:{ opacity:0.15 } },
+    { selector:'edge:selected', style:{ width:4 } },
+  ],
+});
+
+let center = 'ORDERS', depth = 2, layoutName = 'report', connectFrom = null, connectMode = false;
+let autoEdges = EDGES.map(([s,t,kind,label], i) => ({ id:'e'+i, s, t, kind, label }));
+const collapsed = new Set();
+
+function nodeDef(id) { id = String(id).replace(/@in$/, ''); return NODES.find(n => n.id === id) || edits.added.find(n => n.id === id); }
+function allEdges() { return [...autoEdges, ...edits.addedEdges]; }
+
+/** 가운데에서 depth 단계 (접힌 노드 너머는 안 펼친다) */
+function visibleSet() {
+  const seen = new Map([[center, 0]]);
+  const q = [center];
+  while (q.length) {
+    const x = q.shift(); const d = seen.get(x);
+    if (d >= depth || (collapsed.has(x) && x !== center)) continue;
+    for (const e of allEdges()) {
+      const y = e.s === x ? e.t : e.t === x ? e.s : null;
+      if (y && !seen.has(y) && !edits.hidden.has(y)) { seen.set(y, d + 1); q.push(y); }
+    }
+  }
+  for (const n of edits.added) if (!seen.has(n.id)) seen.set(n.id, 1);
+  return seen;
+}
+
+function render(relayout = true) {
+  const keep = new Map(cy.nodes().map(n => [n.id(), { ...n.position() }]));
+  const vis = visibleSet();
+  const els = [];
+  for (const g of edits.groups) els.push({ data:{ id:g.id, label:g.label, type:'group' } });
+  let nodes = [], edges = [];
+  for (const [id] of vis) {
+    const d = nodeDef(id); if (!d) continue;
+    const hasHiddenNeighbors = allEdges().some(e => (e.s === id && !vis.has(e.t)) || (e.t === id && !vis.has(e.s)));
+    const grp = edits.groups.find(g => g.members.includes(id));
+    nodes.push({ id, ref:id, label: edits.labels[id] ?? d.label, type:d.type, manual:!!d.manual, center: id === center,
+      collapsed: hasHiddenNeighbors && id !== center, parent: grp?.id });
+  }
+  for (const e of allEdges()) if (vis.has(e.s) && vis.has(e.t)) edges.push({ id:e.id, source:e.s, target:e.t, kind:e.kind, label:e.label, manual:!!e.manual, gone:!!e.gone, fresh:!!e.fresh });
+  if (layoutName === 'report') ({ nodes, edges } = reportModel(nodes, edges));
+  for (const n of nodes) {
+    let [w, hh] = boxSize(n.label, n.type, n.center);
+    // 선이 많이 붙는 노드는 키워서 들어오는 점을 벌린다 (선·라벨 겹침 방지)
+    const inc = edges.filter(e => e.target === n.id).length, out = edges.filter(e => e.source === n.id).length;
+    if (n.type !== 'trig') hh = Math.max(hh, Math.max(inc, out) * 14 + 12);
+    els.push({ data:{ ...n, w, h: hh } });
+  }
+  for (const e of edges) els.push({ data:e });
+  cy.elements().remove(); cy.add(els);
+  for (const n of cy.nodes()) {
+    if (edits.pinned[n.id()]) n.position(edits.pinned[n.id()]);
+    else if (!relayout && keep.has(n.id())) n.position(keep.get(n.id()));
+  }
+  if (relayout || layoutName === 'report') runLayout(); else cy.fit(undefined, 40);
+  fillDatalist();
+}
+
+/**
+ * 마인드맵 배치: 가운데 노드에서 BFS 로 가지를 만든다.
+ * 가운데로 "들어오는" 쪽(원천)은 왼쪽, "나가는" 쪽(결과)은 오른쪽 — DFD 의 흐름 방향이 그대로 보인다.
+ */
+function mindmapPositions() {
+  const ids = new Set(cy.nodes().filter(n => n.data('type') !== 'group').map(n => n.id()));
+  const kids = new Map(), side = new Map([[center, 0]]), depthOf = new Map([[center, 0]]);
+  const q = [center];
+  while (q.length) {
+    const x = q.shift();
+    for (const e of allEdges()) {
+      let y = null, s = 0;
+      if (e.s === x) { y = e.t; s = 1; } else if (e.t === x) { y = e.s; s = -1; }
+      if (!y || !ids.has(y) || side.has(y)) continue;
+      side.set(y, x === center ? s : side.get(x));
+      depthOf.set(y, depthOf.get(x) + 1);
+      if (!kids.has(x)) kids.set(x, []);
+      kids.get(x).push(y); q.push(y);
+    }
+  }
+  for (const id of ids) if (!side.has(id)) { side.set(id, 1); depthOf.set(id, 1); (kids.get(center) ?? kids.set(center, []).get(center)).push(id); }
+  const leaves = (id, s) => { const c = (kids.get(id) ?? []).filter(k => id !== center || side.get(k) === s); return c.length ? c.reduce((a, k) => a + leaves(k, s), 0) : 1; };
+  const pos = { [center]: { x:0, y:0 } };
+  for (const s of [-1, 1]) {
+    const roots = (kids.get(center) ?? []).filter(k => side.get(k) === s);
+    const total = roots.reduce((a, k) => a + leaves(k, s), 0) || 1;
+    let cursor = 0;
+    const place = (id, d) => {
+      const n = leaves(id, s);
+      const mid = cursor + n / 2;
+      if ((kids.get(id) ?? []).length) {
+        const save = cursor;
+        for (const k of kids.get(id)) place(k, d + 1);
+        cursor = save + n;
+      } else cursor += 1;
+      if (layoutName === 'tree') {
+        pos[id] = { x: s * d * 230, y: (mid - total / 2) * 64 };
+      } else {
+        // 왼쪽 반원 / 오른쪽 반원에 퍼뜨린다
+        const t = (mid / total - 0.5) * Math.PI * 0.92;
+        const r = 170 + (d - 1) * 190;
+        pos[id] = { x: s * r * Math.cos(t), y: r * Math.sin(t) * 1.15 };
+      }
+    };
+    for (const k of roots) place(k, 1);
+  }
+  return pos;
+}
+
+// ── 보고서형: ELK(layered) 로 노드 배치 + 직각 선 경로를 함께 계산한다 ──────────────
+const elk = new ELK();
+const measure = document.createElement('canvas').getContext('2d');
+function boxSize(label, type, isCenter) {
+  measure.font = (isCenter ? 'bold 13px' : '11px') + ' "Malgun Gothic", sans-serif';
+  const lines = String(label).split('\n');
+  const w = Math.max(...lines.map(l => measure.measureText(l).width)) + 24;
+  const h = lines.length * 15 + 16;
+  if (type === 'trig') return [Math.round(w * 1.5), Math.round(h * 1.7)];
+  return [Math.max(70, Math.round(w)), Math.max(30, Math.round(h))];
+}
+const tagOf = (e) => ({ read:'', write:e.data('label'), trig:'발동', flow:'흐름', call:'' }[e.data('kind')] ?? '');
+
+/**
+ * 보고서형 단순화
+ *  1) 요소별 칸(레인): 외부 | 입력 테이블 | 처리 | 출력 테이블 — 모든 선이 왼쪽 → 오른쪽으로만 흐른다.
+ *  2) 읽히고 쓰이기도 하는 테이블은 입력 칸에 "읽기용 사본"(점선)을 하나 더 둔다 → 되돌아가는 선이 사라진다.
+ *  3) 같은 두 노드 사이 같은 종류 선은 하나로 합친다 (라벨 C,U).
+ *  4) 처리간 호출·테이블 흐름선은 기본 숨김 (다른 선과 같은 내용) — 툴바에서 켤 수 있다.
+ */
+const LANES = ['외부', '입력 테이블', '처리', '출력 테이블'];
+function reportModel(nodes, edges) {
+  const showCall = document.getElementById('optCall').checked, showFlow = document.getElementById('optFlow').checked;
+  const typeOf = new Map(nodes.map(n => [n.id, n.type]));
+  edges = edges.filter(e => {
+    if (e.kind === 'flow' && !e.manual) return showFlow;
+    if (e.kind === 'call' && typeOf.get(e.source) !== 'ext') return showCall;
+    return true;
+  });
+  const written = new Set(edges.filter(e => typeOf.get(e.target) === 'table').map(e => e.target));
+  const copies = new Map();
+  for (const e of edges) {
+    if (!written.has(e.source)) continue;
+    if (!copies.has(e.source)) {
+      const n = nodes.find(x => x.id === e.source);
+      copies.set(e.source, { ...n, id: e.source + '@in', copy:true, parent:undefined });
+    }
+    e.source = e.source + '@in';
+  }
+  nodes = [...nodes, ...copies.values()];
+  // 같은 방향·같은 종류 선 합치기
+  const merged = new Map();
+  for (const e of edges) {
+    const k = e.source + '|' + e.target + '|' + e.kind;
+    const m = merged.get(k);
+    if (!m) { merged.set(k, { ...e }); continue; }
+    if (e.label && !m.label.split(',').includes(e.label)) m.label = m.label ? m.label + ',' + e.label : e.label;
+    m.manual = m.manual && e.manual; m.fresh = m.fresh || e.fresh; m.gone = m.gone && e.gone;
+  }
+  for (const n of nodes) n.lane = n.type === 'ext' ? 0 : n.type === 'table' ? (written.has(n.id) ? 3 : 1) : 2;
+  return { nodes, edges: [...merged.values()] };
+}
+
+async function reportLayout() {
+  cy.remove('node[type="lane"]');
+  const nodes = cy.nodes().filter(n => n.data('type') !== 'group');
+  const groups = cy.nodes('[type="group"]');
+  const elkNode = (n) => ({ id:n.id(), width:n.data('w'), height:n.data('h'),
+    layoutOptions:{ 'elk.partitioning.partition': String(n.data('lane') ?? 2) } });
+  const children = [];
+  for (const g of groups) children.push({ id:g.id(), layoutOptions:{ 'elk.padding':'[top=28,left=14,bottom=14,right=14]' },
+    children: g.children().map(elkNode) });
+  for (const n of nodes) if (!n.isChild()) children.push(elkNode(n));
+  const graph = {
+    id:'root',
+    layoutOptions: {
+      'elk.algorithm':'layered', 'elk.direction':'RIGHT', 'elk.edgeRouting':'ORTHOGONAL',
+      'elk.hierarchyHandling':'INCLUDE_CHILDREN',
+      'elk.spacing.nodeNode':'28', 'elk.layered.spacing.nodeNodeBetweenLayers':'90',
+      'elk.spacing.edgeNode':'18', 'elk.spacing.edgeEdge':'14', 'elk.layered.spacing.edgeEdgeBetweenLayers':'14',
+      'elk.layered.spacing.edgeNodeBetweenLayers':'18',
+      'elk.partitioning.activate':'true',
+      'elk.layered.crossingMinimization.strategy':'LAYER_SWEEP', 'elk.layered.thoroughness':'30',
+      'elk.layered.nodePlacement.strategy':'BRANDES_KOEPF', 'elk.layered.nodePlacement.bk.fixedAlignment':'BALANCED',
+      'elk.layered.nodePlacement.favorStraightEdges':'true',
+      'elk.layered.mergeEdges':'false', 'elk.layered.unnecessaryBendpoints':'false',
+    },
+    children,
+    edges: cy.edges().map(e => ({ id:e.id(), sources:[e.source().id()], targets:[e.target().id()] })),
+  };
+  const out = await elk.layout(graph);
+  // 노드: ELK 는 왼쪽 위 기준, Cytoscape 는 가운데 기준
+  const abs = new Map();
+  const walk = (list, ox, oy) => { for (const c of list ?? []) { const x = ox + c.x, y = oy + c.y; abs.set(c.id, { x, y, w:c.width, h:c.height }); walk(c.children, x, y); } };
+  walk(out.children, 0, 0);
+  cy.batch(() => {
+    for (const n of nodes) { const b = abs.get(n.id()); if (b) n.position({ x:b.x + b.w / 2, y:b.y + b.h / 2 }); }
+    for (const e of out.edges ?? []) {
+      const ce = cy.getElementById(e.id); const sec = e.sections?.[0];
+      if (!ce.length || !sec) continue;
+      const S = sec.startPoint, T = sec.endPoint, B = sec.bendPoints ?? [];
+      const sc = ce.source().position(), tc = ce.target().position();
+      const st = { 'source-endpoint': `${S.x - sc.x}px ${S.y - sc.y}px`, 'target-endpoint': `${T.x - tc.x}px ${T.y - tc.y}px` };
+      const dx = T.x - S.x, dy = T.y - S.y, L2 = dx * dx + dy * dy || 1, L = Math.sqrt(L2);
+      ce.addClass('ortho'); ce.data('tag', tagOf(ce));
+      if (!B.length) { ce.addClass('straight'); ce.style(st); continue; }
+      ce.removeClass('straight');
+      // 꺾이는 점 → Cytoscape segments (시작→끝 직선 기준 비율과 수직 거리)
+      const w = B.map(p => ((p.x - S.x) * dx + (p.y - S.y) * dy) / L2);
+      const d = B.map(p => ((p.y - S.y) * dx - (p.x - S.x) * dy) / L);
+      ce.style({ ...st, 'segment-weights': w.join(' '), 'segment-distances': d.join(' ') });
+    }
+  });
+  // 레인 배경: 칸마다 노드가 차지한 가로 범위, 세로는 전체
+  const bb = nodes.boundingBox();
+  const lanes = [];
+  for (let i = 0; i < LANES.length; i++) {
+    const ns = nodes.filter(n => (n.data('lane') ?? 2) === i); if (!ns.length) continue;
+    const b = ns.boundingBox(); lanes.push({ i, x1:b.x1 - 18, x2:b.x2 + 18 });
+  }
+  // 이웃 레인과 겹치지 않게 사이의 가운데에서 자른다
+  for (let k = 1; k < lanes.length; k++) {
+    const mid = (lanes[k - 1].x2 - 18 + lanes[k].x1 + 18) / 2;
+    lanes[k - 1].x2 = Math.min(lanes[k - 1].x2, mid - 3); lanes[k].x1 = Math.max(lanes[k].x1, mid + 3);
+  }
+  const y1 = bb.y1 - 44, y2 = bb.y2 + 16;
+  cy.add(lanes.map(l => ({ group:'nodes', data:{ id:'lane' + l.i, type:'lane', label:LANES[l.i] },
+    position:{ x:(l.x1 + l.x2) / 2, y:(y1 + y2) / 2 }, style:{ width:l.x2 - l.x1, height:y2 - y1 }, selectable:false, grabbable:false })));
+  cy.fit(cy.elements(), 30);
+}
+
+function runLayout() {
+  cy.resize();
+  if (layoutName === 'report') {
+    cy.nodes().ungrabify();
+    reportLayout();
+    return;
+  }
+  cy.remove('node[type="lane"]');
+  cy.nodes().grabify();
+  cy.edges().removeClass('ortho straight').removeStyle();
+  const pos = mindmapPositions();
+  const free = cy.nodes().filter(n => !edits.pinned[n.id()] && n.data('type') !== 'group');
+  free.layout({ name:'preset', positions:(n) => pos[n.id()] ?? n.position(), animate:false, fit:false }).run();
+  // 위치가 반영된 다음 맞춘다 (같은 작업 안에서 맞추면 경계 상자가 옛 값일 때가 있다)
+  Promise.resolve().then(() => cy.fit(cy.elements(), 40));
+}
+
+// ── 상세 패널 ─────────────────────────
+const detail = document.getElementById('detail');
+function showNode(n) {
+  const d = nodeDef(n.id());
+  const kindKo = { proc:'처리 (프로시저)', table:'저장소 (테이블)', ext:'외부', trig:'트리거' }[d.type] ?? '';
+  // 사본이 있으면 둘 다 합쳐서 보여 준다
+  const twins = cy.nodes().filter(x => (x.data('ref') ?? x.id()) === d.id);
+  const ins = twins.incomers('edge'), outs = twins.outgoers('edge');
+  detail.innerHTML = `<h3>${esc(edits.labels[d.id] ?? d.label).replace('\n',' ')}</h3>
+    <div class="row"><span class="badge">${kindKo}</span>${d.manual ? '<span class="badge" style="color:var(--manual)">✎ 직접 추가</span>' : '<span class="badge">분석에서</span>'}</div>
+    ${d.summary ? `<p>${esc(d.summary)}</p>` : ''}
+    ${twins.length > 1 ? '<p class="hint">보고서형에서는 읽히는 쪽(입력 칸, 점선)과 쓰이는 쪽(출력 칸)에 한 번씩 그립니다. 같은 테이블입니다.</p>' : ''}
+    <h4>들어오는 것 ${ins.length}</h4><div class="hint">${ins.map(e=>esc(e.source().data('label').replace('\n',' '))+' ('+kindLabel(e)+')').join('<br>')||'-'}</div>
+    <h4>나가는 것 ${outs.length}</h4><div class="hint">${outs.map(e=>esc(e.target().data('label').replace('\n',' '))+' ('+kindLabel(e)+')').join('<br>')||'-'}</div>
+    <h4>이름표</h4><input id="lbl" value="${esc(edits.labels[d.id] ?? d.label.replace('\n',' '))}" style="width:100%">
+    <h4>메모</h4><textarea id="note" rows="3" style="width:100%">${esc(edits.notes[d.id] ?? '')}</textarea>
+    <div class="row" style="margin-top:6px">
+      <button id="mkCenter">가운데로</button><button id="unpin">고정 풀기</button>
+      <button id="hide">${d.manual ? '삭제' : '숨기기'}</button></div>`;
+  document.getElementById('lbl').onchange = (e) => { pushUndo(); edits.labels[d.id] = e.target.value; render(false); };
+  document.getElementById('note').onchange = (e) => { pushUndo(); edits.notes[d.id] = e.target.value; toast('메모 저장'); };
+  document.getElementById('mkCenter').onclick = () => { center = d.id; document.getElementById('center').value = d.id; collapsed.clear(); render(); };
+  document.getElementById('unpin').onclick = () => { pushUndo(); delete edits.pinned[d.id]; render(); };
+  document.getElementById('hide').onclick = () => { pushUndo();
+    if (d.manual) { edits.added = edits.added.filter(x => x.id !== d.id); edits.addedEdges = edits.addedEdges.filter(e => e.s !== d.id && e.t !== d.id); }
+    else edits.hidden.add(d.id);
+    render(false); toast(d.manual ? '삭제했습니다' : '숨겼습니다 (되돌리기로 복구)'); };
+}
+function showEdge(e) {
+  const d = e.data(); const src = allEdges().find(x => x.id === d.id);
+  detail.innerHTML = `<h3>${esc(e.source().data('label').replace('\n',' '))} → ${esc(e.target().data('label').replace('\n',' '))}</h3>
+    <div class="row"><span class="badge">${kindLabel(e)}</span>${d.manual ? '<span class="badge" style="color:var(--manual)">✎ 사람이 넣은 연결</span>' : d.gone ? '<span class="badge">코드에서 사라짐</span>' : d.fresh ? '<span class="badge">새로 생김</span>' : '<span class="badge">분석으로 확인됨</span>'}</div>
+    <h4>근거</h4><div class="ev">${d.manual ? esc('근거 없음 — ' + (src.by ?? '직접 추가') + '\n다음 분석에서 코드로 확인되면 실선으로 바뀝니다.') : esc(EVIDENCE(src))}</div>
+    ${d.manual ? '<div class="row" style="margin-top:6px"><button id="delEdge">연결 삭제</button></div>' : ''}`;
+  if (d.manual) document.getElementById('delEdge').onclick = () => { pushUndo(); edits.addedEdges = edits.addedEdges.filter(x => x.id !== d.id); render(false); };
+}
+const kindLabel = (e) => ({ read:'읽기', write:'쓰기 '+e.data('label'), call:'호출', flow:'데이터 흐름', trig:'트리거 발동' }[e.data('kind')] ?? e.data('kind'));
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// ── 상호작용 ─────────────────────────
+cy.on('tap', 'node', (ev) => {
+  const n = ev.target; if (n.data('type') === 'group') return;
+  if (connectMode) {
+    if (!connectFrom) { connectFrom = n.data('ref') ?? n.id(); toast('연결할 대상 노드를 클릭하세요'); return; }
+    const to = n.data('ref') ?? n.id();
+    const kind = guessKind(nodeDef(connectFrom), nodeDef(to));
+    pushUndo();
+    edits.addedEdges.push({ id:'m'+Date.now(), s:connectFrom, t:to, kind:kind.kind, label:kind.label, manual:true, by:'홍길동, ' + new Date().toLocaleString() });
+    connectFrom = null; connectMode = false; document.getElementById('connectBtn').classList.remove('on');
+    render(false); toast('연결했습니다 (초록 점선 = 근거 없는 연결)'); return;
+  }
+  cy.elements().removeClass('faded');
+  const nb = n.closedNeighborhood(); cy.elements().not(nb).addClass('faded');
+  showNode(n);
+});
+cy.on('tap', 'edge', (ev) => showEdge(ev.target));
+cy.on('mouseover', 'node', (ev) => {
+  const ref = ev.target.data('ref') ?? ev.target.id(); if (ev.target.data('type') === 'group') return;
+  const twins = cy.nodes().filter(x => (x.data('ref') ?? x.id()) === ref);
+  const keep = twins.closedNeighborhood().union(cy.nodes('[type="lane"], [type="group"]'));
+  cy.elements().not(keep).addClass('dim');
+});
+cy.on('mouseout', 'node', () => cy.elements().removeClass('dim'));
+cy.on('tap', (ev) => { if (ev.target === cy) { cy.elements().removeClass('faded'); } });
+cy.on('dbltap', 'node', (ev) => {
+  const id = ev.target.data('ref') ?? ev.target.id();
+  if (collapsed.has(id)) collapsed.delete(id);
+  else if (ev.target.data('collapsed')) { depth = Math.max(depth, (visibleSet().get(id) ?? 0) + 1); document.getElementById('depth').value = String(Math.min(depth,3)); }
+  else collapsed.add(id);
+  render();
+});
+cy.on('dragfree', 'node', (ev) => { pushUndo(); edits.pinned[ev.target.id()] = { ...ev.target.position() }; });
+
+function guessKind(a, b) {
+  if (a.type === 'table' && b.type === 'table') return { kind:'flow', label:'직접 추가' };
+  if (a.type === 'table') return { kind:'read', label:'R' };
+  if (b.type === 'table') return { kind:'write', label:'?' };
+  return { kind:'call', label:'' };
+}
+
+// ── 툴바 ─────────────────────────
+const centerSel = document.getElementById('center');
+function fillCenter() { centerSel.innerHTML = [...NODES, ...edits.added].filter(n => n.type !== 'ext').map(n => `<option value="${n.id}" ${n.id===center?'selected':''}>${n.label.replace('\n',' ')}</option>`).join(''); }
+function fillDatalist() {
+  const on = new Set(cy.nodes().map(n => n.id()));
+  const extra = ['SHIPMENTS','COUPONS','POINT_HIST','SHIP_PKG.SEND','COUPON_PKG.USE'];
+  document.getElementById('allNames').innerHTML = [...NODES.map(n=>n.id), ...extra].filter(x => !on.has(x)).map(x => `<option value="${x}">`).join('');
+}
+centerSel.onchange = () => { center = centerSel.value; collapsed.clear(); render(); };
+document.getElementById('depth').onchange = (e) => { depth = Number(e.target.value); render(); };
+for (const [id, name] of [['layoutReport','report'],['layoutRadial','radial'],['layoutTree','tree']]) document.getElementById(id).onclick = () => {
+  layoutName = name;
+  for (const [b, nm] of [['layoutReport','report'],['layoutRadial','radial'],['layoutTree','tree']]) document.getElementById(b).classList.toggle('on', nm === name);
+  render(); };
+for (const id of ['optCall', 'optFlow']) document.getElementById(id).onchange = () => render();
+document.getElementById('addBtn').onclick = () => {
+  const name = document.getElementById('addName').value.trim().toUpperCase(); if (!name) return;
+  const known = NODES.find(n => n.id === name);
+  pushUndo();
+  if (known) { edits.hidden.delete(name); if (!visibleSet().has(name)) edits.added.push({ ...known, manual:false }); }
+  else edits.added.push({ id:name, label: name.includes('.') ? name.replace('.', '\n') : name, type: name.includes('.') ? 'proc' : 'table', manual:true });
+  document.getElementById('addName').value = '';
+  render(false);
+  const n = cy.getElementById(name); n.position({ x: cy.extent().x1 + 120, y: cy.extent().y1 + 80 }); cy.fit(undefined, 40);
+  toast(known ? '분석 결과에 있는 노드를 꺼냈습니다' : '직접 추가했습니다 — "연결하기"로 붙여 보세요');
+};
+document.getElementById('connectBtn').onclick = (e) => { connectMode = !connectMode; connectFrom = null; e.target.classList.toggle('on', connectMode); if (connectMode) toast('출발 노드를 클릭하세요'); };
+document.getElementById('groupBtn').onclick = () => {
+  const sel = cy.nodes(':selected').filter(n => n.data('type') !== 'group');
+  if (sel.length < 2) return toast('Shift+클릭으로 노드를 2개 이상 고르세요');
+  const label = prompt('묶음 이름', '주문 처리'); if (!label) return;
+  pushUndo(); edits.groups.push({ id:'g'+Date.now(), label, members: sel.map(n => n.id()) }); render(false);
+};
+function undo() {
+  const s = undoStack.pop(); if (!s) return toast('되돌릴 것이 없습니다');
+  const o = JSON.parse(s); Object.assign(edits, o, { hidden:new Set(o.hidden) }); delete edits.pos; render(false);
+  for (const [id, p] of o.pos) cy.getElementById(id).position(p);
+}
+document.getElementById('undoBtn').onclick = undo;
+window.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); } });
+document.getElementById('reanalyze').onclick = () => {
+  // 사람이 넣은 연결 중 하나가 코드에서 확인되고, 하나가 사라지고, 하나가 새로 생긴 상황
+  const conf = edits.addedEdges.shift();
+  if (conf) autoEdges.push({ ...conf, manual:false, fresh:true, id:'c'+conf.id });
+  const goneE = autoEdges.find(e => e.s === 'CODE_TBL'); if (goneE) goneE.gone = true;
+  if (!autoEdges.some(e => e.id === 'new1')) autoEdges.push({ id:'new1', s:'PAY_PKG.APPROVE', t:'ORDER_HIST', kind:'write', label:'C', fresh:true });
+  render(false);
+  toast((conf ? '직접 넣은 연결 1개가 코드로 확인됨(실선) · ' : '') + 'CODE_TBL 읽기 사라짐(흐리게) · 새 쓰기 1개');
+};
+document.getElementById('pngBtn').onclick = () => { const a = document.createElement('a'); a.href = cy.png({ full:true, scale:2, bg: v('--bg') }); a.download = 'dfd.png'; a.click(); };
+let tt; function toast(t) { const el = document.getElementById('toast'); el.textContent = t; el.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => el.classList.remove('show'), 2600); }
+
+fillCenter(); render();
+// 처음 그릴 때 캔버스 크기가 늦게 잡히는 경우가 있어 한 번 더 맞춘다
+setTimeout(() => { cy.resize(); cy.fit(cy.elements(), 40); }, 60);
+new ResizeObserver(() => { cy.resize(); }).observe(document.getElementById('cy'));
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { cy.resize(); cy.fit(cy.elements(), 40); } });
+</script>
+</body>
+</html>

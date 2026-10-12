@@ -268,3 +268,28 @@ fn statements_and_cursor_flows() {
         assert_eq!(lines.reads, vec!["ORDER_LINES", "PRODUCTS"]);
     }
 }
+
+#[test]
+fn trigger_target_table() {
+    use crate::integrate::trigger_target;
+    assert_eq!(trigger_target("A", "TRIGGER trg_emp BEFORE INSERT ON emp FOR EACH ROW"), Some(("A.EMP".into(), "INSERT".into())));
+    assert_eq!(
+        trigger_target("A", "TRIGGER t AFTER INSERT OR UPDATE OF sal, comm OR DELETE ON hr.emp REFERENCING NEW AS n FOR EACH ROW WHEN (n.sal > 0)"),
+        Some(("HR.EMP".into(), "INSERT,UPDATE,DELETE".into()))
+    );
+    assert_eq!(trigger_target("A", "TRIGGER t INSTEAD OF UPDATE ON v_emp"), Some(("A.V_EMP".into(), "UPDATE".into())));
+    assert_eq!(trigger_target("A", "TRIGGER t FOR INSERT ON emp COMPOUND TRIGGER"), Some(("A.EMP".into(), "INSERT".into())));
+    assert_eq!(trigger_target("A", "TRIGGER t AFTER LOGON ON DATABASE"), None);
+    assert_eq!(trigger_target("A", "TRIGGER t BEFORE DDL ON SCHEMA"), None);
+    // 실제 단위에서 노드에 붙는지
+    let p = plan(
+        &UnitSource { owner: "A".into(), name: "TRG_EMP".into(), unit_type: "TRIGGER".into(), text: "TRIGGER trg_emp AFTER UPDATE ON emp FOR EACH ROW
+BEGIN
+  INSERT INTO emp_hist VALUES (:old.id);
+END;".into() },
+        None,
+        Limits::default(),
+    );
+    let sig = &p.chunks[0].signature;
+    assert_eq!(trigger_target("A", sig).map(|x| x.0), Some("A.EMP".into()), "{sig}");
+}

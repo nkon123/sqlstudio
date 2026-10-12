@@ -33,6 +33,12 @@ pub struct Node {
     /// 이 노드에서 COMMIT/ROLLBACK 하는지
     pub commits: bool,
     pub autonomous: bool,
+    /// 트리거면 걸린 테이블 (스키마를 붙인 이름). SCHEMA/DATABASE 트리거는 없음
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_on: Option<String>,
+    /// 트리거 사건 "INSERT,UPDATE"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_events: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +147,38 @@ fn qualify(owner: &str, name: &str) -> String {
     }
 }
 
+/// 트리거 머리에서 걸린 테이블과 사건을 읽는다.
+/// "TRIGGER t BEFORE INSERT OR UPDATE OF a, b ON app.emp FOR EACH ROW" → ("APP.EMP", "INSERT,UPDATE")
+pub fn trigger_target(owner: &str, signature: &str) -> Option<(String, String)> {
+    let toks: Vec<String> = signature
+        .split(|c: char| c.is_whitespace() || matches!(c, ',' | '(' | ')'))
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_uppercase())
+        .collect();
+    let start = toks.iter().position(|t| matches!(t.as_str(), "BEFORE" | "AFTER" | "INSTEAD" | "FOR"))?;
+    let mut events: Vec<&str> = Vec::new();
+    let mut i = start;
+    while i < toks.len() {
+        match toks[i].as_str() {
+            w @ ("INSERT" | "UPDATE" | "DELETE") if !events.contains(&w) => events.push(w),
+            "ON" => {
+                let mut t = toks.get(i + 1)?.as_str();
+                // INSTEAD OF … ON NESTED TABLE col OF view
+                if t == "NESTED" {
+                    t = toks.get(i + 5)?.as_str();
+                }
+                if matches!(t, "SCHEMA" | "DATABASE") || t.ends_with(".SCHEMA") || events.is_empty() {
+                    return None;
+                }
+                return Some((qualify(owner, &t.replace('"', "")), events.join(",")));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 fn node_id(u: &UnitResult, path: &str) -> String {
     match u.unit_type.as_str() {
         "PROCEDURE" | "FUNCTION" => format!("{}.{}", u.owner, path),
@@ -197,7 +235,15 @@ pub fn integrate(units: &[UnitResult]) -> Integrated {
                 overloads: 0,
                 commits: false,
                 autonomous: false,
+                trigger_on: None,
+                trigger_events: None,
             });
+            if s.kind == crate::plsql::SubKind::Trigger {
+                if let Some((t, ev)) = trigger_target(&u.owner, &s.signature) {
+                    e.trigger_on = Some(t);
+                    e.trigger_events = Some(ev);
+                }
+            }
             e.overloads += 1;
             e.complexity = e.complexity.max(s.facts.complexity);
             e.lines += s.end_line.saturating_sub(s.start_line) + 1;

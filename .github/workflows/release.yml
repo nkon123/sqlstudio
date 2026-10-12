@@ -39,12 +39,12 @@ jobs:
         working-directory: app
         run: npm ci
 
+      - name: MCP 서버·분석 CLI (설치 파일에 함께 넣는다 — 앱 빌드 스크립트가 이 파일들이 있는지 보므로 테스트보다 먼저)
+        run: cargo build --release -p sqls-mcp -p sqls-analyze
+
       - name: 테스트 (DB 없이)
         # provider_down_stops_quickly 는 Windows 러너에서 시간 상한을 넘기곤 한다 (리눅스 CI 에서 돈다)
         run: cargo test --workspace -- --skip provider_down_stops_quickly
-
-      - name: MCP 서버·분석 CLI (설치 파일에 함께 넣는다)
-        run: cargo build --release -p sqls-mcp -p sqls-analyze
 
       - name: 설치 파일 (라이선스 고지 생성 → 화면 빌드 → NSIS)
         working-directory: app

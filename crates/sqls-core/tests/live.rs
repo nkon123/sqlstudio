@@ -300,3 +300,58 @@ async fn completion_cache_from_dictionary() {
         let _ = s.execute(&format!("drop table {t} purge"), Default::default()).await;
     }
 }
+
+/// 스키마 브라우저의 모든 탭 SQL 이 실제 사전 뷰에서 도는지 (11g)
+#[tokio::test]
+#[ignore]
+async fn schema_browser_sections() {
+    use sqls_core::browse::{section, sections_for};
+    let s = Session::connect(spec(false)).await.unwrap();
+    let me = s.info().user.clone();
+    let (p, c) = ("SQLS_B_PARENT", "SQLS_B_CHILD");
+    for x in [c, p] {
+        let _ = s.execute(&format!("drop table {x} purge"), Default::default()).await;
+    }
+    let _ = s.execute("drop sequence sqls_b_seq", Default::default()).await;
+    exec(&s, &format!("create table {p} (id number primary key, code varchar2(10) unique, amt number check (amt >= 0))")).await;
+    exec(&s, &format!("create table {c} (id number primary key, pid number references {p}(id) on delete cascade, note varchar2(20))")).await;
+    exec(&s, &format!("create index {c}_ix on {c}(pid, note desc)")).await;
+    exec(&s, &format!("create or replace trigger sqls_b_trg before insert on {c} for each row begin :new.note := upper(:new.note); end;")).await;
+    exec(&s, &format!("create or replace view sqls_b_v as select p.id, c.note from {p} p join {c} c on c.pid = p.id")).await;
+    exec(&s, "create sequence sqls_b_seq start with 10 cache 5").await;
+    // 컴파일 오류가 나는 프로시저 (성공 + 경고로 끝날 수도, 오류로 끝날 수도 있다)
+    let _ = s.execute("create or replace procedure sqls_b_bad as begin no_such_thing; end;", Default::default()).await;
+    exec(&s, &format!("begin dbms_stats.gather_table_stats(user, '{p}'); end;")).await;
+
+    for (otype, name) in [("TABLE", p), ("TABLE", c), ("VIEW", "SQLS_B_V"), ("TRIGGER", "SQLS_B_TRG"),
+        ("SEQUENCE", "SQLS_B_SEQ"), ("PROCEDURE", "SQLS_B_BAD"), ("INDEX", "SQLS_B_CHILD_IX")] {
+        for sec in sections_for(otype) {
+            let page = section(&s, &me, name, sec.key).await.unwrap_or_else(|e| panic!("{otype} {name} {}: {e}", sec.key));
+            println!("{otype} {name} {}: {} 행", sec.key, page.rows.len());
+        }
+    }
+    let cons = section(&s, &me, p, "constraints").await.unwrap();
+    assert!(cons.rows.iter().any(|r| r[1].as_deref() == Some("기본 키")), "{:?}", cons.rows);
+    assert!(cons.rows.iter().any(|r| r[1].as_deref() == Some("검사") && r[7].as_deref().unwrap_or("").contains("amt")), "LONG 조건");
+    let refs = section(&s, &me, p, "referenced_by").await.unwrap();
+    assert_eq!(refs.rows.len(), 1);
+    assert_eq!(refs.rows[0][2].as_deref(), Some("PID"), "참조하는 쪽 컬럼");
+    let idx = section(&s, &me, c, "indexes").await.unwrap();
+    assert!(idx.rows.iter().any(|r| r[2].as_deref() == Some("PID, NOTE DESC") || r[2].as_deref().unwrap_or("").starts_with("PID, ")), "{:?}", idx.rows);
+    let trg = section(&s, &me, c, "triggers").await.unwrap();
+    assert_eq!(trg.rows.len(), 1);
+    let used = section(&s, &me, p, "used_by").await.unwrap();
+    assert!(used.rows.iter().any(|r| r[0].as_deref().unwrap_or("").ends_with("SQLS_B_V")));
+    let errs = section(&s, &me, "SQLS_B_BAD", "errors").await.unwrap();
+    assert!(!errs.rows.is_empty(), "컴파일 오류가 나와야 한다");
+    let stats = section(&s, &me, p, "stats").await.unwrap();
+    assert_eq!(stats.rows.len(), 1);
+    assert_eq!(stats.columns.last().unwrap().name, "크기(MB)");
+
+    for x in ["drop view sqls_b_v", "drop procedure sqls_b_bad", "drop sequence sqls_b_seq"] {
+        let _ = s.execute(x, Default::default()).await;
+    }
+    for x in [c, p] {
+        let _ = s.execute(&format!("drop table {x} purge"), Default::default()).await;
+    }
+}

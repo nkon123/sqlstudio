@@ -526,6 +526,24 @@ pub async fn describe(st: State<'_, AppState>, id: u64, name: String) -> R<meta:
     Ok(meta::describe(&s, &name).await?)
 }
 
+/// 스키마 브라우저: 객체 종류별 상세 탭 목록
+#[tauri::command]
+pub fn object_sections(object_type: String) -> Vec<sqls_core::browse::Section> {
+    sqls_core::browse::sections_for(&object_type)
+}
+
+/// 스키마 브라우저: 탭 하나의 내용. 사전 조회 세션으로 — 작업 세션에서 쿼리가 돌고 있어도 기다리지 않는다
+#[tauri::command]
+pub async fn object_section(st: State<'_, AppState>, id: u64, owner: String, name: String, section: String) -> R<sqls_core::session::RowPage> {
+    if let Ok(hub) = crate::complete::hub_for(&st, id) {
+        if let Some(s) = hub.session() {
+            return Ok(sqls_core::browse::section(s, &owner, &name, &section).await?);
+        }
+    }
+    let (s, _, _) = st.session(id)?;
+    Ok(sqls_core::browse::section(&s, &owner, &name, &section).await?)
+}
+
 #[tauri::command]
 pub async fn get_ddl(st: State<'_, AppState>, id: u64, object_type: String, name: String) -> R<String> {
     let (s, _, _) = st.session(id)?;

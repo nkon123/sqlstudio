@@ -8,7 +8,7 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   api, byteToUtf16, errOf, utf16ToByte,
-  type Connected, type ErrView, type ExecView, type ObjectEntry, type Profile, type Provider, type TableDesc, type TnsEntry, type TnsView } from "./api";
+  type Connected, type ErrView, type ExecView, type ObjectEntry, type Profile, type Provider, type TableDesc, type TnsEntry, type TnsView, type RowPage } from "./api";
 import { AiPanel } from "./ai";
 import { listen } from "@tauri-apps/api/event";
 import { sqlCompletion } from "./completion";
@@ -257,7 +257,8 @@ class App {
   private browserList = h("div", { class: "obj-list" });
   private browserOwner = h("select", { title: "스키마" });
   private browserType = h("select", { title: "종류" },
-    ...["TABLE", "VIEW", "PACKAGE", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "TYPE", "MATERIALIZED VIEW", "INDEX"].map((t) => h("option", { value: t }, t)));
+    ...["TABLE", "VIEW", "PACKAGE", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "TYPE", "MATERIALIZED VIEW", "INDEX"].map((t) => h("option", { value: t }, t)),
+    h("option", { value: "" }, "(전체)"));
   private browserFilter = h("input", { placeholder: "이름 필터 (예: ORD%)" });
   private browserObjs: ObjectEntry[] = [];
   private pickedTables = new Set<string>();
@@ -930,7 +931,7 @@ class App {
     if (!t?.conn) return;
     const f = this.browserFilter.value.trim();
     try {
-      const objs = await api.listObjects(t.conn.id, this.browserOwner.value || undefined, this.browserType.value,
+      const objs = await api.listObjects(t.conn.id, this.browserOwner.value || undefined, this.browserType.value || undefined,
         f ? (f.includes("%") ? f : `%${f}%`).toUpperCase() : undefined);
       this.browserObjs = objs;
       this.renderObjects();
@@ -948,7 +949,7 @@ class App {
       const check = tableLike ? h("input", { type: "checkbox", checked: this.pickedTables.has(q), title: "AI 문맥에 포함",
         onclick: (e: Event) => { e.stopPropagation(); (e.target as HTMLInputElement).checked ? this.pickedTables.add(q) : this.pickedTables.delete(q); } }) : null;
       const row = h("div", { class: `obj ${o.status === "INVALID" ? "invalid" : ""}`, title: `${o.object_type} · ${o.status} · ${o.last_ddl_time}` },
-        check, h("span", {}, o.name));
+        check, h("span", {}, o.name), this.browserType.value ? "" : h("small", { class: "obj-type" }, o.object_type));
       row.addEventListener("click", () => this.showObject(o));
       if (tableLike) row.addEventListener("contextmenu", (e) => { e.preventDefault(); this.popupColumns(`"${o.owner}"."${o.name}"`, { x: e.clientX, y: e.clientY }); });
       row.addEventListener("dblclick", () => t?.editor.insert(o.owner === t.conn?.user ? o.name : q));
@@ -959,27 +960,152 @@ class App {
     this.browserList.replaceChildren(frag);
   }
 
-  private async showObject(o: ObjectEntry) {
+  /** 스키마 브라우저 — 객체 하나의 상세 (구조 탭). 탭은 누를 때 읽는다 (사전 조회 세션). */
+  private async showObject(o: { owner: string; name: string; object_type: string; status?: string }) {
     const t = this.active;
     if (!t?.conn) return;
+    const id = t.conn.id;
+    const type = o.object_type.toUpperCase();
     const q = `"${o.owner}"."${o.name}"`;
+    const tableLike = ["TABLE", "VIEW", "MATERIALIZED VIEW"].includes(type);
+    const code = ["PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY"].includes(type);
+    let sections: { key: string; label: string; single: boolean }[];
+    let desc: TableDesc | null = null;
     try {
-      if (["TABLE", "VIEW", "MATERIALIZED VIEW"].includes(o.object_type)) {
-        const d = await api.describe(t.conn.id, q);
-        this.renderDesc(t, d);
-      } else {
-        const ddl = await api.getDdl(t.conn.id, o.object_type, q);
-        const debuggable = ["PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY"].includes(o.object_type);
-        t.desc.replaceChildren(h("div", { class: "desc-actions" },
-          h("button", { onclick: () => this.newTab(true, ddl) }, "새 탭에서 열기"),
-          debuggable ? h("button", { class: "primary", onclick: () => t.debugger().openUnit(o.owner, o.name, o.object_type) }, "디버그") : "",
-          debuggable && o.object_type !== "TYPE" ? h("button", { title: "이 단위를 PL/SQL 분석 화면에서 연다", onclick: () => this.analyzeActive(o.owner, o.name) }, "분석") : ""),
-          h("pre", {}, ddl));
-      }
-      t.show("desc");
+      [sections, desc] = await Promise.all([
+        invoke<{ key: string; label: string; single: boolean }[]>("object_sections", { objectType: type }),
+        tableLike ? api.describe(id, q) : Promise.resolve(null),
+      ]);
     } catch (e) {
-      toast(errOf(e).message, "error");
+      return toast(errOf(e).message, "error");
     }
+    const tabs: { key: string; label: string; single?: boolean }[] = [
+      ...(tableLike ? [{ key: "#columns", label: `컬럼 ${desc?.columns.length ?? ""}` }] : []),
+      ...(code ? [{ key: "#source", label: "소스" }] : []),
+      ...sections,
+    ];
+    const body = h("div", { class: "ob-body" });
+    const nav = h("nav", { class: "ob-tabs" });
+    const cache = new Map<string, HTMLElement>();
+    let current = "";
+    const open = async (key: string) => {
+      current = key;
+      for (const b of nav.children) b.classList.toggle("on", (b as HTMLElement).dataset.k === key);
+      const hit = cache.get(key);
+      if (hit) return body.replaceChildren(hit);
+      body.replaceChildren(h("div", { class: "hint" }, "읽는 중…"));
+      let el: HTMLElement;
+      try {
+        if (key === "#columns") el = this.columnsTable(desc!);
+        else if (key === "#source") el = h("pre", { class: "ob-src" }, await api.getDdl(id, type, q));
+        else {
+          const sec = sections.find((x) => x.key === key)!;
+          const page = await invoke<RowPage>("object_section", { id, owner: o.owner, name: o.name, section: key });
+          el = this.sectionTable(page, sec.single, key);
+        }
+      } catch (e) {
+        el = h("div", { class: "err" }, errOf(e).message);
+      }
+      cache.set(key, el);
+      if (current === key) body.replaceChildren(el);
+    };
+    for (const tb of tabs) nav.append(h("button", { "data-k": tb.key, onclick: () => open(tb.key) }, tb.label));
+
+    const cols = desc ? desc.columns.map((c) => c.name).join(", ") : "*";
+    const btn = (label: string, f: () => void, title = "", cls = "") => h("button", { class: `small ${cls}`, title, onclick: f }, label);
+    const actions: (HTMLElement | string)[] = [];
+    if (tableLike) actions.push(
+      btn("데이터", () => this.previewData(t, `${q}`), "앞 200행을 결과 그리드로 (편집하려면 결과의 '편집')", "primary"),
+      btn("SELECT 넣기", () => t.editor.insert(`SELECT ${cols}\n  FROM ${o.owner}.${o.name}\n WHERE ROWNUM <= 100`)),
+      btn("팝업", () => desc && this.openColumns(desc), "떠 있는 컬럼 창 (편집기에서 F4)"),
+    );
+    if (type === "SEQUENCE") actions.push(btn("NEXTVAL 넣기", () => t.editor.insert(`${o.owner}.${o.name}.NEXTVAL`)));
+    actions.push(btn(code ? "새 탭에서 열기" : "DDL", async () => this.newTab(true, await api.getDdl(id, type, q).catch((e) => `-- ${errOf(e).message}`))));
+    if (code) {
+      actions.push(btn("컴파일", () => this.compileObject(t, o.owner, o.name, type, () => { cache.delete("errors"); open("errors"); }), "ALTER … COMPILE — 오류는 '컴파일 오류' 탭"));
+      actions.push(btn("디버그", () => t.debugger().openUnit(o.owner, o.name, type)));
+      if (type !== "TYPE") actions.push(btn("분석", () => this.analyzeActive(o.owner, o.name), "PL/SQL 분석 화면에서 연다"));
+    }
+    t.desc.replaceChildren(
+      h("div", { class: "desc-head" },
+        h("strong", {}, `${type} ${o.owner}.${o.name}`),
+        o.status === "INVALID" ? h("span", { class: "ob-invalid", title: "컴파일이 필요합니다" }, " INVALID") : "",
+        desc?.comment ? h("span", {}, ` — ${desc.comment}`) : "",
+        desc?.num_rows ? h("small", {}, ` · 통계 ${Number(desc.num_rows).toLocaleString()}행 (${desc.last_analyzed ?? "?"})`) : ""),
+      h("div", { class: "desc-actions" }, ...actions),
+      nav, body);
+    t.show("desc");
+    if (tabs.length) open(tabs[0].key);
+  }
+
+  private columnsTable(d: TableDesc) {
+    const rows = d.columns.map((c, i) => h("tr", {},
+      h("td", { class: "num" }, String(i + 1)),
+      h("td", {}, d.primary_key.includes(c.name) ? h("span", { class: "cp-pk" }, "PK") : ""), h("td", {}, c.name), h("td", {}, c.data_type),
+      h("td", {}, c.nullable ? "" : "NOT NULL"), h("td", {}, c.default ?? ""), h("td", {}, c.comment ?? "")));
+    return h("table", { class: "desc-table" }, h("thead", {}, h("tr", {}, ...["#", "", "컬럼", "형식", "", "기본값", "설명"].map((x) => h("th", {}, x)))), h("tbody", {}, ...rows));
+  }
+
+  /** 탭 내용 표. 한 행짜리는 세로로. 객체 이름 칸(OWNER.NAME)은 더블클릭하면 그 객체로 간다 */
+  private sectionTable(page: RowPage, single: boolean, key: string) {
+    if (!page.rows.length) return h("div", { class: "hint" }, "없음");
+    if (single) {
+      const r = page.rows[0];
+      return h("table", { class: "desc-table ob-kv" }, h("tbody", {}, ...page.columns.map((c, i) => h("tr", {}, h("th", {}, c.name), h("td", {}, r[i] ?? "")))));
+    }
+    const names = page.columns.map((c) => c.name);
+    const objCol = names.findIndex((n) => ["객체", "테이블", "트리거", "동의어"].includes(n));
+    const typeCol = names.indexOf("종류");
+    const defaultType: Record<string, string> = { referenced_by: "TABLE", triggers: "TRIGGER", synonyms: "SYNONYM", trigger: "TABLE", synonym: "TABLE" };
+    const tbody = h("tbody", {}, ...page.rows.map((r) => {
+      const tr = h("tr", {}, ...r.map((v) => h("td", { title: v && v.length > 60 ? v : "" }, v ?? "")));
+      const ref = objCol >= 0 ? r[objCol] : null;
+      const otype = typeCol >= 0 && key !== "constraints" ? r[typeCol] : defaultType[key];
+      if (ref && ref.includes(".") && otype) {
+        tr.classList.add("ob-link");
+        tr.title = `더블클릭: ${ref} 열기`;
+        tr.ondblclick = () => { const [owner, ...rest] = ref.split("."); this.showObject({ owner, name: rest.join("."), object_type: otype }); };
+      }
+      return tr;
+    }));
+    return h("table", { class: "desc-table" }, h("thead", {}, h("tr", {}, ...names.map((n) => h("th", {}, n)))), tbody);
+  }
+
+  /** 앞 200행을 이 탭의 결과 그리드로 */
+  private async previewData(t: Tab, q: string) {
+    if (!t.conn) return;
+    const sql = `SELECT * FROM ${q} WHERE ROWNUM <= 200`;
+    await this.running(t, async () => {
+      try {
+        const r = await api.execute(t.conn!.id, sql, [], false);
+        if (r.outcome.type === "rows") { t.lastQuery = { sql, binds: [] }; this.endGridEdit(t); }
+        this.showResult(t, r);
+      } catch (e) {
+        this.showError(t, errOf(e), sql, 0);
+      }
+    });
+  }
+
+  /** ALTER … COMPILE (운영 DB 면 서버가 확인을 요구한다) */
+  private async compileObject(t: Tab, owner: string, name: string, type: string, after: () => void) {
+    if (!t.conn) return;
+    const base = type.replace(/ BODY$/, "");
+    const sql = `ALTER ${base} "${owner}"."${name}" COMPILE${type.endsWith(" BODY") ? " BODY" : ""}`;
+    const run = (confirmed: boolean) => api.execute(t.conn!.id, sql, [], confirmed);
+    try {
+      try {
+        await run(false);
+      } catch (e) {
+        if (errOf(e).kind !== "confirm_required") throw e;
+        if (!(await confirmBox("컴파일", `${errOf(e).message}\n\n${sql}`, "컴파일"))) return;
+        await run(true);
+      }
+      toast(`컴파일했습니다 — 오류가 있으면 '컴파일 오류' 탭에 나옵니다`, "ok");
+    } catch (e) {
+      toast(errOf(e).message, "error", 6000);
+    }
+    after();
+    this.loadObjects();
   }
 
   // ── 컬럼 팝업 ────────────────────────────────────
@@ -1045,26 +1171,6 @@ class App {
       }
     }
     toast(`'${raw}' 를 테이블·뷰로 찾지 못했습니다${last ? ` — ${errOf(last).message}` : ""}`, "error");
-  }
-
-  private renderDesc(t: Tab, d: TableDesc) {
-    const rows = d.columns.map((c) => h("tr", {},
-      h("td", {}, d.primary_key.includes(c.name) ? "🔑" : ""), h("td", {}, c.name), h("td", {}, c.data_type),
-      h("td", {}, c.nullable ? "" : "NOT NULL"), h("td", {}, c.default ?? ""), h("td", {}, c.comment ?? "")));
-    const cols = d.columns.map((c) => c.name).join(", ");
-    t.desc.replaceChildren(
-      h("div", { class: "desc-head" },
-        h("strong", {}, `${d.object_type} ${d.owner}.${d.name}`),
-        d.comment ? h("span", {}, ` — ${d.comment}`) : null,
-        d.num_rows ? h("small", {}, ` · 통계 ${Number(d.num_rows).toLocaleString()}행 (${d.last_analyzed ?? "?"})`) : null),
-      h("div", { class: "desc-actions" },
-        h("button", { onclick: () => t.editor.insert(`SELECT ${cols}\n  FROM ${d.owner}.${d.name}\n WHERE ROWNUM <= 100`) }, "SELECT 넣기"),
-        h("button", { title: "떠 있는 창으로 — 띄운 채 SQL 을 쓴다 (편집기에서 F4)", onclick: () => this.openColumns(d) }, "팝업"),
-        h("button", { onclick: async () => { if (t.conn) this.newTab(true, await api.getDdl(t.conn.id, d.object_type, `"${d.owner}"."${d.name}"`)); } }, "DDL")),
-      h("table", { class: "desc-table" }, h("thead", {}, h("tr", {}, ...["", "컬럼", "형식", "", "기본값", "설명"].map((x) => h("th", {}, x)))), h("tbody", {}, ...rows)),
-      d.indexes.length ? h("div", { class: "desc-idx" }, h("strong", {}, "인덱스"),
-        ...d.indexes.map((i) => h("div", {}, `${i.unique ? "UNIQUE " : ""}${i.name} (${i.columns.join(", ")})`))) : "",
-    );
   }
 
   // ── 파일 ─────────────────────────────────────────

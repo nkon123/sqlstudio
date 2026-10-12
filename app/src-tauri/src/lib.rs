@@ -56,6 +56,8 @@ pub fn run() {
             db::list_objects,
             db::describe,
             db::get_ddl,
+            db::object_sections,
+            db::object_section,
             db::get_mcp_settings,
             complete::complete,
             complete::completion_status,

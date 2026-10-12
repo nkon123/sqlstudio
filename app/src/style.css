@@ -444,3 +444,17 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .sc-group td { padding: 2px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .sc-key { white-space: nowrap; width: 1%; color: var(--dim); }
 .sc kbd { display: inline-block; font: 11px var(--mono); padding: 0 5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--bg); color: var(--text); }
+
+/* ── 스키마 브라우저 (구조 탭) ── */
+.ob-tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
+.ob-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 3px 10px; font-size: 12px; }
+.ob-tabs button.on { border-bottom-color: var(--accent); font-weight: 600; }
+.ob-body { overflow: auto; }
+.ob-body .err { color: var(--danger); font-size: 12px; white-space: pre-wrap; }
+.ob-src { margin: 0; font: 12px/1.45 var(--mono); white-space: pre; }
+.ob-kv th { width: 1%; white-space: nowrap; padding-right: 16px; }
+.ob-link { cursor: pointer; }
+.ob-link:hover td { background: var(--hover); }
+.ob-invalid { color: var(--danger); font-weight: 700; font-size: 12px; }
+.desc-table td.num { color: var(--dim); text-align: right; }
+.obj .obj-type { margin-left: auto; color: var(--dim); font-size: 10px; }

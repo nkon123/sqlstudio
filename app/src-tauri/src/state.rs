@@ -102,7 +102,7 @@ impl AppState {
     }
 }
 
-/// 설정의 [[llm]] → 공급자. 하나도 없으면 로컬 Ollama 와 Claude 를 기본으로 넣는다.
+/// 설정의 [[llm]] → 공급자. 하나도 없으면 로컬 Ollama 하나만 넣는다.
 fn providers_from(cfg: &Config) -> Vec<ProviderConfig> {
     let mut v: Vec<ProviderConfig> = cfg
         .llm_providers
@@ -115,13 +115,11 @@ fn providers_from(cfg: &Config) -> Vec<ProviderConfig> {
             }
         })
         .collect();
+    // 처음이면 로컬 모델 하나만 — 외부(클라우드) 공급자는 기본으로 넣지 않는다. 쓰려면 설정 > AI 에서 직접 추가
     if v.is_empty() {
         let mut ollama = ProviderConfig::new("로컬 (Ollama)", sqls_llm::ProviderKind::Ollama, "gemma4:e2b");
         ollama.num_ctx = Some(16384);
-        let mut claude = ProviderConfig::new("Claude", sqls_llm::ProviderKind::Anthropic, "claude-opus-5-5");
-        claude.effort = Some("medium".into());
         v.push(ollama);
-        v.push(claude);
     }
     v
 }

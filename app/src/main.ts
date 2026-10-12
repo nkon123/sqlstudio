@@ -1483,7 +1483,7 @@ class App {
       };
       form.replaceChildren(
         field("이름", name), field("종류", kind), field("주소", base, "Ollama: http://127.0.0.1:11434 · 사내 GPU 서버 주소도 됩니다"),
-        field("모델", model, "예: qwen2.5-coder:14b, claude-opus-5-5"),
+        field("모델", model, "예: qwen2.5-coder:14b, gemma3:12b"),
         field("API 키 환경변수", keyEnv), field("API 키", key, "설정 파일에는 쓰지 않습니다"),
         h("label", { class: "check" }, keyRemember, "OS 자격 증명 관리자에 저장 (끄면 이 실행 동안만)"),
         field("num_ctx (Ollama)", numCtx, "기본 컨텍스트(2~4K)는 스키마 문맥을 조용히 잘라 버립니다"),

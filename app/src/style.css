@@ -433,3 +433,14 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .snip-form { display: flex; flex-direction: column; gap: 6px; }
 .snip-form .row { margin: 0; }
 .snip-body { width: 100%; font: 12px/1.45 var(--mono); resize: vertical; }
+
+/* ── 단축키 목록 (F1) ── */
+.sc { display: flex; flex-direction: column; gap: 8px; }
+.sc-q { width: 100%; }
+.sc-body { columns: 2 340px; column-gap: 20px; max-height: 64vh; overflow: auto; }
+.sc-group { break-inside: avoid; margin-bottom: 10px; }
+.sc-group h4 { margin: 0 0 4px; font-size: 12px; color: var(--accent); }
+.sc-group table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.sc-group td { padding: 2px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.sc-key { white-space: nowrap; width: 1%; color: var(--dim); }
+.sc kbd { display: inline-block; font: 11px var(--mono); padding: 0 5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--bg); color: var(--text); }

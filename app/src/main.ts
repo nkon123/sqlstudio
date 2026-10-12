@@ -21,6 +21,7 @@ import type { GitPanel } from "./git";
 import { ResultGrid } from "./grid";
 import { aliasMap, showColumns } from "./colpopup";
 import { openHistory } from "./history";
+import { showShortcuts } from "./shortcuts";
 import { DEFAULT_SNIPPETS, loadSnippets, parse as parseSnippets, saveSnippets, snippets, type Snip } from "./snippets";
 import { alertBox, bindBox, confirmBox, field, h, modal, passwordBox, toast } from "./ui";
 
@@ -298,6 +299,7 @@ class App {
       b("toggleBrowser", "왼쪽", "왼쪽 영역(테이블·프로젝트) 접기/펼치기 (Ctrl+Shift+1) · 경계선을 끌면 너비 조절", () => this.layout.toggle("left")),
       b("toggleAi", "AI", "오른쪽 AI 영역 접기/펼치기 (Ctrl+Shift+3) · AI 입력칸으로 바로: Ctrl+K · 경계선을 끌면 너비 조절", () => this.layout.toggle("right")),
       h("span", { class: "spacer" }),
+      b("keys", "단축키", "단축키 목록 (F1)", () => showShortcuts()),
       b("settings", "설정", "접속·AI·MCP 설정", () => this.settings()),
     );
     const tablePane = h("div", { class: "side-pane" },
@@ -339,6 +341,13 @@ class App {
     this.browserFilter.addEventListener("input", () => { clearTimeout(ft); ft = window.setTimeout(() => this.loadObjects(), 250); });
     // Ctrl+K: AI 입력칸으로 (오른쪽 영역이 접혀 있으면 펼친다). AI 입력칸에서 Esc: 편집기로
     window.addEventListener("keydown", (e) => {
+      // F1: 단축키 목록 (대화상자가 떠 있으면 무시)
+      if (e.key === "F1" && !e.ctrlKey && !e.altKey && !document.querySelector("dialog[open]")) {
+        e.preventDefault();
+        e.stopPropagation();
+        showShortcuts();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === "KeyK") {
         e.preventDefault();
         e.stopPropagation();

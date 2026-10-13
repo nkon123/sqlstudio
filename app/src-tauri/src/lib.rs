@@ -99,6 +99,8 @@ pub fn run() {
             ai::test_provider,
             ai::ai_ask,
             ai::ai_cancel,
+            ai::ai_guides_info,
+            ai::ai_guides_edit,
             files::read_sql_file,
             files::write_sql_file,
             files::write_binary_file,

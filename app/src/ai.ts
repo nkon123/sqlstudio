@@ -150,7 +150,8 @@ export class AiPanel {
       }, (ev) => {
         if (ev.type === "status") this.statusEl.textContent = ev.text;
         else if (ev.type === "context") {
-          meta.textContent = `문맥: ${ev.tables.length ? ev.tables.join(", ") : "테이블 없음"}${ev.plan ? " + 실행계획" : ""}${ev.remote ? " · 외부" : ""}`;
+          meta.textContent = `문맥: ${ev.tables.length ? ev.tables.join(", ") : "테이블 없음"}${ev.plan ? " + 실행계획" : ""}${ev.remote ? " · 외부" : ""}` +
+            (ev.guides?.length ? ` · 참고 문법: ${ev.guides.join(", ")}` : "");
         } else if (ev.type === "delta") {
           text += ev.text;
           this.statusEl.textContent = "답하는 중…";

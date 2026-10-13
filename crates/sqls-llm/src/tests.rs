@@ -145,7 +145,7 @@ async fn openai_compatible_stream() {
     assert_eq!(r.text, "가나");
     assert_eq!(r.stop_reason.as_deref(), Some("stop"));
     let raw = m.seen.lock().unwrap()[0].clone();
-    assert!(raw.starts_with("POST /chat/completions "));
+    assert!(raw.starts_with("POST /v1/chat/completions "), "경로 없는 주소에는 /v1 을 붙인다");
     assert!(raw.to_lowercase().contains("authorization: bearer k-test"));
     let body: Value = serde_json::from_str(&raw[raw.find("\r\n\r\n").unwrap() + 4..]).unwrap();
     assert_eq!(body["messages"][0]["role"], "system");
@@ -239,4 +239,48 @@ fn remote_consent_follows_the_address() {
     assert!(c.remote_ok());
     c.base_url = Some("http://other.example.com:11434".into());
     assert!(!c.remote_ok(), "주소가 바뀌면 다시 묻는다");
+}
+
+#[test]
+fn base_url_normalized() {
+    use crate::normalize_base as n;
+    assert_eq!(n(ProviderKind::Ollama, "gpu-server:11434"), "http://gpu-server:11434", "스킴이 없으면 http");
+    assert_eq!(n(ProviderKind::Ollama, " http://10.1.2.3:11434/ "), "http://10.1.2.3:11434");
+    assert_eq!(n(ProviderKind::Ollama, "http://h:11434/api/chat"), "http://h:11434");
+    assert_eq!(n(ProviderKind::Ollama, "http://h:11434/v1"), "http://h:11434");
+    assert_eq!(n(ProviderKind::OpenaiCompatible, "http://h:1234"), "http://h:1234/v1", "경로가 없으면 /v1");
+    assert_eq!(n(ProviderKind::OpenaiCompatible, "http://h:1234/v1/chat/completions"), "http://h:1234/v1");
+    assert_eq!(n(ProviderKind::OpenaiCompatible, "https://gw.corp/openai/v1"), "https://gw.corp/openai/v1", "경로가 있으면 그대로");
+    assert_eq!(n(ProviderKind::Anthropic, "https://api.anthropic.com/v1"), "https://api.anthropic.com");
+}
+
+#[test]
+fn internal_hosts_go_direct() {
+    use crate::is_internal_host as i;
+    for h in ["localhost", "127.0.0.1", "[::1]", "10.20.30.40", "172.16.0.5", "172.31.255.1", "192.168.0.10", "169.254.1.1", "gpu-server", "llm.corp", "ai.internal", "box.local", "fd00::1"] {
+        assert!(i(h), "{h}");
+    }
+    for h in ["api.openai.com", "8.8.8.8", "172.32.0.1", "llm.example.com", ""] {
+        assert!(!i(h), "{h}");
+    }
+    let mut c = ProviderConfig::new("o", ProviderKind::Ollama, "x");
+    c.base_url = Some("gpu-server:11434".into());
+    assert!(!c.use_proxy(), "자동: 사내 주소는 직접");
+    c.proxy = Some("system".into());
+    assert!(c.use_proxy());
+    c.base_url = Some("https://llm.example.com".into());
+    c.proxy = None;
+    assert!(c.use_proxy(), "자동: 바깥 주소는 시스템 프록시");
+    c.proxy = Some("none".into());
+    assert!(!c.use_proxy());
+}
+
+#[tokio::test]
+async fn connect_error_explains() {
+    // 아무도 듣지 않는 포트 → 연결 거부 안내 + 경로
+    let mut c = ProviderConfig::new("o", ProviderKind::Ollama, "x");
+    c.base_url = Some("http://127.0.0.1:9".into());
+    let e = crate::Client::new().list_models(&c).await.unwrap_err().to_string();
+    assert!(e.contains("연결: 프록시 없이 직접"), "{e}");
+    assert!(e.contains("→"), "안내가 있어야 한다: {e}");
 }

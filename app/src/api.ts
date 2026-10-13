@@ -53,12 +53,14 @@ export interface Provider {
   max_tokens?: number; temperature?: number | null; num_ctx?: number | null; keep_alive?: string | null;
   effort?: string | null; fallbacks?: boolean; connect_timeout_secs?: number; idle_timeout_secs?: number;
   remote?: boolean; remote_ok?: boolean; has_key?: boolean;
+  /** "auto"(기본) | "none" | "system" */
+  proxy?: string | null;
 }
 export type Task = "generate" | "explain" | "optimize" | "fix" | "chat";
 export interface ChatMsg { role: "user" | "assistant"; content: string }
 export type AiEvent =
   | { type: "status"; text: string }
-  | { type: "context"; tables: string[]; plan: boolean; remote: boolean }
+  | { type: "context"; tables: string[]; plan: boolean; remote: boolean; guides?: string[] }
   | { type: "delta"; text: string };
 export interface AiAnswer {
   text: string; sql?: string | null; model?: string | null; stop_reason?: string | null;

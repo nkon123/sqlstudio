@@ -146,7 +146,7 @@ pub enum AiEvent {
     /// 무엇을 하는 중인지 (로컬 모델은 오래 걸린다 — 멈춘 것과 구분되게)
     Status { text: String },
     /// 밖으로 보낸 문맥 요약 (투명성)
-    Context { tables: Vec<String>, plan: bool, remote: bool },
+    Context { tables: Vec<String>, plan: bool, remote: bool, guides: Vec<String> },
     Delta { text: String },
 }
 
@@ -216,10 +216,17 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
             }
         }
     }
+    // Oracle 문법 안내: 질문·SQL·오류와 관련된 카드만 (기본 + 설정 폴더의 oracle-guides.md)
+    let text = [ctx.question.as_deref(), ctx.sql.as_deref(), ctx.error.as_deref()].into_iter().flatten().collect::<Vec<_>>().join("\n");
+    let all = sqls_llm::guides::load(Some(&guides_file()));
+    let major = ctx.server_version.as_deref().and_then(prompts::major_version);
+    let cards = sqls_llm::guides::pick(&all, args.task, &text, major);
+    ctx.guides = sqls_llm::guides::render(&cards);
     let _ = on_event.send(AiEvent::Context {
         tables: used_tables,
         plan: ctx.plan.is_some(),
         remote: p.is_remote(),
+        guides: cards.iter().map(|g| g.title.clone()).collect(),
     });
 
     let req = prompts::build(args.task, &ctx, &args.history);
@@ -254,6 +261,40 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
         output_tokens: resp.output_tokens,
         user_message,
     })
+}
+
+/// 사용자 문법 안내 파일 (설정 폴더의 oracle-guides.md)
+fn guides_file() -> std::path::PathBuf {
+    sqls_core::config::config_path().parent().map(|p| p.join("oracle-guides.md")).unwrap_or_else(|| "oracle-guides.md".into())
+}
+
+#[derive(Serialize)]
+pub struct GuidesInfo {
+    path: String,
+    exists: bool,
+    builtin: usize,
+    custom: usize,
+}
+
+/// 문법 안내 상태 (설정 > AI)
+#[tauri::command]
+pub fn ai_guides_info() -> GuidesInfo {
+    let path = guides_file();
+    let custom = std::fs::read_to_string(&path).map(|t| sqls_llm::guides::parse(&t).len()).unwrap_or(0);
+    GuidesInfo { exists: path.is_file(), path: path.display().to_string(), builtin: sqls_llm::guides::load(None).len(), custom }
+}
+
+/// 사용자 문법 안내 파일을 (없으면 예시로 만들어) 경로를 돌려준다 — 화면이 편집기로 연다
+#[tauri::command]
+pub fn ai_guides_edit() -> R<String> {
+    let path = guides_file();
+    if !path.is_file() {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        std::fs::write(&path, sqls_llm::guides::user_template()).map_err(|e| ErrView::msg("io", format!("{}: {e}", path.display())))?;
+    }
+    Ok(path.display().to_string())
 }
 
 #[tauri::command]

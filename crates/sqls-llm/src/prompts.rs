@@ -36,6 +36,8 @@ pub struct Context {
     pub error: Option<String>,
     /// 사용자의 질문/지시
     pub question: Option<String>,
+    /// 이 요청에 맞춰 고른 Oracle 문법 안내 (guides::render)
+    pub guides: String,
 }
 
 /// 메이저 버전 (11, 12, 19 ...)
@@ -89,6 +91,7 @@ pub fn system_prompt(task: Task, ctx: &Context) -> String {
         Task::Fix => "할 일: 오류의 원인을 한 줄로 밝히고, 고친 SQL 을 낸다. 바꾼 부분을 짚는다.",
         Task::Chat => "할 일: 질문에 답한다.",
     });
+    s.push_str(&ctx.guides);
     s
 }
 

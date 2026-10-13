@@ -1768,11 +1768,17 @@ class App {
       const effort = h("select", {}, ...["", "low", "medium", "high", "xhigh", "max"].map((x) => h("option", { value: x, selected: (p?.effort ?? "") === x }, x || "(기본)")));
       const fallbacks = h("input", { type: "checkbox", checked: p?.fallbacks ?? true });
       const maxTokens = h("input", { type: "number", value: p?.max_tokens ?? 8192 });
+      // 사내 PC 는 시스템 프록시가 잡혀 있어 사내 LLM 서버로 가는 요청까지 프록시로 나가 막히곤 한다 (브라우저는 PAC 로 직접 연결)
+      const proxy = h("select", {},
+        h("option", { value: "", selected: !p?.proxy || p.proxy === "auto" }, "자동 — 사내 주소(사설 IP·점 없는 이름·.local/.corp 등)는 직접, 그 밖은 시스템 프록시"),
+        h("option", { value: "none", selected: p?.proxy === "none" }, "사용 안 함 — 항상 직접 연결"),
+        h("option", { value: "system", selected: p?.proxy === "system" }, "시스템 프록시 사용"));
       const result = h("pre", { class: "modal-text" });
       const collect = (): Provider => ({
         name: name.value.trim(), kind: kind.value as Provider["kind"], base_url: base.value.trim() || null,
         model: model.value.trim(), api_key_env: keyEnv.value.trim() || null, num_ctx: numCtx.value ? Number(numCtx.value) : null,
         effort: effort.value || null, fallbacks: fallbacks.checked, max_tokens: Number(maxTokens.value) || 8192,
+        proxy: proxy.value || null,
       });
       const persist = async () => {
         const np = collect();
@@ -1781,7 +1787,8 @@ class App {
         return np;
       };
       form.replaceChildren(
-        field("이름", name), field("종류", kind), field("주소", base, "Ollama: http://127.0.0.1:11434 · 사내 GPU 서버 주소도 됩니다"),
+        field("이름", name), field("종류", kind), field("주소", base, "Ollama: http://127.0.0.1:11434 · 사내 GPU 서버 주소도 됩니다 (http:// 를 빼도 됩니다)"),
+        field("프록시", proxy, "브라우저에서는 되는데 여기서 안 되면 '사용 안 함'으로"),
         field("모델", model, "예: qwen2.5-coder:14b, gemma3:12b"),
         field("API 키 환경변수", keyEnv), field("API 키", key, "설정 파일에는 쓰지 않습니다"),
         h("label", { class: "check" }, keyRemember, "OS 자격 증명 관리자에 저장 (끄면 이 실행 동안만)"),
@@ -1813,7 +1820,20 @@ class App {
         h("button", { class: "list-item add", onclick: (e: Event) => { e.preventDefault(); edit(); } }, "+ 새 공급자"));
     };
     await refreshList();
-    return h("div", { class: "split" }, list, form);
+    // Oracle 문법 안내 — 요청에 맞는 카드를 골라 넣는다. 회사 규칙은 사용자 파일에
+    const gi = await invoke<{ path: string; exists: boolean; builtin: number; custom: number }>("ai_guides_info").catch(() => null);
+    const guides = h("div", { class: "guides-box" },
+      h("strong", {}, "Oracle 문법 안내 "),
+      h("span", { class: "hint" }, `질문·SQL·오류에 맞는 안내 카드를 몇 장 골라 AI 에 함께 보냅니다 (기본 ${gi?.builtin ?? "?"}장${gi?.custom ? ` + 회사 규칙 ${gi.custom}장` : ""}). AI 답 위에 '참고 문법'으로 표시됩니다.`),
+      h("button", { class: "small", title: gi?.path ?? "", onclick: async (e: Event) => {
+        e.preventDefault();
+        try {
+          const path = await invoke<string>("ai_guides_edit");
+          await this.openPath(path);
+          toast("편집하고 저장하면 다음 질문부터 씁니다", "info", 5000);
+        } catch (err) { toast(errOf(err).message, "error"); }
+      } }, gi?.exists ? "회사 규칙 편집" : "회사 규칙 추가"));
+    return h("div", {}, guides, h("div", { class: "split" }, list, form));
   }
 
   private async mcpPage() {

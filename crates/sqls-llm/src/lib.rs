@@ -5,6 +5,7 @@
 //! 보여야 멈춘 것과 구분된다. 취소는 반환된 future 를 drop 하면 된다
 //! (HTTP 연결이 끊기고 서버도 생성을 멈춘다).
 
+pub mod guides;
 pub mod prompts;
 pub mod sse;
 
@@ -18,8 +19,8 @@ use crate::sse::{LineParser, SseParser};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("LLM 서버에 연결할 수 없습니다 ({url}): {source}")]
-    Connect { url: String, source: reqwest::Error },
+    #[error("LLM 서버에 연결할 수 없습니다 ({url}): {source}{hint}")]
+    Connect { url: String, source: reqwest::Error, hint: String },
     #[error("LLM API 오류 {status}: {message}")]
     Api { status: u16, message: String },
     #[error("응답을 해석할 수 없습니다: {0}")]
@@ -85,6 +86,9 @@ pub struct ProviderConfig {
     /// 주소가 바뀌면 다시 묻는다. 앱(백엔드)이 보내기 직전에 확인한다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_ack: Option<String>,
+    /// 프록시: "auto"(기본 — 사내 주소는 직접, 그 밖은 시스템 프록시) | "system" | "none"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -119,6 +123,7 @@ impl ProviderConfig {
             effort: None,
             fallbacks: true,
             remote_ack: None,
+            proxy: None,
         }
     }
 
@@ -128,11 +133,21 @@ impl ProviderConfig {
             ProviderKind::OpenaiCompatible => "https://api.openai.com/v1",
             ProviderKind::Anthropic => "https://api.anthropic.com",
         };
-        self.base_url
-            .clone()
-            .unwrap_or_else(|| def.to_string())
-            .trim_end_matches('/')
-            .to_string()
+        let raw = self.base_url.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| def.to_string());
+        normalize_base(self.kind, &raw)
+    }
+
+    /// 이 공급자에 시스템 프록시를 쓸지
+    pub fn use_proxy(&self) -> bool {
+        match self.proxy.as_deref() {
+            Some("none") => false,
+            Some("system") => true,
+            _ => {
+                // 자동: 사내 주소(루프백·사설 IP·점 없는 이름·사내 도메인)는 직접. 브라우저의 PAC 처럼
+                let host = reqwest::Url::parse(&self.base_url()).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+                !is_internal_host(&host)
+            }
+        }
     }
 
     fn key(&self) -> Option<String> {
@@ -222,7 +237,10 @@ impl ChatResponse {
 /// HTTP 클라이언트 하나를 재사용한다 (연결 풀).
 #[derive(Clone)]
 pub struct Client {
+    /// 시스템 프록시를 따르는 것
     http: reqwest::Client,
+    /// 프록시를 거치지 않는 것 (사내 LLM 서버)
+    direct: reqwest::Client,
 }
 
 impl Default for Client {
@@ -233,13 +251,23 @@ impl Default for Client {
 
 impl Client {
     pub fn new() -> Self {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .user_agent(concat!("sqlstudio/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .expect("reqwest client");
-        Self { http }
+        let builder = || {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(15))
+                .pool_idle_timeout(Duration::from_secs(90))
+                .user_agent(concat!("sqlstudio/", env!("CARGO_PKG_VERSION")))
+        };
+        let http = builder().build().expect("reqwest client");
+        let direct = builder().no_proxy().build().expect("reqwest client");
+        Self { http, direct }
+    }
+
+    fn client_for(&self, cfg: &ProviderConfig) -> &reqwest::Client {
+        if cfg.use_proxy() {
+            &self.http
+        } else {
+            &self.direct
+        }
     }
 
     /// 스트리밍 채팅. 글자가 올 때마다 `on_delta` 가 불린다.
@@ -307,18 +335,15 @@ impl Client {
             ProviderKind::OpenaiCompatible => (format!("{base}/models"), "data", "id"),
             ProviderKind::Anthropic => (format!("{base}/v1/models"), "data", "id"),
         };
-        let mut rb = self.http.get(&url).timeout(Duration::from_secs(30));
+        let mut rb = self.client_for(cfg).get(&url).timeout(Duration::from_secs(30));
         for (k, v) in auth_headers(cfg)? {
             rb = rb.header(k, v);
         }
-        let resp = rb
-            .send()
-            .await
-            .map_err(|e| Error::Connect { url: url.clone(), source: e })?;
+        let resp = rb.send().await.map_err(|e| connect_error(&url, e, cfg.use_proxy()))?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(Error::Api { status: status.as_u16(), message: api_message(&text) });
+            return Err(api_error(status.as_u16(), &text, cfg));
         }
         let v: Value = serde_json::from_str(&text).map_err(|e| Error::Protocol(e.to_string()))?;
         Ok(v[list_key]
@@ -342,7 +367,7 @@ impl Client {
         let mut attempt = 0u32;
         loop {
             let mut rb = self
-                .http
+                .client_for(cfg)
                 .post(url)
                 .json(body)
                 .header("accept", "text/event-stream, application/x-ndjson, application/json");
@@ -358,7 +383,7 @@ impl Client {
                 }
                 Ok(Err(e)) => {
                     if !(e.is_connect() || e.is_timeout()) || attempt >= 2 {
-                        return Err(Error::Connect { url: url.to_string(), source: e });
+                        return Err(connect_error(url, e, cfg.use_proxy()));
                     }
                 }
                 Ok(Ok(resp)) => {
@@ -375,7 +400,7 @@ impl Client {
                         .and_then(|v| v.parse::<u64>().ok());
                     let text = resp.text().await.unwrap_or_default();
                     if !retryable || attempt >= 2 {
-                        return Err(Error::Api { status: code, message: api_message(&text) });
+                        return Err(api_error(code, &text, cfg));
                     }
                     if let Some(s) = retry_after {
                         tokio::time::sleep(Duration::from_secs(s.min(30))).await;
@@ -387,6 +412,106 @@ impl Client {
             tokio::time::sleep(Duration::from_millis(500 * 2u64.pow(attempt))).await;
         }
     }
+}
+
+/// 주소 다듬기: 스킴이 없으면 http://, 끝의 / 제거. Ollama 에 붙여 넣은 /api·/v1, OpenAI 호환의 /chat/completions 를 뗀다.
+/// OpenAI 호환은 경로가 없으면 /v1 (LM Studio·vLLM·Ollama 의 OpenAI 호환 주소)
+pub fn normalize_base(kind: ProviderKind, raw: &str) -> String {
+    let t = raw.trim().trim_end_matches('/');
+    let mut u = if t.contains("://") { t.to_string() } else { format!("http://{t}") };
+    let strip = |u: &mut String, sufs: &[&str]| {
+        for s in sufs {
+            if u.to_lowercase().ends_with(s) {
+                u.truncate(u.len() - s.len());
+                break;
+            }
+        }
+    };
+    match kind {
+        ProviderKind::Ollama => strip(&mut u, &["/api/chat", "/api/generate", "/api", "/v1/chat/completions", "/v1"]),
+        ProviderKind::Anthropic => strip(&mut u, &["/v1/messages", "/v1"]),
+        ProviderKind::OpenaiCompatible => {
+            strip(&mut u, &["/chat/completions"]);
+            if reqwest::Url::parse(&u).is_ok_and(|p| p.path() == "/" || p.path().is_empty()) {
+                u.push_str("/v1");
+            }
+        }
+    }
+    u.trim_end_matches('/').to_string()
+}
+
+/// 사내 주소인지 — 프록시 없이 직접 연결할 곳 (브라우저 PAC 의 흔한 규칙과 같게)
+pub fn is_internal_host(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']').to_lowercase();
+    if h.is_empty() {
+        return false;
+    }
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v) => v.is_loopback() || v.is_private() || v.is_link_local(),
+            std::net::IpAddr::V6(v) => v.is_loopback() || (v.segments()[0] & 0xfe00) == 0xfc00 || (v.segments()[0] & 0xffc0) == 0xfe80,
+        };
+    }
+    h == "localhost"
+        || !h.contains('.')
+        || [".local", ".localhost", ".lan", ".internal", ".intra", ".intranet", ".corp", ".home", ".home.arpa"].iter().any(|s| h.ends_with(s))
+}
+
+/// 연결 실패 안내 — 무엇을 보면 되는지
+fn connect_error(url: &str, e: reqwest::Error, proxied: bool) -> Error {
+    let chain = {
+        let mut s = format!("{e}");
+        let mut src = std::error::Error::source(&e);
+        while let Some(x) = src {
+            s.push_str(&format!(" / {x}"));
+            src = x.source();
+        }
+        s.to_lowercase()
+    };
+    let route = if proxied { "시스템 프록시를 거쳐" } else { "프록시 없이 직접" };
+    let hint = if chain.contains("certificate") || chain.contains("tls") || chain.contains("ssl") || chain.contains("schannel") {
+        "https 인증서를 Windows 가 믿지 못합니다 — 사내 루트 인증서를 설치하거나, 서버가 http 를 받으면 http:// 주소를 쓰세요."
+    } else if chain.contains("dns") || chain.contains("lookup") || chain.contains("no such host") || chain.contains("11001") || chain.contains("name or service") {
+        "서버 이름을 찾지 못했습니다 — 주소의 이름(오타·사내 DNS)을 확인하거나 IP 주소로 넣어 보세요."
+    } else if chain.contains("proxy") || chain.contains("407") {
+        "프록시가 연결을 막았습니다 — 사내 서버라면 공급자 설정의 '프록시'를 '사용 안 함'으로 바꾸세요."
+    } else if chain.contains("refused") || chain.contains("10061") {
+        "서버가 그 포트에서 연결을 받지 않습니다 — 포트를 확인하세요. Ollama 를 다른 PC 에서 쓰려면 서버에서 OLLAMA_HOST=0.0.0.0 으로 띄워야 합니다."
+    } else if e.is_timeout() || chain.contains("timed out") || chain.contains("10060") {
+        if proxied {
+            "응답이 없습니다 — 브라우저에서는 되는데 여기서만 안 되면 프록시 때문일 수 있습니다. 공급자 설정의 '프록시'를 '사용 안 함'으로 바꿔 보세요."
+        } else {
+            "응답이 없습니다 — 방화벽·주소·포트를 확인하세요."
+        }
+    } else if proxied {
+        "브라우저에서는 되는데 여기서만 안 되면 프록시 때문일 수 있습니다 — 공급자 설정의 '프록시'를 '사용 안 함'으로 바꿔 보세요."
+    } else {
+        ""
+    };
+    let hint = if hint.is_empty() { format!("\n(연결: {route})") } else { format!("\n→ {hint}\n(연결: {route})") };
+    Error::Connect { url: url.to_string(), source: e, hint }
+}
+
+/// API 오류 안내 — 404 는 주소 경로·종류, 407/프록시 차단 페이지는 프록시
+fn api_error(status: u16, text: &str, cfg: &ProviderConfig) -> Error {
+    let mut message = api_message(text);
+    let lower = text.to_lowercase();
+    let tip = match status {
+        404 | 405 => Some(match cfg.kind {
+            ProviderKind::Ollama => "주소의 경로가 맞지 않습니다 — 종류가 Ollama 면 http://서버:11434 처럼 경로 없이 넣으세요. OpenAI 호환 서버면 종류를 'OpenAI 호환'으로.",
+            ProviderKind::OpenaiCompatible => "주소의 경로가 맞지 않습니다 — OpenAI 호환 서버는 보통 http://서버:포트/v1 입니다. Ollama 서버면 종류를 'Ollama'로 바꾸세요. 모델 이름도 확인하세요.",
+            ProviderKind::Anthropic => "주소의 경로가 맞지 않습니다 — 사내 게이트웨이 주소를 확인하세요.",
+        }),
+        407 => Some("프록시 인증이 필요합니다 — 사내 서버라면 공급자 설정의 '프록시'를 '사용 안 함'으로."),
+        403 | 502 | 503 if cfg.use_proxy() && (lower.contains("<html") || lower.contains("proxy")) => {
+            Some("프록시가 막은 것 같습니다 (응답이 프록시의 안내 페이지) — 사내 서버라면 '프록시'를 '사용 안 함'으로.")
+        }
+        _ => None,
+    };
+    if let Some(t) = tip {
+        message.push_str(&format!("\n→ {t}"));
+    }
+    Error::Api { status, message }
 }
 
 fn auth_headers(cfg: &ProviderConfig) -> Result<Vec<(&'static str, String)>> {

@@ -525,7 +525,8 @@ impl Worker {
         }
         match r {
             Ok(()) => {}
-            Err(e) if e.is_connection_lost() || matches!(e, Error::Driver(_)) => {
+            // ping 이 30초 안에 돌아오지 않았으면(ORA-03156) 네트워크가 죽은 것으로 본다
+            Err(e) if e.is_connection_lost() || matches!(e, Error::Driver(_) | Error::Db { code: 3156, .. }) => {
                 tracing::warn!("keepalive ping 실패 — 접속이 끊긴 것으로 본다: {e}");
                 self.lost.send_replace(true);
             }

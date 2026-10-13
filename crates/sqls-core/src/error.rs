@@ -48,8 +48,9 @@ fn display_db(code: i32, message: &str) -> String {
     }
 }
 
-/// 접속이 끊긴 것으로 보는 ORA 코드. 3156(호출 시간 초과)도 — 그 뒤 OCI 접속은 쓸 수 없다
-const LOST_CODES: &[i32] = &[3113, 3114, 3135, 3156, 28, 1012, 2396, 12547, 12570, 12571];
+/// 접속이 끊긴 것으로 보는 ORA 코드. 3156(호출 시간 초과)은 넣지 않는다 — 그 호출만 끊기고 접속은 대개 살아 있다
+/// (접속까지 못 쓰게 되면 드라이버가 DPI-1067 을 준다)
+const LOST_CODES: &[i32] = &[3113, 3114, 3135, 28, 1012, 2396, 12547, 12570, 12571];
 
 impl From<oracle::Error> for Error {
     fn from(e: oracle::Error) -> Self {

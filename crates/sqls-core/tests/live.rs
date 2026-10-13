@@ -479,3 +479,78 @@ async fn transaction_state_from_driver() {
     s.rollback().await.unwrap();
     s.close();
 }
+
+/// 스키마 비교: 실제 사전을 읽어 맞대고 스크립트를 만든다 (다른 스키마 두 개)
+#[tokio::test]
+#[ignore]
+async fn schema_compare_two_schemas() {
+    use sqls_core::schemacmp;
+    let s = Session::connect(spec(false)).await.unwrap();
+    let me = s.info().user.clone();
+    let _ = s.execute("CREATE USER cmp_b IDENTIFIED BY cmp_b", ExecOptions::default()).await;
+    for t in ["cmp_orders", "cmp_new", "cmp_b.cmp_orders", "cmp_b.cmp_gone"] {
+        let _ = s.execute(&format!("DROP TABLE {t} CASCADE CONSTRAINTS"), ExecOptions::default()).await;
+    }
+    exec(&s, "CREATE TABLE cmp_orders (id NUMBER(10) PRIMARY KEY, status VARCHAR2(20 CHAR) DEFAULT 'NEW' NOT NULL, memo VARCHAR2(400))").await;
+    exec(&s, "CREATE INDEX cmp_orders_st_ix ON cmp_orders (status, id DESC)").await;
+    exec(&s, "CREATE TABLE cmp_new (id NUMBER, CONSTRAINT cmp_new_pk PRIMARY KEY (id))").await;
+    exec(&s, "CREATE TABLE cmp_b.cmp_orders (id NUMBER(10) PRIMARY KEY, status VARCHAR2(10 CHAR), old_flag CHAR(1))").await;
+    exec(&s, "CREATE TABLE cmp_b.cmp_gone (x NUMBER)").await;
+    exec(&s, "CREATE OR REPLACE PROCEDURE cmp_p IS BEGIN NULL; END;").await;
+    exec(&s, "CREATE OR REPLACE PROCEDURE cmp_b.cmp_p IS BEGIN DBMS_OUTPUT.PUT_LINE('x'); END;").await;
+
+    let kinds = schemacmp::Kinds::default();
+    let started = Instant::now();
+    let (a, b) = tokio::join!(
+        schemacmp::snapshot(&s, &me, &kinds, Some("CMP%"), &|_| {}),
+        schemacmp::snapshot(&s, "CMP_B", &kinds, Some("CMP%"), &|_| {})
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+    eprintln!("읽기 {}ms / {}ms (전체 {}ms)", a.ms, b.ms, started.elapsed().as_millis());
+    let items = schemacmp::compare(&a, &b);
+    let get = |k: &str, n: &str| items.iter().find(|i| i.kind == k && i.name == n).unwrap_or_else(|| panic!("{k} {n}: {items:#?}"));
+    let o = get("TABLE", "CMP_ORDERS");
+    let d = o.details.join("\n");
+    assert!(d.contains("컬럼 형식: STATUS VARCHAR2(20 CHAR) ← VARCHAR2(10 CHAR)"), "{d}");
+    assert!(d.contains("컬럼 NULL: STATUS NOT NULL ← NULL"), "{d}");
+    assert!(d.contains("컬럼 기본값: STATUS"), "{d}");
+    assert!(d.contains("인덱스 추가: CMP_ORDERS_ST_IX (STATUS, \"ID\" DESC)") || d.contains("인덱스 추가: CMP_ORDERS_ST_IX"), "{d}");
+    assert!(!d.contains("PK"), "시스템 이름 PK 는 정의로 맞춘다: {d}");
+    assert_eq!(get("TABLE", "CMP_NEW").status, schemacmp::Status::OnlySource);
+    assert_eq!(get("TABLE", "CMP_GONE").status, schemacmp::Status::OnlyTarget);
+    assert_eq!(get("PROCEDURE", "CMP_P").status, schemacmp::Status::Changed);
+
+    let keys: std::collections::BTreeSet<String> = items.iter().map(|i| i.key()).collect();
+    let src = schemacmp::sources(&s, &me, &["PROCEDURE CMP_P".to_string()]).await.unwrap();
+    let script = schemacmp::script(&a, &b, &items, &keys, &src, "live");
+    assert!(script.contains("CREATE OR REPLACE PROCEDURE"), "{script}");
+    // 만든 스크립트가 실제로 돈다 (주석 빼고): 대상이 원본과 같아진다. PL/SQL 은 "/" 줄까지, 나머지는 ";" 로 끝나는 줄까지
+    let mut buf = String::new();
+    let mut in_code = false;
+    for line in script.lines() {
+        if line.trim_start().starts_with("--") || (buf.is_empty() && line.trim().is_empty()) {
+            continue;
+        }
+        if buf.is_empty() && line.starts_with("CREATE OR REPLACE") && !line.contains(" VIEW ") {
+            in_code = true;
+        }
+        if in_code && line.trim() == "/" {
+            exec(&s, buf.trim()).await;
+            buf.clear();
+            in_code = false;
+            continue;
+        }
+        buf.push_str(line);
+        buf.push('\n');
+        if !in_code && line.trim_end().ends_with(';') {
+            let stmt = buf.trim().trim_end_matches(';').to_string();
+            exec(&s, &stmt).await;
+            buf.clear();
+        }
+    }
+    let b2 = schemacmp::snapshot(&s, "CMP_B", &kinds, Some("CMP%"), &|_| {}).await.unwrap();
+    let left: Vec<_> = schemacmp::compare(&a, &b2).into_iter().filter(|i| i.status != schemacmp::Status::OnlyTarget).collect();
+    let left: Vec<_> = left.into_iter().filter(|i| !i.details.iter().all(|d| d.contains("대상에만") || d.contains("순서"))).collect();
+    assert!(left.is_empty(), "스크립트를 돌린 뒤에도 다른 것: {left:#?}\n{script}");
+    s.close();
+}

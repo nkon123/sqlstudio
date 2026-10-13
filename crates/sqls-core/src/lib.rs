@@ -20,6 +20,7 @@ pub mod monitor;
 pub mod secret;
 pub mod session;
 pub mod browse;
+pub mod schemacmp;
 pub mod sql;
 pub mod tns;
 

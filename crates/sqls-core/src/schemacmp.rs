@@ -168,8 +168,9 @@ fn is_not_null_check(c: &Cons) -> bool {
     })
 }
 
-async fn q(s: &Session, sql: &str, owner: &str) -> Result<Vec<Vec<Option<String>>>> {
-    Ok(s.query(sql, vec![("O".into(), Some(owner.to_string()))], MAX_ROWS).await?.rows)
+/// 모든 조회가 :o (스키마) 와 :p (이름 LIKE — 조건이 없으면 '%') 를 받는다. 이름 조건을 DB 안에서 걸어야 큰 스키마에서 빠르다
+async fn q(s: &Session, sql: &str, owner: &str, like: &str) -> Result<Vec<Vec<Option<String>>>> {
+    Ok(s.query(sql, vec![("O".into(), Some(owner.to_string())), ("P".into(), Some(like.to_string()))], MAX_ROWS).await?.rows)
 }
 
 /// 스키마 하나를 읽는다. name_like 가 있으면 그 이름만 (LIKE). progress 는 단계 이름
@@ -178,12 +179,13 @@ pub async fn snapshot(s: &Session, owner: &str, kinds: &Kinds, name_like: Option
     let owner = owner.to_uppercase();
     let like = name_like.map(|p| p.trim().to_uppercase()).filter(|p| !p.is_empty() && p != "%");
     let keep = |name: &str| like.as_deref().is_none_or(|p| like_match(name, p));
+    let like_sql = like.clone().unwrap_or_else(|| "%".into());
     let mut snap = Snapshot { owner: owner.clone(), ..Default::default() };
 
     if kinds.tables {
         progress("테이블");
-        for r in q(s, "SELECT table_name, temporary FROM all_tables WHERE owner = :o AND nested = 'NO' AND table_name NOT LIKE 'BIN$%' \
-                        AND (iot_type IS NULL OR iot_type = 'IOT') AND secondary = 'N'", &owner).await? {
+        for r in q(s, "SELECT table_name, temporary FROM all_tables WHERE owner = :o AND table_name LIKE :p AND nested = 'NO' AND table_name NOT LIKE 'BIN$%' \
+                        AND (iot_type IS NULL OR iot_type = 'IOT') AND secondary = 'N'", &owner, &like_sql).await? {
             let name = cell(&r, 0);
             if keep(&name) {
                 snap.tables.insert(name.clone(), Table { name, temporary: cell(&r, 1) == "Y", ..Default::default() });
@@ -191,7 +193,7 @@ pub async fn snapshot(s: &Session, owner: &str, kinds: &Kinds, name_like: Option
         }
         progress("컬럼");
         for r in q(s, "SELECT c.table_name, c.column_name, c.data_type, c.data_length, c.data_precision, c.data_scale, c.char_used, c.char_length, c.nullable, c.data_default \
-                         FROM all_tab_columns c WHERE c.owner = :o ORDER BY c.table_name, c.column_id", &owner).await? {
+                         FROM all_tab_columns c WHERE c.owner = :o AND c.table_name LIKE :p ORDER BY c.table_name, c.column_id", &owner, &like_sql).await? {
             if let Some(t) = snap.tables.get_mut(&cell(&r, 0)) {
                 t.cols.push(Col {
                     name: cell(&r, 1),
@@ -204,7 +206,7 @@ pub async fn snapshot(s: &Session, owner: &str, kinds: &Kinds, name_like: Option
         progress("제약조건");
         let mut cons: BTreeMap<String, (String, Cons)> = BTreeMap::new();
         for r in q(s, "SELECT table_name, constraint_name, constraint_type, search_condition, generated, status, delete_rule \
-                         FROM all_constraints WHERE owner = :o AND constraint_type IN ('P','U','R','C') AND table_name NOT LIKE 'BIN$%'", &owner).await? {
+                         FROM all_constraints WHERE owner = :o AND table_name LIKE :p AND constraint_type IN ('P','U','R','C') AND table_name NOT LIKE 'BIN$%'", &owner, &like_sql).await? {
             let table = cell(&r, 0);
             if !snap.tables.contains_key(&table) {
                 continue;
@@ -220,7 +222,7 @@ pub async fn snapshot(s: &Session, owner: &str, kinds: &Kinds, name_like: Option
             };
             cons.insert(c.name.clone(), (table, c));
         }
-        for r in q(s, "SELECT constraint_name, column_name FROM all_cons_columns WHERE owner = :o ORDER BY constraint_name, position", &owner).await? {
+        for r in q(s, "SELECT constraint_name, column_name FROM all_cons_columns WHERE owner = :o AND table_name LIKE :p ORDER BY constraint_name, position", &owner, &like_sql).await? {
             if let Some((_, c)) = cons.get_mut(&cell(&r, 0)) {
                 c.cols.push(cell(&r, 1));
             }
@@ -229,7 +231,7 @@ pub async fn snapshot(s: &Session, owner: &str, kinds: &Kinds, name_like: Option
                          FROM all_constraints c \
                          JOIN all_constraints rc ON rc.owner = c.r_owner AND rc.constraint_name = c.r_constraint_name \
                          JOIN all_cons_columns cc ON cc.owner = rc.owner AND cc.constraint_name = rc.constraint_name \
-                        WHERE c.owner = :o AND c.constraint_type = 'R' ORDER BY c.constraint_name, cc.position", &owner).await? {
+                        WHERE c.owner = :o AND c.table_name LIKE :p AND c.constraint_type = 'R' ORDER BY c.constraint_name, cc.position", &owner, &like_sql).await? {
             if let Some((_, c)) = cons.get_mut(&cell(&r, 0)) {
                 // 같은 스키마를 가리키면 스키마를 떼어 둔다 (다른 스키마와 비교할 때 같게 보이게)
                 let ro = cell(&r, 1);
@@ -248,7 +250,7 @@ pub async fn snapshot(s: &Session, owner: &str, kinds: &Kinds, name_like: Option
         progress("인덱스");
         let mut idx: BTreeMap<String, (String, Idx)> = BTreeMap::new();
         for r in q(s, "SELECT index_name, table_name, uniqueness, index_type, generated FROM all_indexes \
-                        WHERE owner = :o AND table_owner = :o AND index_type <> 'LOB' AND table_name NOT LIKE 'BIN$%'", &owner).await? {
+                        WHERE owner = :o AND table_owner = :o AND table_name LIKE :p AND index_type <> 'LOB' AND table_name NOT LIKE 'BIN$%'", &owner, &like_sql).await? {
             let table = cell(&r, 1);
             if snap.tables.contains_key(&table) {
                 let i = Idx { name: cell(&r, 0), unique: cell(&r, 2) == "UNIQUE", kind: cell(&r, 3), generated: cell(&r, 4) == "Y", cols: vec![] };
@@ -256,13 +258,14 @@ pub async fn snapshot(s: &Session, owner: &str, kinds: &Kinds, name_like: Option
             }
         }
         let mut exprs: BTreeMap<(String, String), String> = BTreeMap::new();
-        for r in q(s, "SELECT index_name, column_position, column_expression FROM all_ind_expressions WHERE index_owner = :o", &owner).await? {
+        for r in q(s, "SELECT index_name, column_position, column_expression FROM all_ind_expressions WHERE index_owner = :o AND table_name LIKE :p", &owner, &like_sql).await? {
             exprs.insert((cell(&r, 0), cell(&r, 1)), cell(&r, 2).trim().to_string());
         }
-        for r in q(s, "SELECT index_name, column_name, descend, column_position FROM all_ind_columns WHERE index_owner = :o ORDER BY index_name, column_position", &owner).await? {
+        for r in q(s, "SELECT index_name, column_name, descend, column_position FROM all_ind_columns WHERE index_owner = :o AND table_name LIKE :p ORDER BY index_name, column_position", &owner, &like_sql).await? {
             if let Some((_, i)) = idx.get_mut(&cell(&r, 0)) {
+                // 내림차순 인덱스는 컬럼이 식("ID")으로 저장된다 — 식이어도 DESC 를 붙인다
                 let mut c = exprs.get(&(cell(&r, 0), cell(&r, 3))).cloned().unwrap_or_else(|| cell(&r, 1));
-                if cell(&r, 2) == "DESC" && !exprs.contains_key(&(cell(&r, 0), cell(&r, 3))) {
+                if cell(&r, 2) == "DESC" {
                     c.push_str(" DESC");
                 }
                 i.cols.push(c);
@@ -276,7 +279,7 @@ pub async fn snapshot(s: &Session, owner: &str, kinds: &Kinds, name_like: Option
     }
     if kinds.views {
         progress("뷰");
-        for r in q(s, "SELECT view_name, text FROM all_views WHERE owner = :o", &owner).await? {
+        for r in q(s, "SELECT view_name, text FROM all_views WHERE owner = :o AND view_name LIKE :p", &owner, &like_sql).await? {
             let name = cell(&r, 0);
             if keep(&name) {
                 snap.views.insert(name, cell(&r, 1));
@@ -285,7 +288,7 @@ pub async fn snapshot(s: &Session, owner: &str, kinds: &Kinds, name_like: Option
     }
     if kinds.seqs {
         progress("시퀀스");
-        for r in q(s, "SELECT sequence_name, increment_by, min_value, max_value, cycle_flag, order_flag, cache_size FROM all_sequences WHERE sequence_owner = :o", &owner).await? {
+        for r in q(s, "SELECT sequence_name, increment_by, min_value, max_value, cycle_flag, order_flag, cache_size FROM all_sequences WHERE sequence_owner = :o AND sequence_name LIKE :p", &owner, &like_sql).await? {
             let name = cell(&r, 0);
             if keep(&name) {
                 snap.seqs.insert(name.clone(), Seq { name, increment: cell(&r, 1), min: cell(&r, 2), max: cell(&r, 3), cycle: cell(&r, 4) == "Y", order: cell(&r, 5) == "Y", cache: cell(&r, 6) });
@@ -298,15 +301,15 @@ pub async fn snapshot(s: &Session, owner: &str, kinds: &Kinds, name_like: Option
         // 줄 끝 공백·CR 은 빼고 (개발 PC 마다 다르다). 줄 번호를 넣어 순서가 바뀐 것도 잡는다
         let sql = format!(
             "SELECT type, name, COUNT(*), SUM(ORA_HASH(line || ':' || RTRIM(REPLACE(text, CHR(13)), ' ' || CHR(9) || CHR(10)))) \
-               FROM all_source WHERE owner = :o AND type IN ({types}) GROUP BY type, name"
+               FROM all_source WHERE owner = :o AND name LIKE :p AND type IN ({types}) GROUP BY type, name"
         );
-        for r in q(s, &sql, &owner).await? {
+        for r in q(s, &sql, &owner, &like_sql).await? {
             let (kind, name) = (cell(&r, 0), cell(&r, 1));
             if keep(&name) {
                 snap.code.insert(format!("{kind} {name}"), Code { kind, name, lines: cell(&r, 2).parse().unwrap_or(0), hash: cell(&r, 3), valid: true });
             }
         }
-        for r in q(s, &format!("SELECT object_type, object_name FROM all_objects WHERE owner = :o AND status <> 'VALID' AND object_type IN ({types})"), &owner).await? {
+        for r in q(s, &format!("SELECT object_type, object_name FROM all_objects WHERE owner = :o AND object_name LIKE :p AND status <> 'VALID' AND object_type IN ({types})"), &owner, &like_sql).await? {
             if let Some(c) = snap.code.get_mut(&format!("{} {}", cell(&r, 0), cell(&r, 1))) {
                 c.valid = false;
             }

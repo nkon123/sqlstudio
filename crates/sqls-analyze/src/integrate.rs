@@ -7,11 +7,13 @@
 //! - 트랜잭션: 시작점마다 닿는 곳 중 COMMIT/ROLLBACK 하는 곳
 //! - 영향 범위: 테이블을 바꾸는 서브프로그램에 닿는 시작점
 //! - 확인할 것 목록: 예외 삼킴, 동적 SQL, 모델이 짚은 위험
+//! - 사전 대조: 사전 의존성(ALL_DEPENDENCIES)과 파서의 테이블을 맞대어 쓰임마다 근거를 붙이고, 다른 곳을 모은다 (deps)
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+use crate::deps::{self, Guess, UnitDeps};
 use crate::llm::Insight;
 use crate::store::{Store, UnitResult};
 
@@ -66,6 +68,48 @@ pub struct TableRow {
     /// 이 테이블의 데이터가 커서 흐름으로 들어가는 테이블
     #[serde(default)]
     pub feeds_into: Vec<String>,
+    /// 노드 id → 근거: ok (사전·소스 모두) / src (소스만) / dict (사전만, 연산 모름) / llm (모델 추정). 사전을 못 본 단위는 없음
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub conf: BTreeMap<String, String>,
+}
+
+/// 사전과 소스가 다른 곳 — "확인 필요" 목록
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Gap {
+    pub unit: String,
+    /// dict_only (사전에만) / source_only (소스에만) / dynamic (동적 SQL)
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    /// 모델이 추정한 연산 (있으면)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ops: Option<String>,
+    pub note: String,
+}
+
+/// 사전 대조 숫자 — (단위, 테이블) 쌍 기준
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DictStats {
+    /// 사전을 본 단위 수
+    pub checked: usize,
+    pub both: usize,
+    pub dict_only: usize,
+    pub source_only: usize,
+    /// 동적 SQL 문 수
+    pub dynamic: usize,
+    /// 모델이 연산·테이블을 채운 것
+    pub guessed: usize,
+}
+
+/// 통합에 넣는 사전 정보 — 단위 키 → 의존성, 모델 보완
+#[derive(Debug, Default)]
+pub struct Dict {
+    pub deps: HashMap<String, UnitDeps>,
+    pub guesses: Vec<Guess>,
 }
 
 /// 커서(또는 SELECT INTO) 로 읽은 데이터가 DML 로 들어가는 흐름 — 테이블 사이의 데이터 계보
@@ -128,6 +172,12 @@ pub struct Integrated {
     pub flows: Vec<Flow>,
     /// 모델로 만든 전체 요약 (요청했을 때)
     pub overview: Option<Insight>,
+    /// 사전과 소스가 다른 곳
+    #[serde(default)]
+    pub gaps: Vec<Gap>,
+    /// 사전을 하나도 못 봤고 동적 SQL 도 없으면 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dict: Option<DictStats>,
 }
 
 fn is_system(name: &str) -> bool {
@@ -200,6 +250,23 @@ struct Index {
 }
 
 pub fn integrate(units: &[UnitResult]) -> Integrated {
+    integrate_with(units, &Dict::default())
+}
+
+/// 어느 서브프로그램인지 모를 때 단위 자리 — 단독 프로시저·함수면 그 노드, 패키지면 "(사전)"
+fn unit_node(u: &UnitResult) -> String {
+    match u.unit_type.as_str() {
+        "PROCEDURE" | "FUNCTION" | "TRIGGER" => u
+            .subprograms
+            .iter()
+            .find(|s| s.parent_is_top() && s.kind != crate::plsql::SubKind::Init)
+            .map(|s| node_id(u, &s.path))
+            .unwrap_or_else(|| format!("{}.{}", u.owner, u.name)),
+        _ => format!("{}.{}.(사전)", u.owner, u.name),
+    }
+}
+
+pub fn integrate_with(units: &[UnitResult], dict: &Dict) -> Integrated {
     let mut out = Integrated { generated_at: crate::store::now(), units: units.len(), ..Default::default() };
     let mut ix = Index { containers: HashMap::new(), standalone: HashMap::new(), members: HashMap::new(), by_name: HashMap::new() };
     let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
@@ -325,13 +392,19 @@ pub fn integrate(units: &[UnitResult]) -> Integrated {
         reach_of.insert(e.clone(), r);
     }
 
-    // 테이블
+    // 테이블 — 동의어로 적은 이름은 사전으로 실제 테이블로 바꾼다
+    let alias: HashMap<&str, HashMap<String, String>> =
+        units.iter().map(|u| (u.key.as_str(), dict.deps.get(&u.key).map(|d| deps::aliases(&u.owner, &d.deps)).unwrap_or_default())).collect();
+    let qualify = |u: &UnitResult, name: &str| -> String {
+        let q = qualify(&u.owner, name);
+        alias.get(u.key.as_str()).and_then(|a| a.get(&q)).cloned().unwrap_or(q)
+    };
     let mut tables: BTreeMap<String, TableRow> = BTreeMap::new();
     for u in units {
         for s in &u.subprograms {
             let id = if s.kind == crate::plsql::SubKind::Init { format!("{}.{}.(초기화)", u.owner, u.name) } else { node_id(u, &s.path) };
             for t in &s.facts.tables {
-                let name = qualify(&u.owner, &t.name);
+                let name = qualify(u, &t.name);
                 let row = tables.entry(name.clone()).or_insert_with(|| TableRow { table: name.clone(), ..Default::default() });
                 let ops = row.by.entry(id.clone()).or_default();
                 let mut set: BTreeSet<char> = ops.chars().collect();
@@ -341,10 +414,112 @@ pub fn integrate(units: &[UnitResult]) -> Integrated {
         }
         // 전역 커서 등
         for t in &u.globals.tables {
-            let name = qualify(&u.owner, &t.name);
+            let name = qualify(u, &t.name);
             let row = tables.entry(name.clone()).or_insert_with(|| TableRow { table: name.clone(), ..Default::default() });
             row.by.entry(format!("{}.{}.(전역)", u.owner, u.name)).or_insert_with(|| t.ops.clone());
         }
+    }
+    // 사전 대조
+    let mut stats = DictStats::default();
+    for u in units {
+        let guess = |table: Option<&str>, line: Option<u32>| dict.guesses.iter().find(|g| g.unit == u.key && g.table.as_deref() == table && g.line == line);
+        // 동적 SQL — 사전도 파서도 모른다. 모델이 추정했으면 그 테이블을 넣는다
+        for s in &u.subprograms {
+            let node = if s.kind == crate::plsql::SubKind::Init { format!("{}.{}.(초기화)", u.owner, u.name) } else { node_id(u, &s.path) };
+            for d in &s.facts.dynamic_sql {
+                stats.dynamic += 1;
+                let g = guess(None, Some(d.line));
+                let uses = g.map(|g| g.uses.as_slice()).unwrap_or(&[]);
+                if uses.is_empty() {
+                    let note = match g {
+                        Some(g) if !g.reason.is_empty() => format!("모델도 테이블을 찾지 못함: {}", g.reason),
+                        Some(_) => "모델도 테이블을 찾지 못했습니다".into(),
+                        None => format!("{} — 실행할 때 정해지는 SQL", d.what),
+                    };
+                    out.gaps.push(Gap { unit: u.key.clone(), kind: "dynamic".into(), table: None, node: Some(node.clone()), line: Some(d.line), ops: None, note });
+                }
+                for (t, ops) in uses {
+                    let name = qualify(u, t);
+                    let row = tables.entry(name.clone()).or_insert_with(|| TableRow { table: name.clone(), ..Default::default() });
+                    if row.by.contains_key(&node) {
+                        continue; // 파서가 문자열에서 이미 읽었다
+                    }
+                    row.by.insert(node.clone(), ops.clone());
+                    row.conf.insert(node.clone(), "llm".into());
+                    stats.guessed += 1;
+                    out.gaps.push(Gap {
+                        unit: u.key.clone(),
+                        kind: "dynamic".into(),
+                        table: Some(name),
+                        node: Some(node.clone()),
+                        line: Some(d.line),
+                        ops: Some(ops.clone()),
+                        note: g.map(|g| g.reason.clone()).unwrap_or_default(),
+                    });
+                }
+            }
+        }
+        let Some(ud) = dict.deps.get(&u.key) else { continue };
+        stats.checked += 1;
+        let al = &alias[u.key.as_str()];
+        let parser: BTreeSet<String> = deps::parser_tables(u).into_iter().map(|t| al.get(&t).cloned().unwrap_or(t)).collect();
+        let cmp = deps::compare(&parser, &ud.deps);
+        stats.both += cmp.both.len();
+        stats.dict_only += cmp.dict_only.len();
+        stats.source_only += cmp.source_only.len();
+        // 이 단위의 노드들
+        let mut mine: BTreeSet<String> = u
+            .subprograms
+            .iter()
+            .map(|s| if s.kind == crate::plsql::SubKind::Init { format!("{}.{}.(초기화)", u.owner, u.name) } else { node_id(u, &s.path) })
+            .collect();
+        mine.insert(format!("{}.{}.(전역)", u.owner, u.name));
+        for (t, word) in cmp.both.iter().map(|t| (t, "ok")).chain(cmp.source_only.iter().map(|t| (t, "src"))) {
+            if let Some(row) = tables.get_mut(t) {
+                let nodes: Vec<String> = row.by.keys().filter(|n| mine.contains(*n)).cloned().collect();
+                for n in nodes {
+                    row.conf.entry(n).or_insert_with(|| word.into());
+                }
+            }
+        }
+        for t in &cmp.source_only {
+            let node = tables.get(t).and_then(|r| r.by.keys().find(|n| mine.contains(*n)).cloned());
+            out.gaps.push(Gap {
+                unit: u.key.clone(),
+                kind: "source_only".into(),
+                table: Some(t.clone()),
+                node,
+                line: None,
+                ops: None,
+                note: "사전에 없음 — 실행 중 만드는 테이블, 동적 SQL 안의 이름, 또는 파서가 잘못 읽은 것일 수 있습니다".into(),
+            });
+        }
+        // 사전에만 — 파서가 쓰는 곳을 못 찾았다. 모델이 추정했으면 그 연산, 아니면 '?'
+        for t in &cmp.dict_only {
+            let g = guess(Some(t), None);
+            let ops = g.and_then(|g| g.uses.first()).map(|(_, o)| o.clone()).filter(|o| !o.is_empty());
+            let node = g
+                .and_then(|g| g.subprogram.as_deref())
+                .and_then(|name| u.subprograms.iter().find(|s| s.parent_is_top() && s.name.eq_ignore_ascii_case(name)))
+                .map(|s| node_id(u, &s.path))
+                .unwrap_or_else(|| unit_node(u));
+            let row = tables.entry(t.clone()).or_insert_with(|| TableRow { table: t.clone(), ..Default::default() });
+            row.by.entry(node.clone()).or_insert_with(|| ops.clone().unwrap_or_else(|| "?".into()));
+            row.conf.insert(node.clone(), if ops.is_some() { "llm" } else { "dict" }.into());
+            if ops.is_some() {
+                stats.guessed += 1;
+            }
+            let via = ud.deps.iter().find(|d| &d.qualified() == t).and_then(|d| d.via.clone()).map(|v| format!(" (동의어 {v})")).unwrap_or_default();
+            let note = match g {
+                Some(g) if !g.reason.is_empty() => g.reason.clone(),
+                _ if u.subprograms.is_empty() => format!("소스를 읽지 못한 단위(wrap 등) — 사전으로만 압니다{via}"),
+                _ => format!("사전에는 있으나 소스에서 쓰는 곳을 찾지 못했습니다{via}"),
+            };
+            out.gaps.push(Gap { unit: u.key.clone(), kind: "dict_only".into(), table: Some(t.clone()), node: Some(node), line: None, ops, note });
+        }
+    }
+    if stats.checked > 0 || stats.dynamic > 0 {
+        out.dict = Some(stats);
     }
     for row in tables.values_mut() {
         let writers: BTreeSet<&String> = row.by.iter().filter(|(_, o)| o.contains(['C', 'U', 'D'])).map(|(n, _)| n).collect();
@@ -361,8 +536,8 @@ pub fn integrate(units: &[UnitResult]) -> Integrated {
                         unit: u.key.clone(),
                         cursor: c.name.clone(),
                         cursor_kind: c.kind.clone(),
-                        from: c.reads.iter().map(|r| qualify(&u.owner, r)).collect(),
-                        to: qualify(&u.owner, &f.table),
+                        from: c.reads.iter().map(|r| qualify(u, r)).collect(),
+                        to: qualify(u, &f.table),
                         ops: f.ops.clone(),
                         line: f.line,
                         via: f.via.clone(),
@@ -647,6 +822,33 @@ pub fn report(g: &Integrated, units: &[UnitResult]) -> String {
         }
         s.push('\n');
     }
+    if let Some(d) = &g.dict {
+        s.push_str("## 사전 대조 (ALL_DEPENDENCIES)\n\n");
+        s.push_str(&format!(
+            "사전을 본 단위 {}개 · 사전·소스 모두 {} · 사전에만 {} · 소스에만 {} · 동적 SQL {} · 모델 추정 {}\n\n",
+            d.checked, d.both, d.dict_only, d.source_only, d.dynamic, d.guessed
+        ));
+        if !g.gaps.is_empty() {
+            s.push_str("| 단위 | 종류 | 테이블 | 어디 | 줄 | 추정 연산 | 내용 |\n|---|---|---|---|---|---|---|\n");
+            for x in &g.gaps {
+                let kind = match x.kind.as_str() {
+                    "dict_only" => "사전에만",
+                    "source_only" => "소스에만",
+                    _ => "동적 SQL",
+                };
+                s.push_str(&format!(
+                    "| {} | {kind} | {} | {} | {} | {} | {} |\n",
+                    x.unit,
+                    x.table.as_deref().unwrap_or(""),
+                    x.node.as_deref().map(|n| format!("`{n}`")).unwrap_or_default(),
+                    x.line.map(|l| l.to_string()).unwrap_or_default(),
+                    x.ops.as_deref().map(|o| format!("{o} (추정)")).unwrap_or_default(),
+                    x.note.replace('|', "\\|").replace('\n', " ")
+                ));
+            }
+        }
+        s.push('\n');
+    }
     let unknown: BTreeSet<&str> = g.edges.iter().filter(|e| e.external.as_deref() == Some("unknown")).map(|e| e.to.as_str()).collect();
     if !unknown.is_empty() {
         s.push_str("## 못 푼 호출 (분석하지 않은 단위, 동의어, 또는 형식 생성자·컬렉션)\n\n");
@@ -665,13 +867,18 @@ pub fn report(g: &Integrated, units: &[UnitResult]) -> String {
 /// 저장소의 모든 단위로 통합 분석을 만들고 파일로 쓴다. 돌려주는 것은 쓴 파일들.
 pub fn write_all(store: &Store, overview: Option<Insight>) -> std::io::Result<(Integrated, Vec<std::path::PathBuf>)> {
     let units = store.units();
-    let mut g = integrate(&units);
+    let dict = Dict {
+        deps: units.iter().filter_map(|u| store.read_deps(&u.key).map(|d| (u.key.clone(), d))).collect(),
+        guesses: store.read_integrated("supplement.json").unwrap_or_default(),
+    };
+    let mut g = integrate_with(&units, &dict);
     g.overview = overview;
     let mut files = Vec::new();
     files.push(store.write_integrated("graph.json", &serde_json::json!({ "nodes": g.nodes, "edges": g.edges, "entries": g.entries, "cycles": g.cycles, "unused": g.unused, "transactions": g.transactions }))?);
     files.push(store.write_integrated("crud.json", &g.tables)?);
     files.push(store.write_integrated("findings.json", &g.findings)?);
     files.push(store.write_integrated("flows.json", &g.flows)?);
+    files.push(store.write_integrated("gaps.json", &g.gaps)?);
     let stmts: Vec<StmtRow> = units
         .iter()
         .flat_map(|u| {

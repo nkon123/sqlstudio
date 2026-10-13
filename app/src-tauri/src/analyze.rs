@@ -156,6 +156,7 @@ pub async fn analysis_start(
                 }
             };
             emit(Progress::Fetch { run, index: i, total, key, error: None });
+            sqls_analyze::deps::fetch_into(s, &store, &u.owner, &u.name, &u.unit_type).await;
             let llm = cfg.as_ref().map(|c| Llm { client: &client, cfg: c });
             if let Err(e) = analyze_unit(&store, &src, spec.as_deref(), llm, &options, on.clone(), cancel.clone()).await {
                 // 모델 서버가 죽었으면 나머지도 실패한다 — 멈춘다
@@ -164,6 +165,12 @@ pub async fn analysis_start(
                     break;
                 }
             }
+        }
+        // 사전과 파서가 다른 곳만 모델에 묻는다 (사전만 있는 테이블의 연산, 동적 SQL 의 테이블)
+        if let (Some(c), None) = (cfg.as_ref(), &stop) {
+            let on = on.clone();
+            let say = move |what: String| on(Event::Rollup { key: "사전 대조".into(), what });
+            sqls_analyze::deps::supplement(&store, &client, c, &cancel, &say).await;
         }
         let overview = store.read_integrated::<Integrated>("integrated.json").and_then(|g| g.overview);
         let fin = match integrate::write_all(&store, overview) {

@@ -171,6 +171,15 @@ impl Store {
         Ok(())
     }
 
+    /// 사전 의존성 (ALL_DEPENDENCIES) — 단위 폴더의 deps.json
+    pub fn read_deps(&self, key: &str) -> Option<crate::deps::UnitDeps> {
+        read_json(&self.unit_dir(key).join("deps.json"))
+    }
+
+    pub fn write_deps(&self, d: &crate::deps::UnitDeps) -> io::Result<()> {
+        write_json(&self.unit_dir(&d.key).join("deps.json"), d)
+    }
+
     /// 저장된 단위 전부 (통합 분석의 입력)
     pub fn units(&self) -> Vec<UnitResult> {
         let mut out = Vec::new();

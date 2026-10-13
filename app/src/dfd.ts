@@ -10,8 +10,8 @@ import { errOf } from "./api";
 import { type Base, type DfdSource, type EdgeKind, LANES, buildBase, buildView, busiest, edgesOf, packageOf } from "./dfd-model";
 import { h, toast } from "./ui";
 
-const COLORS = { read: "#2f6fdd", write: "#e07a1f", call: "#8a93a0", flow: "#7a4fd0", trig: "#c62f3c" };
-const KIND_KO: Record<EdgeKind, string> = { read: "읽기", write: "쓰기", call: "호출", trig: "트리거 발동", flow: "커서 흐름" };
+const COLORS = { read: "#2f6fdd", write: "#e07a1f", call: "#8a93a0", flow: "#7a4fd0", trig: "#c62f3c", use: "#a3abb5" };
+const KIND_KO: Record<EdgeKind, string> = { read: "읽기", write: "쓰기", call: "호출", trig: "트리거 발동", flow: "커서 흐름", use: "쓰임 (연산 모름)" };
 /** 이보다 크면 처음에는 가장 바쁜 노드를 가운데로 */
 const WHOLE_LIMIT = 80;
 
@@ -257,6 +257,7 @@ export class DfdView {
         ...(Object.entries(COLORS) as [string, string][]).map(([k, c]) => ({ selector: `edge[kind='${k}']`, style: { "line-color": c, "target-arrow-color": c } })),
         { selector: "edge[kind='call']", style: { "line-style": "dashed" } },
         { selector: "edge[kind='flow']", style: { width: 3 } },
+        { selector: "edge[?guess]", style: { "line-style": "dotted" } },
         { selector: "edge:selected", style: { width: 4 } },
         { selector: ".dim", style: { opacity: 0.12 } },
       ],
@@ -283,6 +284,7 @@ export class DfdView {
       h("div", { class: "hint" }, "왼쪽 입력 테이블 → 가운데 처리 → 오른쪽 출력 테이블. 읽히고 쓰이기도 하는 테이블은 입력 칸에 점선 사본으로 한 번 더 나옵니다."),
       h("div", { class: "dfd-legend" },
         ...(Object.entries(COLORS) as [EdgeKind, string][]).map(([k, c]) => h("div", {}, h("span", { class: "dfd-sw", style: `background:${c}` }), KIND_KO[k]))),
+      h("div", { class: "hint" }, "점선(·····)은 추정 — 소스에서 직접 확인하지 못하고 사전이나 모델로 채운 선입니다."),
       h("div", { class: "hint" }, "클릭: 상세 · 더블클릭: 가운데로 · 마우스 올리기: 닿는 선만 진하게 · ＋: 화면 밖으로 더 이어짐"));
   }
 
@@ -311,7 +313,10 @@ export class DfdView {
     const kind = e.data("kind") as EdgeKind;
     this.side.replaceChildren(h("h4", {}, KIND_KO[kind]),
       h("div", { class: "dfd-title" }, e.source().data("ref")), h("div", { class: "dim" }, "↓"), h("div", { class: "dfd-title" }, e.target().data("ref")),
-      e.data("label") ? h("p", {}, kind === "write" ? `연산 ${e.data("label")}` : e.data("label")) : "");
+      e.data("label") && kind !== "use" ? h("p", {}, kind === "write" ? `연산 ${e.data("label")}` : e.data("label")) : "",
+      e.data("guess") ? h("p", { class: "warn" }, kind === "use"
+        ? "사전(ALL_DEPENDENCIES)에는 참조한다고 나오지만 소스에서 쓰는 곳을 찾지 못했습니다. '확인 필요' 목록을 보세요."
+        : "추정 — 소스에서 직접 확인하지 못했습니다 (모델이 사전·동적 SQL 을 보고 추정).") : "");
   }
 
   private async savePng() {

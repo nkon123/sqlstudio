@@ -261,7 +261,12 @@ async fn cmd_run(a: &Args) -> Result<(), String> {
         }
         let (src, spec) = match &session {
             Some((s, refs)) => match source::fetch(s, &refs[i]).await {
-                Ok(x) => x,
+                Ok(x) => {
+                    if let Some(e) = sqls_analyze::deps::fetch_into(s, &store, &refs[i].owner, &refs[i].name, &refs[i].unit_type).await {
+                        eprintln!("  사전 의존성을 읽지 못했습니다 (대조 없이 진행): {e}");
+                    }
+                    x
+                }
                 Err(e) => {
                     eprintln!("[{}/{total}] {}.{} 소스를 읽지 못했습니다: {e}", i + 1, refs[i].owner, refs[i].name);
                     failed_units += 1;
@@ -290,6 +295,12 @@ async fn cmd_run(a: &Args) -> Result<(), String> {
     }
     if let Some((s, _)) = session {
         s.close();
+    }
+    if let Some(c) = llm_cfg.as_ref().filter(|_| !cancel.load(Ordering::Relaxed)) {
+        let n = sqls_analyze::deps::supplement(&store, &client, c, &cancel, &|w| eprintln!("  {w}")).await;
+        if n > 0 {
+            eprintln!("사전 대조: 차이 {n}곳을 모델로 보완했습니다 (추정)");
+        }
     }
     let (g, files) = integrate::write_all(&store, None).map_err(|e| e.to_string())?;
     eprintln!(

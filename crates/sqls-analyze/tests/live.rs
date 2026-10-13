@@ -99,3 +99,46 @@ async fn analyze_from_dictionary() {
     s.close();
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// 사전 의존성: 동의어를 실제 테이블로 풀고, 자기 명세·STANDARD 는 빼고, 파서와 맞대어 근거를 붙인다
+#[tokio::test]
+#[ignore]
+async fn dictionary_dependencies() {
+    let s = Session::connect(spec()).await.unwrap();
+    for t in ["dep_base(id number)", "dep_other(id number)"] {
+        let _ = s.execute(&format!("CREATE TABLE {t}"), ExecOptions::default()).await;
+    }
+    s.execute("CREATE OR REPLACE SYNONYM dep_syn FOR dep_base", ExecOptions::default()).await.unwrap();
+    let _ = s.execute("CREATE SEQUENCE dep_seq", ExecOptions::default()).await;
+    s.execute("CREATE OR REPLACE PACKAGE dep_pkg IS PROCEDURE run; END;", ExecOptions::default()).await.unwrap();
+    s.execute(
+        "CREATE OR REPLACE PACKAGE BODY dep_pkg IS\n  PROCEDURE run IS\n    v dep_other%ROWTYPE;\n    n NUMBER;\n  BEGIN\n    INSERT INTO dep_syn (id) SELECT dep_seq.NEXTVAL FROM dual;\n    SELECT COUNT(*) INTO n FROM dep_base;\n  END run;\nEND dep_pkg;",
+        ExecOptions::default(),
+    )
+    .await
+    .unwrap();
+    let owner = s.info().user.clone();
+    let deps = sqls_analyze::deps::fetch(&s, &owner, "DEP_PKG", "PACKAGE BODY").await.unwrap();
+    let has = |n: &str, k: &str, via: Option<String>| deps.iter().any(|d| d.owner == owner && d.name == n && d.kind == k && d.via == via);
+    assert!(has("DEP_BASE", "TABLE", Some(format!("{owner}.DEP_SYN"))), "동의어를 풀어야 한다: {deps:?}");
+    assert!(has("DEP_BASE", "TABLE", None) && has("DEP_OTHER", "TABLE", None) && has("DEP_SEQ", "SEQUENCE", None), "{deps:?}");
+    assert!(!deps.iter().any(|d| d.name == "DEP_PKG" || d.name == "STANDARD"), "자기 명세·STANDARD 는 뺀다: {deps:?}");
+
+    let dir = std::env::temp_dir().join(format!("sqls-analyze-live-dict-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let r = source::list_units(&s, &owner, &[], Some("DEP_PKG")).await.unwrap().remove(0);
+    let (src, spec) = source::fetch(&s, &r).await.unwrap();
+    assert!(sqls_analyze::deps::fetch_into(&s, &store, &r.owner, &r.name, &r.unit_type).await.is_none());
+    analyze_unit(&store, &src, spec.as_deref(), None, &Options::default(), Arc::new(|_| {}), Arc::new(AtomicBool::new(false))).await.unwrap();
+    let (g, _) = sqls_analyze::integrate::write_all(&store, None).unwrap();
+    let base = g.tables.iter().find(|t| t.table == format!("{owner}.DEP_BASE")).expect("동의어로 쓴 것도 실제 테이블로 모인다");
+    let run = format!("{owner}.DEP_PKG.RUN");
+    assert_eq!((base.by[&run].as_str(), base.conf[&run].as_str()), ("CR", "ok"));
+    assert!(!g.tables.iter().any(|t| t.table.ends_with(".DEP_SYN")));
+    let other = g.tables.iter().find(|t| t.table == format!("{owner}.DEP_OTHER")).expect("%ROWTYPE 만 쓴 테이블은 사전에서");
+    assert_eq!(other.conf.values().next().map(String::as_str), Some("dict"));
+    assert_eq!(g.dict.as_ref().map(|d| (d.checked, d.dict_only)), Some((1, 1)), "{:?}", g.gaps);
+    s.close();
+    std::fs::remove_dir_all(&dir).unwrap();
+}

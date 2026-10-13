@@ -43,22 +43,34 @@ interface Chunk { id: string; part: number; parts: number; start_line: number; e
 interface ChunkResult { chunk: Chunk; insight?: Insight | null; error?: string | null; raw?: string | null; llm?: { model: string; elapsed_ms: number; attempts: number; repaired?: string[] } | null }
 interface Node { id: string; unit: string; path: string; kind: string; signature: string; start_line: number; end_line: number; public?: boolean | null; summary?: string | null; complexity: number; commits: boolean; trigger_on?: string | null; trigger_events?: string | null }
 interface Edge { from: string; to: string; resolved: boolean; external?: string | null; lines: number[] }
-interface TableRow { table: string; by: Record<string, string>; impacted_entries: string[]; fed_from?: string[]; feeds_into?: string[] }
+interface TableRow { table: string; by: Record<string, string>; conf?: Record<string, string>; impacted_entries: string[]; fed_from?: string[]; feeds_into?: string[] }
+/** 사전(ALL_DEPENDENCIES)과 소스가 다른 곳 */
+interface Gap { unit: string; kind: "dict_only" | "source_only" | "dynamic"; table?: string | null; node?: string | null; line?: number | null; ops?: string | null; note: string }
+interface DictStats { checked: number; both: number; dict_only: number; source_only: number; dynamic: number; guessed: number }
 interface Flow { node: string; unit: string; cursor: string; cursor_kind: string; from: string[]; to: string; ops: string; line: number; via: string; cursor_summary?: string | null }
 interface Finding { node: string; unit: string; line?: number | null; source: string; kind: string; message: string }
 interface Integrated {
   units: number; nodes: Node[]; edges: Edge[]; tables: TableRow[]; entries: string[]; cycles: string[][];
   unused: string[]; transactions: Record<string, string[]>; findings: Finding[]; flows?: Flow[]; overview?: Insight | null;
+  gaps?: Gap[]; dict?: DictStats | null;
 }
 type Progress =
   | { type: "event"; run: number; event: { type: string; key?: string; id?: string; done?: number; total?: number; status?: string; elapsed_ms?: number; message?: string | null; what?: string } }
   | { type: "fetch"; run: number; index: number; total: number; key: string; error?: string | null }
   | { type: "finished"; run: number; error?: string | null; units: number; nodes: number; tables: number; findings: number; dir: string };
 
-type View = "summary" | "calls" | "dfd" | "tables" | "findings" | "quality";
+type View = "summary" | "calls" | "dfd" | "tables" | "gaps" | "findings" | "quality";
 const keyOf = (u: UnitRef) => `${u.owner}.${u.name}.${u.unit_type.replace(/ /g, "_")}`;
 const when = (t?: number | null) => (t ? new Date(t * 1000).toLocaleString() : "");
 const short = (id: string) => id.split(".").slice(1).join(".");
+/** 쓰임의 근거 — 테이블 화면의 배지 */
+const CONF: Record<string, [string, string, string]> = {
+  ok: ["사전✓", "ok", "소스에서 찾았고 사전(ALL_DEPENDENCIES)에도 있습니다"],
+  src: ["소스만", "warn", "소스에서 찾았지만 사전에는 없습니다 — 실행 중 만드는 테이블, 동적 SQL 안의 이름, 또는 파서 오인일 수 있습니다"],
+  dict: ["사전만", "warn", "사전에는 있지만 소스에서 쓰는 곳을 찾지 못했습니다 — 연산을 모릅니다"],
+  llm: ["추정", "", "모델이 추정한 것 — 소스에서 직접 확인하지 못했습니다"],
+};
+const GAP_KIND: Record<Gap["kind"], string> = { dict_only: "사전에만", source_only: "소스에만", dynamic: "동적 SQL" };
 const TYPE_LABEL: Record<string, string> = { "PACKAGE BODY": "패키지", PROCEDURE: "프로시저", FUNCTION: "함수", TRIGGER: "트리거", "TYPE BODY": "타입" };
 
 export class AnalysisView {
@@ -122,6 +134,7 @@ export class AnalysisView {
     tab("calls", "호출 관계");
     tab("dfd", "데이터 흐름도");
     tab("tables", "테이블");
+    tab("gaps", "사전 대조");
     tab("findings", "확인할 것");
     tab("quality", "품질");
     nav.append(h("span", { class: "spacer" }), h("button", { class: "small", title: "저장된 조각 결과로 통합 분석을 다시 만든다 (모델 없이)", onclick: () => this.reload(true) }, "다시 통합"));
@@ -251,7 +264,7 @@ export class AnalysisView {
         this.statusEl.textContent = `[${this.unitIndex + 1}/${this.total}] ${short(e.key ?? "")} · 조각 ${e.done}/${e.total} ${e.status}${t}`;
         if (e.status === "failed" && e.message) this.statusEl.title = e.message;
       } else if (e.type === "rollup") {
-        this.statusEl.textContent = `[${this.unitIndex + 1}/${this.total}] 요약: ${e.what}`;
+        this.statusEl.textContent = e.key === "사전 대조" ? e.what ?? "" : `[${this.unitIndex + 1}/${this.total}] 요약: ${e.what}`;
       } else if (e.type === "unit_done") {
         const k = e.key!;
         const r = this.rows.find((x) => keyOf(x) === k);
@@ -309,6 +322,7 @@ export class AnalysisView {
     if (this.view === "calls") return this.renderCalls(g);
     if (this.view === "dfd") return void this.renderDfd(g);
     if (this.view === "tables") return this.renderTables(g);
+    if (this.view === "gaps") return this.renderGaps(g);
     if (this.view === "quality") return void this.renderQuality();
     return this.renderFindings(g);
   }
@@ -319,6 +333,12 @@ export class AnalysisView {
       h("div", { class: "an-stats" },
         stat("단위", g.units), stat("서브프로그램", g.nodes.length), stat("호출", g.edges.length), stat("못 푼 호출", unresolved),
         stat("테이블", g.tables.length), stat("시작점", g.entries.length), stat("순환", g.cycles.length), stat("확인할 것", g.findings.length)));
+    if (g.dict) {
+      const d = g.dict;
+      box.append(h("div", { class: "an-stats", title: "사전(ALL_DEPENDENCIES)과 파서가 찾은 테이블을 (단위, 테이블) 쌍으로 맞댄 결과" },
+        stat("사전 본 단위", d.checked), stat("사전·소스 모두", d.both), stat("사전에만", d.dict_only), stat("소스에만", d.source_only),
+        stat("동적 SQL", d.dynamic), stat("모델 추정", d.guessed)));
+    }
     if (g.overview) box.append(h("h3", {}, "전체 요약"), insightEl(g.overview));
     if (this.selectedUnit) {
       box.append(h("div", { class: "hint" }, "단위를 불러오는 중…"));
@@ -464,7 +484,11 @@ export class AnalysisView {
       this.tableFilter = input.value;
       tbody.replaceChildren(...g.tables.filter((t) => !q || t.table.includes(q)).slice(0, 500).map((t) => {
         const ops = (o: string) => Object.entries(t.by).filter(([, v]) => v.includes(o)).length;
-        const users = h("td", {}, ...Object.entries(t.by).map(([n, o]) => h("div", {}, h("code", {}, o.padEnd(4)), " ", n.endsWith("(전역)") ? short(n) : this.nodeLink(n))));
+        const users = h("td", {}, ...Object.entries(t.by).map(([n, o]) => {
+          const c = CONF[t.conf?.[n] ?? ""];
+          return h("div", {}, h("code", {}, o.padEnd(4)), " ", n.endsWith(")") ? short(n) : this.nodeLink(n),
+            c ? h("span", { class: `badge ${c[1]}`, title: c[2], style: "margin-left:4px" }, c[0]) : "");
+        }));
         return h("tr", {}, h("td", {}, h("strong", {}, t.table)), h("td", { class: "num" }, String(ops("C") || "")), h("td", { class: "num" }, String(ops("R") || "")),
           h("td", { class: "num" }, String(ops("U") || "")), h("td", { class: "num" }, String(ops("D") || "")), users,
           h("td", { class: "an-flow" }, ...(t.fed_from ?? []).map((x) => h("div", { title: flowsTo(g, t.table, x) }, `← ${x}`)), ...(t.feeds_into ?? []).map((x) => h("div", { class: "dim" }, `→ ${x}`))),
@@ -475,6 +499,35 @@ export class AnalysisView {
     fill();
     this.content.replaceChildren(h("div", { class: "an-pad" }, input,
       h("table", { class: "an-table" }, h("thead", {}, h("tr", {}, ...["테이블", "C", "R", "U", "D", "쓰는 곳", "커서 흐름", "영향 시작점"].map((x) => h("th", {}, x)))), tbody)));
+  }
+
+  private renderGaps(g: Integrated) {
+    const gaps = g.gaps ?? [];
+    const head = h("p", { class: "hint" },
+      "사전(ALL_DEPENDENCIES)은 단위가 참조하는 테이블을 확실히 알려 주지만 연산(C/R/U/D)은 모릅니다. 파서는 연산과 줄을 알지만 동적 SQL·동의어를 놓칠 수 있습니다. ",
+      "둘이 다른 곳만 모았습니다. 모델을 고르고 분석하면 이 부분만 모델에 물어 '추정'으로 채웁니다.");
+    if (!g.dict) {
+      this.content.replaceChildren(h("div", { class: "an-pad" }, head,
+        h("div", { class: "hint" }, "사전 정보가 없습니다. 이 버전에서 단위를 다시 분석하면 사전 의존성을 함께 읽습니다 (바뀌지 않은 조각은 모델에 다시 묻지 않습니다).")));
+      return;
+    }
+    const sel = h("select", {}, h("option", { value: "" }, `전체 ${gaps.length}`),
+      ...(Object.keys(GAP_KIND) as Gap["kind"][]).map((k) => h("option", { value: k }, `${GAP_KIND[k]} ${gaps.filter((x) => x.kind === k).length}`)));
+    const tbody = h("tbody", {});
+    const fill = () => {
+      tbody.replaceChildren(...gaps.filter((x) => !sel.value || x.kind === sel.value).slice(0, 1000).map((x) =>
+        h("tr", {},
+          h("td", {}, GAP_KIND[x.kind] ?? x.kind),
+          h("td", {}, x.table ? h("strong", {}, x.table) : h("span", { class: "dim" }, "(모름)")),
+          h("td", {}, x.node && g.nodes.some((n) => n.id === x.node) ? this.nodeLink(x.node) : short(x.node ?? x.unit)),
+          h("td", { class: "num" }, x.line ? String(x.line) : ""),
+          h("td", {}, x.ops ? h("span", {}, h("code", {}, x.ops), " ", h("span", { class: "badge", title: CONF.llm[2] }, "추정")) : ""),
+          h("td", {}, x.note))));
+    };
+    sel.onchange = fill;
+    fill();
+    this.content.replaceChildren(h("div", { class: "an-pad" }, head, sel,
+      h("table", { class: "an-table" }, h("thead", {}, h("tr", {}, ...["종류", "테이블", "어디", "줄", "연산", "내용"].map((x) => h("th", {}, x)))), tbody)));
   }
 
   /** 모델 답의 품질 — 저장된 결과만 읽는다 */

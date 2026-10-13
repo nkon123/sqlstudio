@@ -9,14 +9,17 @@
 
 export interface DfdSourceNode { id: string; kind: string; summary?: string | null; signature?: string; trigger_on?: string | null; trigger_events?: string | null; commits?: boolean }
 export interface DfdSourceEdge { from: string; to: string; resolved: boolean; lines: number[] }
-export interface DfdSourceTable { table: string; by: Record<string, string>; fed_from?: string[]; feeds_into?: string[] }
+/** conf: 노드 → ok (사전·소스) / src (소스만) / dict (사전만, 연산 모름) / llm (모델 추정) */
+export interface DfdSourceTable { table: string; by: Record<string, string>; conf?: Record<string, string>; fed_from?: string[]; feeds_into?: string[] }
 export interface DfdSource { nodes: DfdSourceNode[]; edges: DfdSourceEdge[]; tables: DfdSourceTable[] }
 
 export type NodeType = "proc" | "trig" | "table";
-export type EdgeKind = "read" | "write" | "call" | "trig" | "flow";
+/** use: 사전에는 쓴다고 나오는데 연산을 모름 — 입력 쪽으로 그린다 */
+export type EdgeKind = "read" | "write" | "call" | "trig" | "flow" | "use";
 
 export interface BaseNode { id: string; type: NodeType; label: string; summary?: string; commits?: boolean }
-export interface BaseEdge { s: string; t: string; kind: EdgeKind; label: string; lines?: number[] }
+/** guess: 소스에서 직접 확인하지 못한 것 (사전·모델 추정) */
+export interface BaseEdge { s: string; t: string; kind: EdgeKind; label: string; lines?: number[]; guess?: boolean }
 export interface Base { nodes: Map<string, BaseNode>; edges: BaseEdge[]; owner: string }
 
 export interface ViewOptions {
@@ -36,7 +39,7 @@ export interface ViewOptions {
   direction?: "both" | "up" | "down";
 }
 export interface ViewNode { id: string; ref: string; type: NodeType; label: string; lane: number; copy: boolean; center: boolean; more: boolean }
-export interface ViewEdge { id: string; source: string; target: string; kind: EdgeKind; label: string }
+export interface ViewEdge { id: string; source: string; target: string; kind: EdgeKind; label: string; guess?: boolean }
 export interface View { nodes: ViewNode[]; edges: ViewEdge[] }
 
 export const LANES = ["입력 테이블", "처리", "출력 테이블"];
@@ -81,9 +84,12 @@ export function buildBase(g: DfdSource, byPackage = false): Base {
     add(t.table, "table");
     for (const [raw, ops] of Object.entries(t.by)) {
       const n = add(raw, "proc"); // (전역)·(초기화) 처럼 노드 목록에 없는 것
-      if (ops.includes("R")) edges.push({ s: t.table, t: n, kind: "read", label: "R" });
-      const w = ops.replace(/R/g, "");
-      if (w) edges.push({ s: n, t: t.table, kind: "write", label: w.split("").join(",") });
+      const c = t.conf?.[raw];
+      const guess = c === "llm" || c === "dict" ? true : undefined;
+      if (ops.includes("R")) edges.push({ s: t.table, t: n, kind: "read", label: "R", guess });
+      const w = ops.replace(/[^CUD]/g, "");
+      if (w) edges.push({ s: n, t: t.table, kind: "write", label: w.split("").join(","), guess });
+      if (!/[CRUD]/.test(ops)) edges.push({ s: t.table, t: n, kind: "use", label: "?", guess: true });
     }
   }
   for (const e of g.edges) {
@@ -113,6 +119,7 @@ export function buildBase(g: DfdSource, byPackage = false): Base {
     const k = `${e.s}|${e.t}|${e.kind}`;
     const m = merged.get(k);
     if (!m) { merged.set(k, { ...e }); continue; }
+    if (!e.guess) m.guess = undefined; // 하나라도 소스에서 확인했으면 확인된 선
     const labels = new Set([...m.label.split(","), ...e.label.split(",")].filter(Boolean));
     m.label = ["C", "R", "U", "D"].filter((x) => labels.has(x)).concat([...labels].filter((x) => !"CRUD".includes(x))).join(",");
     if (e.lines) m.lines = [...new Set([...(m.lines ?? []), ...e.lines])].sort((a, b) => a - b);
@@ -197,9 +204,10 @@ export function buildView(b: Base, o: ViewOptions): View {
     const m = merged.get(k);
     if (m) {
       for (const l of e.label.split(",")) if (l && !m.label.split(",").includes(l)) m.label = m.label ? `${m.label},${l}` : l;
+      if (!e.guess) m.guess = undefined;
       continue;
     }
-    const v: ViewEdge = { id: `e${out.length}`, source: s, target: e.t, kind: e.kind, label: e.label };
+    const v: ViewEdge = { id: `e${out.length}`, source: s, target: e.t, kind: e.kind, label: e.label, guess: e.guess };
     merged.set(k, v);
     out.push(v);
   }

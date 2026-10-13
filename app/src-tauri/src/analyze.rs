@@ -35,19 +35,13 @@ fn store_for(st: &AppState, id: u64) -> R<Store> {
     Store::open(sqls_analyze::default_dir(&p)).map_err(|e| ErrView::msg("io", e.to_string()))
 }
 
-/// 메타 세션 — 접속 직후면 잠깐 기다린다
+/// 메타 세션 — 접속 직후·다시 접속 중이면 잠깐 기다린다
 async fn meta_session(st: &AppState, id: u64) -> R<Arc<crate::complete::MetaHub>> {
     let hub = hub_for(st, id)?;
-    for _ in 0..100 {
-        if hub.session().is_some() {
-            return Ok(hub);
-        }
-        if hub.status().phase == "error" {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    if hub.wait_session(std::time::Duration::from_secs(10)).await.is_some() {
+        return Ok(hub);
     }
-    Err(ErrView::msg("session_closed", "사전 조회 세션이 아직 준비되지 않았습니다"))
+    Err(ErrView::msg("session_closed", "사전 조회 세션이 준비되지 않았습니다 (접속 중이거나 다시 접속하는 중)"))
 }
 
 #[derive(Serialize)]
@@ -67,10 +61,10 @@ pub struct UnitRow {
 #[tauri::command]
 pub async fn analysis_list(st: State<'_, AppState>, id: u64, owner: Option<String>, name_like: Option<String>) -> R<Vec<UnitRow>> {
     let hub = meta_session(&st, id).await?;
-    let s = hub.session().unwrap();
+    let s = hub.session().ok_or_else(|| ErrView::msg("session_closed", "사전 조회 세션이 끊겼습니다"))?;
     let owner = owner.filter(|o| !o.trim().is_empty()).unwrap_or_else(|| s.info().user.clone());
     let pat = name_like.filter(|p| !p.trim().is_empty()).map(|p| if p.contains('%') { p } else { format!("%{p}%") });
-    let refs = source::list_units(s, &owner, &[], pat.as_deref()).await?;
+    let refs = source::list_units(&s, &owner, &[], pat.as_deref()).await?;
     let store = store_for(&st, id)?;
     Ok(refs
         .into_iter()
@@ -139,24 +133,39 @@ pub async fn analysis_start(
             let emit = emit.clone();
             Arc::new(move |e: Event| emit(Progress::Event { run, event: e }))
         };
-        let s = hub.session().unwrap();
         let total = units.len();
         let mut stop: Option<String> = None;
+        let mut deps = sqls_analyze::deps::Fetcher::default();
         for (i, u) in units.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 stop = Some("중지했습니다".into());
                 break;
             }
             let key = sqls_analyze::chunk::unit_key(&u.owner, &u.name, &u.unit_type);
-            let (src, spec) = match source::fetch(s, u).await {
+            // 접속이 끊겼으면(방화벽·DB 재시작) 다시 접속해 이 단위부터 이어 간다. 그래도 안 되면 멈춘다 — 남은 단위를 하나씩 실패시키지 않는다
+            let mut r = match hub.session() {
+                Some(s) => source::fetch_unit(&s, u, &store, &mut deps).await,
+                None => Err(sqls_core::Error::SessionClosed),
+            };
+            if matches!(&r, Err(e) if e.is_connection_lost()) {
+                emit(Progress::Event { run, event: Event::Rollup { key: "접속".into(), what: "DB 접속이 끊겼습니다 — 다시 접속하는 중…".into() } });
+                r = match hub.reconnect().await {
+                    Some(s) => source::fetch_unit(&s, u, &store, &mut deps).await,
+                    None => Err(sqls_core::Error::SessionClosed),
+                };
+            }
+            let (src, spec) = match r {
                 Ok(x) => x,
+                Err(e) if e.is_connection_lost() => {
+                    stop = Some(format!("DB 에 다시 접속하지 못해 멈췄습니다 ({e}). 다시 시작하면 분석한 것은 건너뛰고 이어서 합니다."));
+                    break;
+                }
                 Err(e) => {
                     emit(Progress::Fetch { run, index: i, total, key, error: Some(e.to_string()) });
                     continue;
                 }
             };
             emit(Progress::Fetch { run, index: i, total, key, error: None });
-            sqls_analyze::deps::fetch_into(s, &store, &u.owner, &u.name, &u.unit_type).await;
             let llm = cfg.as_ref().map(|c| Llm { client: &client, cfg: c });
             if let Err(e) = analyze_unit(&store, &src, spec.as_deref(), llm, &options, on.clone(), cancel.clone()).await {
                 // 모델 서버가 죽었으면 나머지도 실패한다 — 멈춘다

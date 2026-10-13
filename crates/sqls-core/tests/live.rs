@@ -409,3 +409,33 @@ async fn batch_insert() {
     assert!(matches!(ro.batch(&sql, vec![row("9", Some("R"), "2026-10-13 00:00:00")], true).await, Err(Error::ReadOnly(_))));
     let _ = s.execute(&format!("drop table {t} purge"), Default::default()).await;
 }
+
+/// 서버에서 세션을 죽이면: 쉬는 동안 keepalive ping 이 알아채고, 호출도 '끊김' 으로 실패한다
+#[tokio::test]
+#[ignore]
+async fn keepalive_notices_killed_session() {
+    let mut sp = spec(false);
+    sp.keepalive = Some(Duration::from_secs(1));
+    let victim = Session::connect(sp).await.unwrap();
+    // 쉬는 동안 ping 해도 멀쩡하다
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(!victim.is_lost());
+    exec(&victim, "SELECT 1 FROM dual").await;
+
+    let admin = Session::connect(spec(false)).await.unwrap();
+    let sid = victim.info().sid.to_string();
+    let r = admin.query("SELECT serial# FROM v$session WHERE sid = :s", vec![("S".into(), Some(sid.clone()))], 1).await.unwrap();
+    let serial = r.rows[0][0].clone().unwrap();
+    exec(&admin, &format!("ALTER SYSTEM KILL SESSION '{sid},{serial}' IMMEDIATE")).await;
+
+    let mut sig = victim.lost_signal();
+    tokio::time::timeout(Duration::from_secs(20), sig.wait_for(|v| *v)).await.expect("keepalive 가 끊김을 알아채야 한다").unwrap();
+    let e = victim.execute("SELECT 1 FROM dual", ExecOptions::default()).await.unwrap_err();
+    assert!(e.is_connection_lost(), "{e:?}");
+    // 같은 정보로 다시 접속
+    let again = victim.reopen().await.unwrap();
+    assert!(!again.is_lost() && again.info().sid != 0);
+    exec(&again, "SELECT 1 FROM dual").await;
+    again.close();
+    admin.close();
+}

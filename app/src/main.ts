@@ -52,6 +52,8 @@ class Tab {
   eol: "\n" | "\r\n" = "\n";
   dirty = false;
   txnPending = false;
+  /** 끊긴 접속을 다시 여는 중 */
+  recovering = false;
   running = false;
   runStarted = 0;
   lastError: string | undefined;
@@ -442,6 +444,11 @@ class App {
       if (this.active?.conn?.profile.toUpperCase() !== e.payload.profile.toUpperCase()) return;
       this.showCompletionStatus(e.payload);
     });
+    // 쉬는 동안 접속이 끊겼으면 (keepalive 가 알아챔) 실행하기 전에 미리 다시 접속한다
+    listen<{ id: number }>("session-lost", (e) => {
+      const t = this.tabs.find((x) => x.conn?.id === e.payload.id);
+      if (t && !t.running) void this.recover(t, "쉬는 동안 DB 접속이 끊겼습니다");
+    });
     const info = await api.appInfo();
     void loadSnippets(info.config_path);
     this.statusLeft.textContent = `SQLStudio ${info.version} · 설정: ${info.config_path}`;
@@ -569,6 +576,48 @@ class App {
     }
   }
 
+  /** 끊긴 탭을 같은 프로필로 다시 접속한다 — 묻지 않고 (비밀번호는 기억한 것). 실행은 다시 하지 않는다 */
+  private async recover(t: Tab, why: string) {
+    const old = t.conn;
+    if (!old || t.recovering) return;
+    const hadTxn = t.txnPending;
+    t.recovering = true;
+    try {
+      await api.abandon(old.id).catch(() => {});
+      t.conn = null;
+      t.txnPending = false;
+      t.refreshTitle();
+      this.refresh();
+      t.log(`${why} — 다시 접속합니다…`, "warn");
+      this.status(`${old.profile} 다시 접속 중…`);
+      for (const wait of [0, 2000, 5000]) {
+        if (wait) await new Promise((r) => setTimeout(r, wait));
+        if (t.conn || !this.tabs.includes(t)) return; // 그새 사용자가 접속했거나 탭을 닫았다
+        try {
+          const c = await api.connect(old.profile);
+          t.conn = { ...c, profile: old.profile };
+          t.refreshTitle();
+          this.refresh();
+          if (t === this.active) this.loadBrowser();
+          t.log(hadTxn
+            ? "다시 접속했습니다. 커밋하지 않았던 변경은 서버에서 롤백되었습니다 — 확인하고 다시 실행하세요."
+            : "다시 접속했습니다. 세션 설정(ALTER SESSION·패키지 변수)은 처음으로 돌아갔습니다. 필요하면 다시 실행하세요.", hadTxn ? "err" : "warn");
+          toast(hadTxn ? "다시 접속함 — 커밋하지 않은 변경은 롤백됨" : "DB 에 다시 접속했습니다", hadTxn ? "error" : "info", hadTxn ? 8000 : 3000);
+          this.status(`${old.profile} 다시 접속됨`);
+          return;
+        } catch (e) {
+          const err = errOf(e);
+          if (err.kind === "password_required" || err.ora_code === 1017) break;
+          t.log(`다시 접속 실패: ${err.message}`, "err");
+        }
+      }
+      this.status("접속 끊김");
+      toast("DB 에 다시 접속하지 못했습니다 — 네트워크를 확인하고 접속하세요", "error", 8000);
+    } finally {
+      t.recovering = false;
+    }
+  }
+
   private async disconnectActive() {
     if (this.active) await this.disconnect(this.active);
   }
@@ -691,12 +740,8 @@ class App {
       return;
     }
     if (err.kind === "connection_lost" || err.kind === "session_closed") {
-      t.log(`접속이 끊겼습니다: ${err.message}`, "err");
-      t.conn = null;
-      t.txnPending = false;
-      t.refreshTitle();
-      this.refresh();
-      toast("접속이 끊겼습니다 — 다시 접속하세요", "error", 6000);
+      t.log(err.message.includes("끊겼") ? err.message : `접속이 끊겼습니다: ${err.message}`, "err");
+      void this.recover(t, "실행 중 DB 접속이 끊겼습니다");
       return;
     }
     t.lastError = `${err.message}\n\n실행한 SQL:\n${sqlText}`;
@@ -718,6 +763,7 @@ class App {
     const run = async (confirmed: boolean): Promise<void> => {
       try {
         let firstErrorLine = 0;
+        let lost = false;
         const s = await api.executeScript(t.conn!.id, script, false, confirmed, (ev) => {
           if (ev.event === "started") {
             this.status(`스크립트 ${ev.index + 1}/${ev.total} 실행 중 (${ev.line}행)`);
@@ -727,6 +773,7 @@ class App {
             for (const l of ev.output) t.log(`    ${l}`);
           } else if (ev.event === "failed") {
             t.log(`    ${ev.error.message}`, "err");
+            if (ev.error.kind === "connection_lost" || ev.error.kind === "session_closed") lost = true;
             if (!firstErrorLine) {
               firstErrorLine = ev.line;
               t.lastError = ev.error.message;
@@ -738,6 +785,7 @@ class App {
         t.txnPending = s.txn_pending;
         t.log(`── 완료: ${s.ok}개 성공, ${s.failed}개 실패${s.stopped ? ", 중단됨" : ""}${s.txn_pending ? " — 커밋 전" : ""}`, s.failed ? "err" : "ok");
         this.status(`스크립트: ${s.ok}/${s.total} 성공`);
+        if (lost) void this.recover(t, "스크립트 실행 중 DB 접속이 끊겼습니다");
         if (firstErrorLine) {
           const doc = t.editor.view.state.doc;
           const baseLine = doc.lineAt(scriptFrom).number - 1;
@@ -881,13 +929,9 @@ class App {
         "이 세션을 버리고 새로 접속할까요? 커밋하지 않은 변경은 롤백되고, 서버의 SQL 은 끝날 때까지 돌 수 있습니다.",
         "버리고 다시 접속");
       if (!ok || !t.running || t.conn?.id !== id) return;
-      const profile = t.conn.profile;
-      await api.abandon(id).catch(() => {});
-      t.conn = null;
       t.running = false;
-      t.txnPending = false;
-      t.log("세션을 버렸습니다", "warn");
-      await this.connect(t, profile);
+      // 실행 중이던 호출이 '세션 닫힘' 으로 끝나며 같은 복구를 부를 수 있다 — recover 는 한 번만 돈다
+      await this.recover(t, "세션을 버렸습니다");
     }, 5000);
   }
 
@@ -1459,7 +1503,7 @@ class App {
   private showCompletionStatus(s: { phase: string; objects: number; columns: number; error?: string | null }) {
     const label: Record<string, string> = {
       connecting: "자동완성 준비 중…", objects: "자동완성: 객체 읽음", columns: "자동완성: 컬럼 읽음",
-      synonyms: "자동완성: 동의어 읽음", keys: "자동완성: 키 읽음", ready: "자동완성", error: "자동완성 꺼짐",
+      synonyms: "자동완성: 동의어 읽음", keys: "자동완성: 키 읽음", ready: "자동완성", reconnecting: "자동완성: 다시 접속 중…", error: "자동완성 꺼짐",
     };
     const n = s.objects ? ` · 객체 ${s.objects.toLocaleString()} · 컬럼 ${s.columns.toLocaleString()}` : "";
     this.compBadge.textContent = `${label[s.phase] ?? s.phase}${n}`;

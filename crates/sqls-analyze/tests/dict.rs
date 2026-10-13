@@ -146,5 +146,15 @@ async fn dictionary_compare_and_supplement() {
     let report = std::fs::read_to_string(dir.join("integrated/report.md")).unwrap();
     assert!(report.contains("## 사전 대조") && report.contains("R (추정)"), "{report}");
     assert!(dir.join("integrated/gaps.json").exists() && dir.join("integrated/supplement.json").exists());
+
+    // 사전이 0건인데 소스에 테이블이 있으면 (권한·INVALID) 대조하지 않고 알린다 — 전부 '소스만' 으로 몰지 않는다
+    let other = UnitSource { owner: "APP".into(), name: "LOG_PKG".into(), unit_type: "PACKAGE BODY".into(), text: "PACKAGE BODY log_pkg IS\n  PROCEDURE w IS\n  BEGIN\n    INSERT INTO app_log (id) VALUES (1);\n  END w;\nEND log_pkg;".into() };
+    let u2 = analyze_unit(&store, &other, None, None, &Options::default(), Arc::new(|_: Event| {}), cancel.clone()).await.unwrap();
+    store.write_deps(&UnitDeps { key: u2.key.clone(), fetched_at: 0, deps: vec![] }).unwrap();
+    let (g, _) = sqls_analyze::integrate::write_all(&store, None).unwrap();
+    let d = g.dict.as_ref().unwrap();
+    assert_eq!((d.checked, d.unusable, d.source_only), (1, 1, 1));
+    assert!(g.gaps.iter().any(|x| x.kind == "no_dict" && x.unit == u2.key));
+    assert!(row("APP.STOCK").conf.len() == 1 && g.tables.iter().find(|r| r.table == "APP.APP_LOG").unwrap().conf.is_empty());
     std::fs::remove_dir_all(&dir).unwrap();
 }

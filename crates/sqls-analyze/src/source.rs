@@ -49,6 +49,16 @@ pub async fn list_units(s: &Session, owner: &str, types: &[String], name_like: O
         .collect())
 }
 
+/// 소스와 사전 의존성을 함께 읽는다. 의존성은 못 읽어도 되지만(권한 등), 접속이 끊겼으면 오류로 돌려
+/// 부르는 쪽이 다시 접속해 이 단위를 다시 읽게 한다.
+pub async fn fetch_unit(s: &Session, u: &UnitRef, store: &crate::store::Store, deps: &mut crate::deps::Fetcher) -> sqls_core::Result<(UnitSource, Option<String>)> {
+    let x = fetch(s, u).await?;
+    match deps.fetch_into(s, store, &u.owner, &u.name, &u.unit_type).await {
+        Some(e) if e.is_connection_lost() => Err(e),
+        _ => Ok(x),
+    }
+}
+
 /// 단위 소스 + (패키지·형식 본문이면) 명세 소스
 pub async fn fetch(s: &Session, u: &UnitRef) -> sqls_core::Result<(UnitSource, Option<String>)> {
     let lines = sqls_core::debug::source(s, &u.owner, &u.name, &u.unit_type).await?;

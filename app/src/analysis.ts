@@ -45,8 +45,8 @@ interface Node { id: string; unit: string; path: string; kind: string; signature
 interface Edge { from: string; to: string; resolved: boolean; external?: string | null; lines: number[] }
 interface TableRow { table: string; by: Record<string, string>; conf?: Record<string, string>; impacted_entries: string[]; fed_from?: string[]; feeds_into?: string[] }
 /** 사전(ALL_DEPENDENCIES)과 소스가 다른 곳 */
-interface Gap { unit: string; kind: "dict_only" | "source_only" | "dynamic"; table?: string | null; node?: string | null; line?: number | null; ops?: string | null; note: string }
-interface DictStats { checked: number; both: number; dict_only: number; source_only: number; dynamic: number; guessed: number }
+interface Gap { unit: string; kind: "dict_only" | "source_only" | "dynamic" | "no_dict"; table?: string | null; node?: string | null; line?: number | null; ops?: string | null; note: string }
+interface DictStats { checked: number; unusable?: number; both: number; dict_only: number; source_only: number; dynamic: number; guessed: number }
 interface Flow { node: string; unit: string; cursor: string; cursor_kind: string; from: string[]; to: string; ops: string; line: number; via: string; cursor_summary?: string | null }
 interface Finding { node: string; unit: string; line?: number | null; source: string; kind: string; message: string }
 interface Integrated {
@@ -70,7 +70,7 @@ const CONF: Record<string, [string, string, string]> = {
   dict: ["사전만", "warn", "사전에는 있지만 소스에서 쓰는 곳을 찾지 못했습니다 — 연산을 모릅니다"],
   llm: ["추정", "", "모델이 추정한 것 — 소스에서 직접 확인하지 못했습니다"],
 };
-const GAP_KIND: Record<Gap["kind"], string> = { dict_only: "사전에만", source_only: "소스에만", dynamic: "동적 SQL" };
+const GAP_KIND: Record<Gap["kind"], string> = { dict_only: "사전에만", source_only: "소스에만", dynamic: "동적 SQL", no_dict: "사전 없음" };
 const TYPE_LABEL: Record<string, string> = { "PACKAGE BODY": "패키지", PROCEDURE: "프로시저", FUNCTION: "함수", TRIGGER: "트리거", "TYPE BODY": "타입" };
 
 export class AnalysisView {
@@ -264,7 +264,7 @@ export class AnalysisView {
         this.statusEl.textContent = `[${this.unitIndex + 1}/${this.total}] ${short(e.key ?? "")} · 조각 ${e.done}/${e.total} ${e.status}${t}`;
         if (e.status === "failed" && e.message) this.statusEl.title = e.message;
       } else if (e.type === "rollup") {
-        this.statusEl.textContent = e.key === "사전 대조" ? e.what ?? "" : `[${this.unitIndex + 1}/${this.total}] 요약: ${e.what}`;
+        this.statusEl.textContent = e.key === "사전 대조" || e.key === "접속" ? e.what ?? "" : `[${this.unitIndex + 1}/${this.total}] 요약: ${e.what}`;
       } else if (e.type === "unit_done") {
         const k = e.key!;
         const r = this.rows.find((x) => keyOf(x) === k);
@@ -336,7 +336,7 @@ export class AnalysisView {
     if (g.dict) {
       const d = g.dict;
       box.append(h("div", { class: "an-stats", title: "사전(ALL_DEPENDENCIES)과 파서가 찾은 테이블을 (단위, 테이블) 쌍으로 맞댄 결과" },
-        stat("사전 본 단위", d.checked), stat("사전·소스 모두", d.both), stat("사전에만", d.dict_only), stat("소스에만", d.source_only),
+        stat("사전 본 단위", d.checked), ...(d.unusable ? [stat("사전 없음", d.unusable)] : []), stat("사전·소스 모두", d.both), stat("사전에만", d.dict_only), stat("소스에만", d.source_only),
         stat("동적 SQL", d.dynamic), stat("모델 추정", d.guessed)));
     }
     if (g.overview) box.append(h("h3", {}, "전체 요약"), insightEl(g.overview));

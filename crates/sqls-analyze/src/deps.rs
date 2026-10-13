@@ -50,51 +50,181 @@ pub struct UnitDeps {
     pub deps: Vec<Dep>,
 }
 
-/// 단위 하나의 의존성. 동의어는 대상과 그 종류까지 푼다. 자기 명세(패키지 본문 → 패키지)는 뺀다.
-pub async fn fetch(s: &Session, owner: &str, name: &str, unit_type: &str) -> sqls_core::Result<Vec<Dep>> {
-    let sql = "SELECT d.referenced_owner, d.referenced_name, d.referenced_type, d.referenced_link_name, \
-                      sy.table_owner, sy.table_name, \
-                      (SELECT MIN(o.object_type) FROM all_objects o WHERE o.owner = sy.table_owner AND o.object_name = sy.table_name \
-                          AND o.object_type IN ('TABLE','VIEW','MATERIALIZED VIEW','SEQUENCE','PACKAGE','PROCEDURE','FUNCTION','TYPE')) \
-                 FROM all_dependencies d \
-                 LEFT JOIN all_synonyms sy ON d.referenced_type = 'SYNONYM' AND sy.owner = d.referenced_owner AND sy.synonym_name = d.referenced_name \
-                WHERE d.owner = :o AND d.name = :n AND d.type = :t";
-    let page = s
-        .query(sql, vec![("O".into(), Some(owner.to_uppercase())), ("N".into(), Some(name.to_uppercase())), ("T".into(), Some(unit_type.to_uppercase()))], 10_000)
-        .await?;
-    let cell = |r: &Vec<Option<String>>, i: usize| r.get(i).cloned().flatten();
-    let mut out: Vec<Dep> = Vec::new();
-    for r in &page.rows {
-        let (ro, rn, rt) = (cell(r, 0).unwrap_or_default(), cell(r, 1).unwrap_or_default(), cell(r, 2).unwrap_or_default());
-        // 자기 자신·자기 명세, 오라클 기본 패키지
-        if ro == owner.to_uppercase() && rn == name.to_uppercase() {
-            continue;
-        }
-        if ro == "SYS" && matches!(rn.as_str(), "STANDARD" | "DBMS_STANDARD" | "SYS_STUB_FOR_PURITY_ANALYSIS" | "PLITBLM") {
-            continue;
-        }
-        let dep = match (rt.as_str(), cell(r, 4), cell(r, 5)) {
-            ("SYNONYM", Some(to), Some(tn)) => Dep { owner: to, name: tn, kind: cell(r, 6).unwrap_or_else(|| "SYNONYM".into()), via: Some(format!("{ro}.{rn}")), link: cell(r, 3) },
-            _ => Dep { owner: ro, name: rn, kind: rt, via: None, link: cell(r, 3) },
-        };
-        if !out.contains(&dep) {
-            out.push(dep);
-        }
-    }
-    out.sort_by(|a, b| (a.kind.as_str(), a.owner.as_str(), a.name.as_str()).cmp(&(b.kind.as_str(), b.owner.as_str(), b.name.as_str())));
-    Ok(out)
+/// 동의어의 대상 (owner, 이름, DB 링크)
+type SynTarget = (String, String, Option<String>);
+
+/// 동의어·객체 종류를 기억해 두는 조회기 — 한 번 분석하는 동안 여러 단위가 같은 동의어(PUBLIC 등)를 써도 한 번만 묻는다
+#[derive(Default)]
+pub struct Fetcher {
+    /// (owner, 동의어) → (대상 owner, 대상 이름, DB 링크). 못 찾으면 None
+    syn: HashMap<(String, String), Option<SynTarget>>,
+    /// (owner, 이름) → 객체 종류. 못 보면 None (권한이 없거나 없는 객체)
+    kind: HashMap<(String, String), Option<String>>,
 }
 
-/// 가져와서 단위 폴더에 저장한다. 못 가져와도 분석은 이어 간다 (권한이 없는 사전 등) — 오류 문구를 돌려준다
-pub async fn fetch_into(s: &Session, store: &Store, owner: &str, name: &str, unit_type: &str) -> Option<String> {
-    let key = crate::chunk::unit_key(owner, name, unit_type);
-    match fetch(s, owner, name, unit_type).await {
-        Ok(deps) => store.write_deps(&UnitDeps { key, fetched_at: crate::store::now(), deps }).err().map(|e| e.to_string()),
-        Err(e) => {
-            tracing::warn!("{owner}.{name} 의존성 조회 실패: {e}");
-            Some(e.to_string())
+/// 동의어가 동의어를 가리킬 때 따라가는 최대 단계
+const MAX_HOPS: usize = 8;
+/// IN 목록 하나에 넣는 쌍 수
+const IN_CHUNK: usize = 100;
+
+fn pair_in(cols: &str, pairs: &[(String, String)]) -> (String, Vec<(String, Option<String>)>) {
+    let mut list = Vec::new();
+    let mut binds = Vec::new();
+    for (i, (o, n)) in pairs.iter().enumerate() {
+        list.push(format!("(:O{i}, :N{i})"));
+        binds.push((format!("O{i}"), Some(o.clone())));
+        binds.push((format!("N{i}"), Some(n.clone())));
+    }
+    (format!("({cols}) IN ({})", list.join(", ")), binds)
+}
+
+/// 같은 이름에 종류가 여럿이면 (PACKAGE / PACKAGE BODY 등) 데이터 쪽을 먼저
+fn kind_rank(k: &str) -> u8 {
+    match k {
+        "TABLE" => 0,
+        "VIEW" => 1,
+        "MATERIALIZED VIEW" => 2,
+        "SYNONYM" => 9,
+        _ => 5,
+    }
+}
+
+impl Fetcher {
+    /// 단위 하나의 의존성. 동의어는 끝까지 따라가 대상과 그 종류로 바꾼다. 자기 명세(패키지 본문 → 패키지)·STANDARD 는 뺀다.
+    pub async fn fetch(&mut self, s: &Session, owner: &str, name: &str, unit_type: &str) -> sqls_core::Result<Vec<Dep>> {
+        let (owner, name) = (owner.to_uppercase(), name.to_uppercase());
+        let sql = "SELECT referenced_owner, referenced_name, referenced_type, referenced_link_name \
+                     FROM all_dependencies WHERE owner = :o AND name = :n AND type = :t";
+        let page = s.query(sql, vec![("O".into(), Some(owner.clone())), ("N".into(), Some(name.clone())), ("T".into(), Some(unit_type.to_uppercase()))], 10_000).await?;
+        let cell = |r: &Vec<Option<String>>, i: usize| r.get(i).cloned().flatten();
+        let mut raw: Vec<(String, String, String, Option<String>)> = Vec::new();
+        for r in &page.rows {
+            let (ro, rn, rt) = (cell(r, 0).unwrap_or_default(), cell(r, 1).unwrap_or_default(), cell(r, 2).unwrap_or_default());
+            if ro == owner && rn == name {
+                continue; // 자기 명세
+            }
+            if ro == "SYS" && matches!(rn.as_str(), "STANDARD" | "DBMS_STANDARD" | "SYS_STUB_FOR_PURITY_ANALYSIS" | "PLITBLM") {
+                continue;
+            }
+            raw.push((ro, rn, rt, cell(r, 3)));
+        }
+        let syns: Vec<(String, String)> = raw.iter().filter(|r| r.2 == "SYNONYM" && r.3.is_none()).map(|r| (r.0.clone(), r.1.clone())).collect();
+        self.resolve(s, &syns).await?;
+
+        let mut out: Vec<Dep> = Vec::new();
+        for (ro, rn, rt, link) in raw {
+            let dep = if rt == "SYNONYM" && link.is_none() {
+                self.follow(&ro, &rn)
+            } else {
+                Dep { owner: ro, name: rn, kind: rt, via: None, link }
+            };
+            if !out.contains(&dep) {
+                out.push(dep);
+            }
+        }
+        out.sort_by(|a, b| (a.kind.as_str(), a.owner.as_str(), a.name.as_str()).cmp(&(b.kind.as_str(), b.owner.as_str(), b.name.as_str())));
+        Ok(out)
+    }
+
+    /// 동의어를 끝까지 따라간다. 못 풀면 동의어 그대로 (종류 SYNONYM — 비교하지 않는다)
+    fn follow(&self, o: &str, n: &str) -> Dep {
+        let start = format!("{o}.{n}");
+        let unresolved = || Dep { owner: o.to_string(), name: n.to_string(), kind: "SYNONYM".into(), via: None, link: None };
+        let mut cur = (o.to_string(), n.to_string());
+        for _ in 0..MAX_HOPS {
+            let Some(Some((to, tn, link))) = self.syn.get(&cur) else { return unresolved() };
+            if link.is_some() {
+                return Dep { owner: to.clone(), name: tn.clone(), kind: "REMOTE".into(), via: Some(start), link: link.clone() };
+            }
+            match self.kind.get(&(to.clone(), tn.clone())).cloned().flatten() {
+                Some(k) if k == "SYNONYM" => cur = (to.clone(), tn.clone()),
+                Some(k) => return Dep { owner: to.clone(), name: tn.clone(), kind: k, via: Some(start), link: None },
+                // 대상을 볼 권한이 없다 — 이름은 알지만 종류를 모른다
+                None => return Dep { owner: to.clone(), name: tn.clone(), kind: "UNKNOWN".into(), via: Some(start), link: None },
+            }
+        }
+        unresolved()
+    }
+
+    /// 동의어들의 대상과 대상의 종류를 묶어서 읽는다. 대상이 또 동의어면 다음 단계로
+    async fn resolve(&mut self, s: &Session, start: &[(String, String)]) -> sqls_core::Result<()> {
+        let mut todo: Vec<(String, String)> = start.iter().filter(|k| !self.syn.contains_key(*k)).cloned().collect();
+        todo.sort();
+        todo.dedup();
+        for _ in 0..MAX_HOPS {
+            if todo.is_empty() {
+                break;
+            }
+            for chunk in todo.chunks(IN_CHUNK) {
+                for k in chunk {
+                    self.syn.insert(k.clone(), None);
+                }
+                let (cond, binds) = pair_in("owner, synonym_name", chunk);
+                let page = s.query(&format!("SELECT owner, synonym_name, table_owner, table_name, db_link FROM all_synonyms WHERE {cond}"), binds, 10_000).await?;
+                for r in &page.rows {
+                    let g = |i: usize| r.get(i).cloned().flatten();
+                    if let (Some(o), Some(n), Some(to), Some(tn)) = (g(0), g(1), g(2), g(3)) {
+                        self.syn.insert((o, n), Some((to, tn, g(4))));
+                    }
+                }
+            }
+            // 대상의 종류
+            let mut targets: Vec<(String, String)> = todo
+                .iter()
+                .filter_map(|k| self.syn.get(k).cloned().flatten())
+                .filter(|(_, _, link)| link.is_none())
+                .map(|(o, n, _)| (o, n))
+                .filter(|k| !self.kind.contains_key(k))
+                .collect();
+            targets.sort();
+            targets.dedup();
+            for chunk in targets.chunks(IN_CHUNK) {
+                for k in chunk {
+                    self.kind.insert(k.clone(), None);
+                }
+                let (cond, binds) = pair_in("owner, object_name", chunk);
+                let page = s
+                    .query(
+                        &format!(
+                            "SELECT owner, object_name, object_type FROM all_objects WHERE {cond} \
+                             AND object_type IN ('TABLE','VIEW','MATERIALIZED VIEW','SEQUENCE','PACKAGE','PROCEDURE','FUNCTION','TYPE','SYNONYM')"
+                        ),
+                        binds,
+                        10_000,
+                    )
+                    .await?;
+                for r in &page.rows {
+                    let g = |i: usize| r.get(i).cloned().flatten();
+                    if let (Some(o), Some(n), Some(t)) = (g(0), g(1), g(2)) {
+                        let e = self.kind.entry((o, n)).or_insert(None);
+                        if e.as_deref().is_none_or(|old| kind_rank(&t) < kind_rank(old)) {
+                            *e = Some(t);
+                        }
+                    }
+                }
+            }
+            // 대상이 또 동의어인 것
+            todo = targets.into_iter().filter(|k| self.kind.get(k).cloned().flatten().as_deref() == Some("SYNONYM") && !self.syn.contains_key(k)).collect();
+        }
+        Ok(())
+    }
+
+    /// 가져와서 단위 폴더에 저장한다. 못 가져와도 분석은 이어 간다 (권한이 없는 사전 등) — 오류를 돌려준다
+    pub async fn fetch_into(&mut self, s: &Session, store: &Store, owner: &str, name: &str, unit_type: &str) -> Option<sqls_core::Error> {
+        let key = crate::chunk::unit_key(owner, name, unit_type);
+        match self.fetch(s, owner, name, unit_type).await {
+            Ok(deps) => store.write_deps(&UnitDeps { key, fetched_at: crate::store::now(), deps }).err().map(|e| sqls_core::Error::Invalid(e.to_string())),
+            Err(e) => {
+                tracing::warn!("{owner}.{name} 의존성 조회 실패: {e}");
+                Some(e)
+            }
         }
     }
+}
+
+/// 단위 하나만 볼 때
+pub async fn fetch(s: &Session, owner: &str, name: &str, unit_type: &str) -> sqls_core::Result<Vec<Dep>> {
+    Fetcher::default().fetch(s, owner, name, unit_type).await
 }
 
 /// 소스에 적힌 이름 → 실제 테이블 이름 (동의어를 거친 것). "PUBLIC.X" 는 단위 스키마의 "OWNER.X" 로도 적힌다
@@ -122,16 +252,24 @@ pub struct Compared {
     pub source_only: Vec<String>,
 }
 
-/// 파서 테이블(이미 실제 이름으로 바꾼 것)과 사전의 데이터 객체를 맞댄다. DUAL·DB 링크는 비교하지 않는다.
+/// 파서 테이블(이미 실제 이름으로 바꾼 것)과 사전을 맞댄다. DUAL·DB 링크는 비교하지 않는다.
+/// 사전에만은 테이블·뷰만 센다. 종류를 모르는 것(권한 없는 동의어 대상, 못 푼 동의어, DB 링크 너머)은
+/// 파서가 찾았으면 사전에 있는 것으로 보되, 사전에만으로는 올리지 않는다 (테이블인지 모르므로).
 pub fn compare(parser: &BTreeSet<String>, deps: &[Dep]) -> Compared {
     let ignore = |t: &str| t.ends_with(".DUAL") || t == "DUAL" || t.contains('@');
     let dict: BTreeSet<String> = deps.iter().filter(|d| d.is_data()).map(|d| d.qualified()).filter(|t| !ignore(t)).collect();
+    let known: BTreeSet<String> = deps.iter().flat_map(|d| [Some(d.qualified()), d.via.clone()]).flatten().collect();
     let parser: BTreeSet<String> = parser.iter().filter(|t| !ignore(t)).cloned().collect();
     Compared {
-        both: parser.intersection(&dict).cloned().collect(),
+        both: parser.iter().filter(|t| known.contains(*t)).cloned().collect(),
         dict_only: dict.difference(&parser).cloned().collect(),
-        source_only: parser.difference(&dict).cloned().collect(),
+        source_only: parser.iter().filter(|t| !known.contains(*t)).cloned().collect(),
     }
+}
+
+/// 사전이 비어 있는데 소스에는 테이블이 있으면 사전을 믿을 수 없다 (조회 권한, INVALID 상태 등)
+pub fn dict_usable(parser: &BTreeSet<String>, deps: &[Dep]) -> bool {
+    !deps.is_empty() || parser.iter().all(|t| t.ends_with(".DUAL") || t.contains('@'))
 }
 
 /// 저장된 조각에서 단위 소스의 줄을 다시 모은다 (조각 코드는 "  12| 내용" 형식)
@@ -307,6 +445,9 @@ pub async fn supplement(store: &Store, client: &Client, cfg: &ProviderConfig, ca
         let label = format!("{} {}.{}", u.unit_type, u.owner, u.name);
         let al = aliases(&u.owner, &ud.deps);
         let parser: BTreeSet<String> = parser_tables(u).into_iter().map(|t| al.get(&t).cloned().unwrap_or(t)).collect();
+        if !dict_usable(&parser, &ud.deps) {
+            continue;
+        }
         let cmp = compare(&parser, &ud.deps);
         // 사전만: 이름이 나오는 줄 주변
         for t in &cmp.dict_only {
@@ -400,6 +541,12 @@ mod tests {
         assert_eq!(c.both.iter().cloned().collect::<Vec<_>>(), vec!["APP.ORDERS", "ERP.CUSTOMERS"]);
         assert_eq!(c.dict_only, vec!["APP.STOCK"]);
         assert_eq!(c.source_only, vec!["APP.TMP_WORK"], "DUAL·DB 링크는 비교하지 않는다");
+        // 종류를 모르는 대상(권한 없음)·못 푼 동의어는 맞추기만 한다
+        let more = vec![dep("HR", "EMP", "UNKNOWN", Some("APP.EMP")), dep("APP", "OLD_SYN", "SYNONYM", None)];
+        let p: BTreeSet<String> = ["HR.EMP", "APP.OLD_SYN"].iter().map(|t| t.to_string()).collect();
+        let c = compare(&p, &more);
+        assert_eq!((c.both.len(), c.dict_only.len(), c.source_only.len()), (2, 0, 0));
+        assert!(!dict_usable(&p, &[]) && dict_usable(&BTreeSet::new(), &[]));
     }
 
     #[test]

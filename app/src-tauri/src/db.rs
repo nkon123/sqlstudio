@@ -119,7 +119,9 @@ pub async fn connect(
         .or_else(|| p.stored_password())
         .ok_or_else(|| ErrView::msg("password_required", "비밀번호를 입력하세요"))?;
     let account = sqls_core::secret::db_account(&p.name);
-    let session = match sqls_core::Session::connect(p.to_spec(pw.clone())).await {
+    // 네트워크가 죽어 있으면 OCI 가 오래 매달린다 — 화면이 멈춘 것처럼 보이지 않게 상한을 둔다
+    let connecting = tokio::time::timeout(std::time::Duration::from_secs(60), sqls_core::Session::connect(p.to_spec(pw.clone())));
+    let session = match connecting.await.unwrap_or_else(|_| Err(sqls_core::Error::ConnectionLost("60초 안에 서버가 응답하지 않습니다 (주소·포트·방화벽 확인)".into()))) {
         Ok(s) => s,
         Err(e) => {
             // 기억해 둔 비밀번호가 틀렸으면 (ORA-01017) 잊는다 — 저장소의 것도
@@ -143,6 +145,13 @@ pub async fn connect(
     crate::complete::ensure_hub(&st, &app, &p, &pw);
     let id = st.next_id();
     let info = session.info().clone();
+    // 쉬는 동안 끊긴 것을 알면 (keepalive) 화면에 알려 미리 다시 접속하게 한다
+    let mut lost = session.lost_signal();
+    tauri::async_runtime::spawn(async move {
+        if lost.wait_for(|v| *v).await.is_ok() {
+            let _ = tauri::Emitter::emit(&app, "session-lost", serde_json::json!({ "id": id }));
+        }
+    });
     st.sessions.lock().unwrap().insert(
         id,
         OpenSession {
@@ -537,7 +546,7 @@ fn lookup_session(st: &AppState, id: u64) -> R<sqls_core::Session> {
             if meta.is_busy() && !work.is_busy() {
                 return Ok(work);
             }
-            return Ok(meta.clone());
+            return Ok(meta);
         }
     }
     Ok(work)

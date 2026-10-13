@@ -45,6 +45,9 @@ pub struct ConnectSpec {
     pub dbms_output: bool,
     /// V$SESSION.MODULE 에 보일 이름 (DBA 가 누구 세션인지 알 수 있게)
     pub module: String,
+    /// 이만큼 아무 일이 없으면 서버에 ping 한다. 방화벽·NAT 가 오래 쉬는 접속을 끊는 것을 막고,
+    /// 이미 끊겼으면 미리 알아챈다 ([`Session::lost_signal`]). None 이면 하지 않는다
+    pub keepalive: Option<Duration>,
 }
 
 impl std::fmt::Debug for ConnectSpec {
@@ -70,9 +73,17 @@ impl ConnectSpec {
             call_timeout: None,
             dbms_output: true,
             module: "SQLStudio".into(),
+            keepalive: Some(KEEPALIVE),
         }
     }
 }
+
+/// 기본 keepalive — 사내 방화벽의 유휴 끊기(보통 5분~1시간)보다 짧게
+pub const KEEPALIVE: Duration = Duration::from_secs(180);
+/// keepalive ping 하나의 상한 — 넘으면 끊긴 것으로 본다
+const PING_LIMIT: Duration = Duration::from_secs(30);
+/// 다시 접속 하나의 상한
+const REOPEN_LIMIT: Duration = Duration::from_secs(45);
 
 /// 실행 옵션
 #[derive(Debug, Clone)]
@@ -215,6 +226,10 @@ pub struct Session {
     info: Arc<SessionInfo>,
     /// 참이 되면 기다리던 호출이 모두 즉시 풀린다 ([`Session::abandon`])
     abandoned: Arc<watch::Sender<bool>>,
+    /// 접속이 끊긴 것을 알았으면 참 (호출 결과 또는 keepalive ping)
+    lost: Arc<watch::Sender<bool>>,
+    /// 다시 접속할 때 쓴다 ([`Session::reopen`]). 비밀번호는 메모리에만
+    spec: Arc<ConnectSpec>,
 }
 
 impl Session {
@@ -225,24 +240,28 @@ impl Session {
             .name(format!("ora-{}", spec.user))
             .spawn(move || {
                 let r = open(&spec);
+                let keep = Arc::new(spec.clone());
                 match r {
                     Ok((conn, info)) => {
                         let conn = Arc::new(conn);
                         let (ctx, crx) = mpsc::channel();
                         let busy = Arc::new(AtomicBool::new(false));
                         let (abandoned, abandoned_rx) = watch::channel(false);
+                        let lost = Arc::new(watch::channel(false).0);
                         let session = Session {
                             tx: ctx,
                             conn: conn.clone(),
                             busy: busy.clone(),
                             info: Arc::new(info),
                             abandoned: Arc::new(abandoned),
+                            lost: lost.clone(),
+                            spec: keep,
                         };
                         if tx.send(Ok(session)).is_err() {
                             let _ = conn.close();
                             return;
                         }
-                        Worker::new(conn, spec, busy, abandoned_rx).run(crx);
+                        Worker::new(conn, spec, busy, abandoned_rx, lost).run(crx);
                     }
                     Err(e) => {
                         let _ = tx.send(Err(e));
@@ -289,17 +308,48 @@ impl Session {
         *self.abandoned.borrow()
     }
 
+    /// 접속이 끊긴 것을 알았는지 (호출이 끊김으로 실패했거나 keepalive ping 이 실패)
+    pub fn is_lost(&self) -> bool {
+        *self.lost.borrow()
+    }
+
+    /// 끊김을 알았을 때 참이 되는 신호 — 화면이 미리 다시 접속하게
+    pub fn lost_signal(&self) -> watch::Receiver<bool> {
+        self.lost.subscribe()
+    }
+
+    /// 같은 접속 정보로 새 세션을 연다 (이 세션은 버린다). 커밋하지 않은 변경·세션 설정은 사라진다.
+    /// 네트워크가 죽어 있으면 오래 매달리지 않게 시간 제한을 둔다.
+    pub async fn reopen(&self) -> Result<Session> {
+        self.abandon();
+        match tokio::time::timeout(REOPEN_LIMIT, Session::connect((*self.spec).clone())).await {
+            Ok(r) => r,
+            Err(_) => Err(Error::ConnectionLost(format!("다시 접속하지 못했습니다 ({}초 안에 응답 없음)", REOPEN_LIMIT.as_secs()))),
+        }
+    }
+
+    fn mark_lost(&self) {
+        self.lost.send_replace(true);
+    }
+
     async fn call<T>(&self, make: impl FnOnce(Reply<T>) -> Cmd) -> Result<T> {
         let mut gone = self.abandoned.subscribe();
         if *gone.borrow() {
             return Err(Error::SessionClosed);
         }
         let (tx, rx) = oneshot::channel();
-        self.tx.send(make(tx)).map_err(|_| Error::SessionClosed)?;
-        tokio::select! {
-            r = rx => r.map_err(|_| Error::SessionClosed)?,
-            _ = gone.wait_for(|v| *v) => Err(Error::SessionClosed),
+        if self.tx.send(make(tx)).is_err() {
+            self.mark_lost();
+            return Err(Error::SessionClosed);
         }
+        let r = tokio::select! {
+            r = rx => r.map_err(|_| Error::SessionClosed).and_then(|r| r),
+            _ = gone.wait_for(|v| *v) => return Err(Error::SessionClosed),
+        };
+        if matches!(r, Err(Error::ConnectionLost(_)) | Err(Error::SessionClosed)) {
+            self.mark_lost();
+        }
+        r
     }
 
     /// 여러 행 넣기 (array DML). `rows` 는 바인드 순서(:1, :2 …)대로의 문자열 값. 커밋하지 않는다.
@@ -427,6 +477,7 @@ struct Worker {
     spec: ConnectSpec,
     busy: Arc<AtomicBool>,
     abandoned: watch::Receiver<bool>,
+    lost: Arc<watch::Sender<bool>>,
     cursor: Option<OpenCursor>,
 }
 
@@ -436,12 +487,51 @@ impl Worker {
         spec: ConnectSpec,
         busy: Arc<AtomicBool>,
         abandoned: watch::Receiver<bool>,
+        lost: Arc<watch::Sender<bool>>,
     ) -> Self {
-        Self { conn, spec, busy, abandoned, cursor: None }
+        Self { conn, spec, busy, abandoned, lost, cursor: None }
+    }
+
+    /// 쉬는 동안 ping — 작업 스레드 안에서 하므로 사용자의 호출과 겹치지 않는다.
+    /// ping 이 오래 걸리지 않게 잠깐 call_timeout 을 건다 (Client 18 이상).
+    fn keepalive(&self) {
+        if *self.lost.borrow() {
+            return;
+        }
+        let limited = self.conn.set_call_timeout(Some(PING_LIMIT)).is_ok();
+        let r = self.conn.ping().map_err(Error::from);
+        if limited {
+            let _ = self.conn.set_call_timeout(self.spec.call_timeout);
+        }
+        match r {
+            Ok(()) => {}
+            Err(e) if e.is_connection_lost() || matches!(e, Error::Driver(_)) => {
+                tracing::warn!("keepalive ping 실패 — 접속이 끊긴 것으로 본다: {e}");
+                self.lost.send_replace(true);
+            }
+            Err(e) => tracing::debug!("keepalive ping: {e}"),
+        }
     }
 
     fn run(mut self, rx: mpsc::Receiver<Cmd>) {
-        while let Ok(cmd) = rx.recv() {
+        loop {
+            let cmd = match self.spec.keepalive {
+                Some(every) => match rx.recv_timeout(every) {
+                    Ok(c) => c,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if *self.abandoned.borrow() {
+                            break;
+                        }
+                        self.keepalive();
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                },
+                None => match rx.recv() {
+                    Ok(c) => c,
+                    Err(_) => break,
+                },
+            };
             if matches!(cmd, Cmd::Shutdown) || *self.abandoned.borrow() {
                 break;
             }

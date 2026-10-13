@@ -48,8 +48,8 @@ fn display_db(code: i32, message: &str) -> String {
     }
 }
 
-/// 접속이 끊긴 것으로 보는 ORA 코드
-const LOST_CODES: &[i32] = &[3113, 3114, 3135, 28, 1012, 2396, 12570, 12571];
+/// 접속이 끊긴 것으로 보는 ORA 코드. 3156(호출 시간 초과)도 — 그 뒤 OCI 접속은 쓸 수 없다
+const LOST_CODES: &[i32] = &[3113, 3114, 3135, 3156, 28, 1012, 2396, 12547, 12570, 12571];
 
 impl From<oracle::Error> for Error {
     fn from(e: oracle::Error) -> Self {
@@ -67,8 +67,8 @@ impl From<oracle::Error> for Error {
                 message: db.message().to_string(),
             };
         }
-        // DPI-1080: 접속이 끊김, DPI-1010: 접속되어 있지 않음
-        if matches!(e.dpi_code(), Some(1080) | Some(1010)) {
+        // DPI-1080: 접속이 끊김, DPI-1010: 접속되어 있지 않음, DPI-1067: 호출 시간 초과 (접속을 버려야 함)
+        if matches!(e.dpi_code(), Some(1080) | Some(1010) | Some(1067)) {
             return Error::ConnectionLost(e.to_string());
         }
         Error::Driver(e.to_string())

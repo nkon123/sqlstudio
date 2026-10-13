@@ -77,7 +77,7 @@ pub struct TableRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Gap {
     pub unit: String,
-    /// dict_only (사전에만) / source_only (소스에만) / dynamic (동적 SQL)
+    /// dict_only (사전에만) / source_only (소스에만) / dynamic (동적 SQL) / no_dict (사전이 비어 대조 못 함)
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table: Option<String>,
@@ -96,6 +96,9 @@ pub struct Gap {
 pub struct DictStats {
     /// 사전을 본 단위 수
     pub checked: usize,
+    /// 사전이 비어 대조하지 못한 단위 수
+    #[serde(default)]
+    pub unusable: usize,
     pub both: usize,
     pub dict_only: usize,
     pub source_only: usize,
@@ -460,9 +463,22 @@ pub fn integrate_with(units: &[UnitResult], dict: &Dict) -> Integrated {
             }
         }
         let Some(ud) = dict.deps.get(&u.key) else { continue };
-        stats.checked += 1;
         let al = &alias[u.key.as_str()];
         let parser: BTreeSet<String> = deps::parser_tables(u).into_iter().map(|t| al.get(&t).cloned().unwrap_or(t)).collect();
+        if !deps::dict_usable(&parser, &ud.deps) {
+            stats.unusable += 1;
+            out.gaps.push(Gap {
+                unit: u.key.clone(),
+                kind: "no_dict".into(),
+                table: None,
+                node: None,
+                line: None,
+                ops: None,
+                note: "사전 의존성이 0건 — 대조하지 않았습니다. ALL_DEPENDENCIES 조회 권한이나 객체 상태(INVALID)를 확인하세요".into(),
+            });
+            continue;
+        }
+        stats.checked += 1;
         let cmp = deps::compare(&parser, &ud.deps);
         stats.both += cmp.both.len();
         stats.dict_only += cmp.dict_only.len();
@@ -518,7 +534,7 @@ pub fn integrate_with(units: &[UnitResult], dict: &Dict) -> Integrated {
             out.gaps.push(Gap { unit: u.key.clone(), kind: "dict_only".into(), table: Some(t.clone()), node: Some(node), line: None, ops, note });
         }
     }
-    if stats.checked > 0 || stats.dynamic > 0 {
+    if stats.checked > 0 || stats.dynamic > 0 || stats.unusable > 0 {
         out.dict = Some(stats);
     }
     for row in tables.values_mut() {
@@ -825,8 +841,8 @@ pub fn report(g: &Integrated, units: &[UnitResult]) -> String {
     if let Some(d) = &g.dict {
         s.push_str("## 사전 대조 (ALL_DEPENDENCIES)\n\n");
         s.push_str(&format!(
-            "사전을 본 단위 {}개 · 사전·소스 모두 {} · 사전에만 {} · 소스에만 {} · 동적 SQL {} · 모델 추정 {}\n\n",
-            d.checked, d.both, d.dict_only, d.source_only, d.dynamic, d.guessed
+            "사전을 본 단위 {}개 (사전이 비어 못 본 단위 {}) · 사전·소스 모두 {} · 사전에만 {} · 소스에만 {} · 동적 SQL {} · 모델 추정 {}\n\n",
+            d.checked, d.unusable, d.both, d.dict_only, d.source_only, d.dynamic, d.guessed
         ));
         if !g.gaps.is_empty() {
             s.push_str("| 단위 | 종류 | 테이블 | 어디 | 줄 | 추정 연산 | 내용 |\n|---|---|---|---|---|---|---|\n");
@@ -834,6 +850,7 @@ pub fn report(g: &Integrated, units: &[UnitResult]) -> String {
                 let kind = match x.kind.as_str() {
                     "dict_only" => "사전에만",
                     "source_only" => "소스에만",
+                    "no_dict" => "사전 없음",
                     _ => "동적 SQL",
                 };
                 s.push_str(&format!(

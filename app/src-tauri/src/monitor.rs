@@ -17,31 +17,26 @@ pub struct Snapshot {
     me: Option<i64>,
 }
 
-async fn meta(st: &AppState, id: u64) -> R<std::sync::Arc<crate::complete::MetaHub>> {
+async fn meta(st: &AppState, id: u64) -> R<sqls_core::Session> {
     let hub = hub_for(st, id)?;
-    for _ in 0..50 {
-        if hub.session().is_some() {
-            return Ok(hub);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    Err(ErrView::msg("session_closed", "사전 조회 세션이 아직 준비되지 않았습니다"))
+    hub.wait_session(std::time::Duration::from_secs(5))
+        .await
+        .ok_or_else(|| ErrView::msg("session_closed", "사전 조회 세션이 준비되지 않았습니다 (접속 중이거나 다시 접속하는 중)"))
 }
 
 #[tauri::command]
 pub async fn monitor_snapshot(st: State<'_, AppState>, id: u64, active_only: bool, background: bool) -> R<Snapshot> {
-    let hub = meta(&st, id).await?;
-    let s = hub.session().unwrap();
-    let sessions = monitor::sessions(s, active_only, background).await?;
-    let waits = monitor::waits(s).await?;
+    let s = meta(&st, id).await?;
+    let sessions = monitor::sessions(&s, active_only, background).await?;
+    let waits = monitor::waits(&s).await?;
     let me = st.session(id).ok().map(|(sess, _, _)| sess.info().sid).filter(|x| *x > 0);
     Ok(Snapshot { sessions, waits, me })
 }
 
 #[tauri::command]
 pub async fn monitor_detail(st: State<'_, AppState>, id: u64, sid: i64) -> R<SessionDetail> {
-    let hub = meta(&st, id).await?;
-    Ok(monitor::detail(hub.session().unwrap(), sid).await?)
+    let s = meta(&st, id).await?;
+    Ok(monitor::detail(&s, sid).await?)
 }
 
 /// 세션 종료 — 화면이 확인을 받은 뒤 부른다

@@ -6,6 +6,9 @@
 //!
 //! 메타 세션은 작업 세션과 따로다. 사용자의 긴 쿼리가 자동완성을 막지 않고,
 //! 자동완성 조회가 사용자의 트랜잭션에 끼어들지 않는다. 항상 읽기 전용이다.
+//!
+//! 메타 세션이 끊기면(방화벽 유휴 끊기, DB 재시작) 알아채는 대로 뒤에서 다시 접속한다.
+//! 캐시는 그대로 두므로 자동완성은 끊긴 동안에도 있는 것으로 계속 답한다.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,17 +20,18 @@ use sqls_core::complete::{self, load, Completion, Missing, SchemaCache};
 use sqls_core::config::Profile;
 use sqls_core::Session;
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::OnceCell;
 
 use crate::state::{AppState, ErrView};
 
 const FILL_WAIT: Duration = Duration::from_millis(300);
+/// 다시 접속 시도 사이 (실패하면 다음 요청 때까지 이만큼은 다시 시도하지 않는다)
+const RETRY_GAP: Duration = Duration::from_secs(20);
 const LIMIT: usize = 200;
 
 #[derive(Clone, Serialize)]
 pub struct HubStatus {
     profile: String,
-    /// connecting | objects | columns | synonyms | keys | ready | error
+    /// connecting | objects | columns | synonyms | keys | ready | reconnecting | error
     pub(crate) phase: &'static str,
     objects: usize,
     columns: usize,
@@ -37,7 +41,12 @@ pub struct HubStatus {
 pub struct MetaHub {
     profile: String,
     pub cache: RwLock<SchemaCache>,
-    session: OnceCell<Session>,
+    session: RwLock<Option<Session>>,
+    /// 다시 접속할 때 쓴다 (비밀번호는 메모리에만)
+    spec: sqls_core::ConnectSpec,
+    /// 다시 접속은 하나씩
+    reconnecting: tokio::sync::Mutex<()>,
+    last_try: Mutex<Option<std::time::Instant>>,
     status: Mutex<HubStatus>,
     inflight: Mutex<HashSet<Missing>>,
     reload_pending: AtomicBool,
@@ -54,9 +63,95 @@ impl MetaHub {
         let _ = self.app.emit("completion-status", st);
     }
 
-    /// 읽기 전용 메타 세션 (사전 조회용). 아직 접속 중이면 None
-    pub fn session(&self) -> Option<&Session> {
-        self.session.get()
+    /// 읽기 전용 메타 세션 (사전 조회용). 아직 접속 중이거나 끊겼으면 None — 끊겼으면 뒤에서 다시 접속을 시작한다
+    pub fn session(self: &Arc<Self>) -> Option<Session> {
+        let cur = self.session.read().unwrap().clone();
+        match cur {
+            Some(s) if !s.is_lost() => Some(s),
+            _ => {
+                if cur.is_some() || self.status().phase == "error" {
+                    self.kick();
+                }
+                None
+            }
+        }
+    }
+
+    /// 뒤에서 다시 접속 (방금 실패했으면 잠시 쉬었다가)
+    fn kick(self: &Arc<Self>) {
+        if self.last_try.lock().unwrap().is_some_and(|t| t.elapsed() < RETRY_GAP) {
+            return;
+        }
+        let hub = self.clone();
+        tauri::async_runtime::spawn(async move {
+            hub.reconnect().await;
+        });
+    }
+
+    /// 세션을 쓰기 시작한다 — 끊김 신호를 지켜보다가 다시 접속한다
+    fn install(self: &Arc<Self>, s: Session) {
+        let mut lost = s.lost_signal();
+        *self.session.write().unwrap() = Some(s);
+        let hub = self.clone();
+        tauri::async_runtime::spawn(async move {
+            if lost.wait_for(|v| *v).await.is_ok() {
+                tracing::warn!("{}: 메타 세션이 끊겼습니다 — 다시 접속합니다", hub.profile);
+                hub.reconnect().await;
+            }
+        });
+    }
+
+    /// 끊긴 메타 세션을 새로 연다. 이미 누가 열었으면 그것을 돌려준다. 몇 번 해 보고 안 되면 None
+    pub async fn reconnect(self: &Arc<Self>) -> Option<Session> {
+        let _g = self.reconnecting.lock().await;
+        if let Some(s) = self.session.read().unwrap().clone().filter(|s| !s.is_lost()) {
+            return Some(s);
+        }
+        if let Some(old) = self.session.write().unwrap().take() {
+            old.abandon();
+        }
+        let had_cache = self.cache.read().unwrap().stats().0 > 0;
+        self.set_phase("reconnecting", None);
+        let mut last_err = String::new();
+        for wait in [0u64, 2, 5] {
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            *self.last_try.lock().unwrap() = Some(std::time::Instant::now());
+            match tokio::time::timeout(Duration::from_secs(45), Session::connect(self.spec.clone())).await {
+                Ok(Ok(s)) => {
+                    tracing::info!("{}: 메타 세션 다시 접속", self.profile);
+                    self.install(s.clone());
+                    if had_cache {
+                        self.set_phase("ready", None);
+                    } else {
+                        self.load(true).await;
+                    }
+                    return Some(s);
+                }
+                Ok(Err(e)) => last_err = e.to_string(),
+                Err(_) => last_err = "45초 안에 응답 없음".into(),
+            }
+        }
+        tracing::warn!("{}: 메타 세션 다시 접속 실패: {last_err}", self.profile);
+        self.set_phase("error", Some(format!("다시 접속하지 못했습니다: {last_err}")));
+        None
+    }
+
+    /// 세션을 기다린다 (접속 중·다시 접속 중이면 그 결과까지). 끝내 없으면 None
+    pub async fn wait_session(self: &Arc<Self>, limit: Duration) -> Option<Session> {
+        let until = std::time::Instant::now() + limit;
+        loop {
+            if let Some(s) = self.session() {
+                return Some(s);
+            }
+            if std::time::Instant::now() >= until {
+                return None;
+            }
+            let phase = self.status().phase;
+            if phase == "error" && self.last_try.lock().unwrap().is_some_and(|t| t.elapsed() < RETRY_GAP) {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     pub fn status(&self) -> HubStatus {
@@ -64,9 +159,9 @@ impl MetaHub {
     }
 
     async fn load(self: &Arc<Self>, progressive: bool) {
-        let Some(s) = self.session.get() else { return };
+        let Some(s) = self.session() else { return };
         let hub = self.clone();
-        let r = load::load_user_schema(s, &self.cache, progressive, move |p| {
+        let r = load::load_user_schema(&s, &self.cache, progressive, move |p| {
             let name = match p {
                 load::Phase::Objects => "objects",
                 load::Phase::Columns => "columns",
@@ -123,10 +218,18 @@ pub fn ensure_hub(st: &AppState, app: &AppHandle, profile: &Profile, password: &
             return h.clone();
         }
     }
+    let mut spec = profile.to_spec(password.to_string());
+    spec.read_only = true;
+    spec.dbms_output = false;
+    spec.module = "SQLStudio-Meta".into();
+    spec.call_timeout = Some(Duration::from_secs(120));
     let hub = Arc::new(MetaHub {
         profile: profile.name.clone(),
         cache: RwLock::new(SchemaCache::new(&profile.user)),
-        session: OnceCell::new(),
+        session: RwLock::new(None),
+        spec: spec.clone(),
+        reconnecting: tokio::sync::Mutex::new(()),
+        last_try: Mutex::new(None),
         status: Mutex::new(HubStatus {
             profile: profile.name.clone(),
             phase: "connecting",
@@ -140,16 +243,12 @@ pub fn ensure_hub(st: &AppState, app: &AppHandle, profile: &Profile, password: &
         describes: Mutex::new(std::collections::HashMap::new()),
     });
     hubs.insert(key, hub.clone());
-    let mut spec = profile.to_spec(password.to_string());
-    spec.read_only = true;
-    spec.dbms_output = false;
-    spec.module = "SQLStudio-Meta".into();
-    spec.call_timeout = Some(Duration::from_secs(120));
     let h = hub.clone();
     tauri::async_runtime::spawn(async move {
+        *h.last_try.lock().unwrap() = Some(std::time::Instant::now());
         match Session::connect(spec).await {
             Ok(s) => {
-                let _ = h.session.set(s);
+                h.install(s);
                 h.load(true).await;
             }
             Err(e) => {
@@ -190,7 +289,7 @@ pub async fn complete(st: State<'_, AppState>, id: u64, text: String, cursor: us
         if c.missing.is_empty() {
             return Ok(c);
         }
-        let Some(s) = hub.session.get().cloned() else { return Ok(c) };
+        let Some(s) = hub.session() else { return Ok(c) };
         // 이미 채우는 중인 것은 다시 묻지 않는다
         let todo: Vec<Missing> = {
             let mut inflight = hub.inflight.lock().unwrap();

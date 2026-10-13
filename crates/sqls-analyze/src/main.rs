@@ -255,24 +255,38 @@ async fn cmd_run(a: &Args) -> Result<(), String> {
         _ => {}
     });
 
+    let mut deps = sqls_analyze::deps::Fetcher::default();
     for i in 0..total {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let (src, spec) = match &session {
-            Some((s, refs)) => match source::fetch(s, &refs[i]).await {
-                Ok(x) => {
-                    if let Some(e) = sqls_analyze::deps::fetch_into(s, &store, &refs[i].owner, &refs[i].name, &refs[i].unit_type).await {
-                        eprintln!("  사전 의존성을 읽지 못했습니다 (대조 없이 진행): {e}");
+        let (src, spec) = match &mut session {
+            Some((s, refs)) => {
+                let mut r = source::fetch_unit(s, &refs[i], &store, &mut deps).await;
+                if matches!(&r, Err(e) if e.is_connection_lost()) {
+                    eprintln!("  DB 접속이 끊겼습니다 — 다시 접속합니다");
+                    r = match s.reopen().await {
+                        Ok(n) => {
+                            *s = n;
+                            source::fetch_unit(s, &refs[i], &store, &mut deps).await
+                        }
+                        Err(e) => Err(e),
+                    };
+                }
+                match r {
+                    Ok(x) => x,
+                    Err(e) if e.is_connection_lost() => {
+                        eprintln!("멈춤: DB 에 다시 접속하지 못했습니다 ({e}). 다시 돌리면 이어서 합니다.");
+                        failed_units += 1;
+                        break;
                     }
-                    x
+                    Err(e) => {
+                        eprintln!("[{}/{total}] {}.{} 소스를 읽지 못했습니다: {e}", i + 1, refs[i].owner, refs[i].name);
+                        failed_units += 1;
+                        continue;
+                    }
                 }
-                Err(e) => {
-                    eprintln!("[{}/{total}] {}.{} 소스를 읽지 못했습니다: {e}", i + 1, refs[i].owner, refs[i].name);
-                    failed_units += 1;
-                    continue;
-                }
-            },
+            }
             None => units[i].clone(),
         };
         let plan_n = sqls_analyze::chunk::plan(&src, spec.as_deref(), lim).chunks.len();

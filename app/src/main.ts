@@ -444,6 +444,22 @@ class App {
       if (this.active?.conn?.profile.toUpperCase() !== e.payload.profile.toUpperCase()) return;
       this.showCompletionStatus(e.payload);
     });
+    // Ctrl+A: 입력칸이 아니면 화면 전체가 아니라 마지막으로 누른 글 상자(소스·출력·계획·분석 코드)만 고른다
+    let lastPointer: Element | null = null;
+    document.addEventListener("mousedown", (e) => { lastPointer = e.target as Element; }, true);
+    document.addEventListener("keydown", (e) => {
+      if (e.defaultPrevented || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== "a") return;
+      const a = document.activeElement as HTMLElement | null;
+      if (a && (a.isContentEditable || a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT")) return;
+      e.preventDefault();
+      const block = lastPointer?.closest("pre, .ob-body, .desc-table, .an-content");
+      if (!block) return;
+      const r = document.createRange();
+      r.selectNodeContents(block);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(r);
+    });
     // 쉬는 동안 접속이 끊겼으면 (keepalive 가 알아챔) 실행하기 전에 미리 다시 접속한다
     listen<{ id: number }>("session-lost", (e) => {
       const t = this.tabs.find((x) => x.conn?.id === e.payload.id);

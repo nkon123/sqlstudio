@@ -71,6 +71,37 @@ const CONF: Record<string, [string, string, string]> = {
   llm: ["추정", "", "모델이 추정한 것 — 소스에서 직접 확인하지 못했습니다"],
 };
 const GAP_KIND: Record<Gap["kind"], string> = { dict_only: "사전에만", source_only: "소스에만", dynamic: "동적 SQL", no_dict: "사전 없음" };
+/** 왼쪽 칸 너비를 끌어서 바꾼다 (더블클릭: 원래대로). 너비는 이 PC 에 기억한다. grid 의 둘째 자식으로 넣는다 */
+function colSplitter(grid: HTMLElement, key: string, min = 90): HTMLElement {
+  try {
+    const saved = Number(localStorage.getItem(key));
+    if (saved > 0) grid.style.setProperty("--c1", `${saved}px`);
+  } catch { /* 저장소를 못 쓰면 기본 너비 */ }
+  const handle = h("div", { class: "an-gutter", title: "끌어서 너비 조절 · 더블클릭: 원래대로" });
+  handle.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const first = grid.firstElementChild as HTMLElement;
+    const x0 = e.clientX;
+    const w0 = first.getBoundingClientRect().width;
+    const max = grid.getBoundingClientRect().width - 160;
+    document.body.classList.add("col-resizing");
+    const move = (ev: MouseEvent) => grid.style.setProperty("--c1", `${Math.round(Math.max(min, Math.min(max, w0 + ev.clientX - x0)))}px`);
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.classList.remove("col-resizing");
+      try { localStorage.setItem(key, String(Math.round(first.getBoundingClientRect().width))); } catch { /* 기억 못 해도 된다 */ }
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  });
+  handle.addEventListener("dblclick", () => {
+    grid.style.removeProperty("--c1");
+    try { localStorage.removeItem(key); } catch { /* 무시 */ }
+  });
+  return handle;
+}
+
 const TYPE_LABEL: Record<string, string> = { "PACKAGE BODY": "패키지", PROCEDURE: "프로시저", FUNCTION: "함수", TRIGGER: "트리거", "TYPE BODY": "타입" };
 
 export class AnalysisView {
@@ -142,7 +173,8 @@ export class AnalysisView {
       h("table", { class: "an-list" },
         h("thead", {}, h("tr", {}, h("th", {}, this.allBox), h("th", {}, "형식"), h("th", {}, "이름"), h("th", {}, "분석"))),
         this.listEl));
-    this.main = h("div", { class: "an-main" }, left, h("div", { class: "an-right" }, nav, this.content));
+    this.main = h("div", { class: "an-main" }, left);
+    this.main.append(colSplitter(this.main, "analysis.col.units"), h("div", { class: "an-right" }, nav, this.content));
     this.el = h("div", { class: "debugger analysis", hidden: true }, toolbar,
       h("div", { class: "an-progress" }, this.bar), this.main);
   }
@@ -427,7 +459,9 @@ export class AnalysisView {
     };
     input.oninput = fill;
     fill();
-    this.content.replaceChildren(h("div", { class: "an-split" }, h("div", { class: "an-col" }, input, list), detail));
+    const split = h("div", { class: "an-split" }, h("div", { class: "an-col" }, input, list));
+    split.append(colSplitter(split, "analysis.col.nodes"), detail);
+    this.content.replaceChildren(split);
   }
 
   /** 흐름도 코드(그림 라이브러리 포함)는 이 탭을 처음 열 때 불러온다 — 시작 번들을 키우지 않게 */

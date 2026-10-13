@@ -10,7 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { errOf } from "./api";
 import { COLORS, KIND_KO, type Libs, boxSize, dfdStyle, loadLibs } from "./dfd";
-import { type DfdSource, type EdgeKind, LANES, buildBase, buildView } from "./dfd-model";
+import { type DfdSource, type EdgeKind, LANES, type LaneSpan, buildBase, buildView, fitLanes } from "./dfd-model";
 import { confirmBox, h, toast } from "./ui";
 
 export interface ReportBasis {
@@ -31,7 +31,14 @@ export interface ReportEdge {
 export interface Report {
   format: 1; id: string; name: string; title: string; description: string; created_at: number; updated_at: number;
   profile: string; basis: ReportBasis; nodes: ReportNode[]; edges: ReportEdge[];
+  /** 입력·처리·출력 칸 경계 (맞붙어 있다). 없으면 노드에 맞춘다 */
+  lanes?: LaneSpan[];
 }
+
+/** 그림의 장식(칸 배경·칸 경계 손잡이)이 아닌 것 */
+const isItem = (n: NodeSingular) => n.data("type") !== "lane" && n.data("type") !== "divider";
+/** 칸에 드는 상자 (메모 제외) */
+const isBox = (n: NodeSingular) => isItem(n) && n.data("type") !== "note";
 
 const GRID = 10;
 const NODE_COLORS = ["", "#fde2e1", "#fff1c2", "#dff5e1", "#dbeafe", "#efe1fb", "#e5e7eb"];
@@ -45,7 +52,7 @@ const edgeKey = (s: string, t: string, k: string) => `${s}|${t}|${k}`;
 
 /** 지금 흐름도(그려진 것)를 보고서로 떼어 낸다 */
 export function snapshot(cy: Core, basis: ReportBasis, profile: string, name: string): Report {
-  const nodes: ReportNode[] = cy.nodes().filter((n) => n.data("type") !== "lane").map((x) => {
+  const nodes: ReportNode[] = cy.nodes().filter((n) => isItem(n as NodeSingular)).map((x) => {
     const n = x as NodeSingular;
     const p = n.position();
     return { id: n.id(), ref: n.data("ref"), type: n.data("type"), label: n.data("label"), x: p.x, y: p.y, w: n.data("w"), h: n.data("h"),
@@ -85,6 +92,7 @@ export class DfdReport {
       align("hdist", "⇹", "가로 같은 간격"), align("vdist", "⇳", "세로 같은 간격"),
       h("label", { class: "check", title: "끌어 놓을 때 10px 격자에 붙인다" }, this.snapBox, "격자"),
       b("자동 배치", "지금 보이는 노드·선으로 다시 배치한다 (메모는 그대로)", () => this.autoLayout()),
+      b("칸 맞추기", "입력·처리·출력 칸을 지금 노드 자리에 딱 맞춘다 (칸 경계는 끌어서도 옮긴다)", () => this.fitLanesNow()),
       h("span", { class: "sep" }),
       b("메모", "메모 상자 — 노드·선을 고른 채 누르면 거기에 붙인다", () => this.addNote()),
       b("선 추가", "처음 노드 → 끝 노드를 차례로 누른다 (손으로 넣은 선은 보라색 점선)", () => this.startLink()),
@@ -192,20 +200,29 @@ export class DfdReport {
         { selector: "edge[kind='attach']", style: { "line-color": "#c9a227", "line-style": "dashed", "target-arrow-shape": "none", width: 1, "curve-style": "straight", label: "" } },
         { selector: "edge.gone", style: { "line-color": "#c62f3c", "target-arrow-color": "#c62f3c", "line-style": "dashed", opacity: 0.7 } },
         { selector: ".linking", style: { "overlay-color": MANUAL_COLOR, "overlay-opacity": 0.25 } },
+        { selector: "node[type='divider']", style: { shape: "rectangle", width: "data(w)", height: "data(h)", label: "", "border-width": 0,
+          "background-color": v("--accent"), "background-opacity": 0.12, "z-index": 8, "overlay-opacity": 0 } },
+        { selector: "node[type='divider'].hover, node[type='divider']:grabbed", style: { "background-opacity": 0.45 } },
       ] as never,
     });
     cy.on("tap", "node", (ev) => this.onTapNode(ev.target as NodeSingular));
     cy.on("tap", "edge", (ev) => { if (this.linking === undefined) this.showEdge(ev.target as EdgeSingular); });
     cy.on("tap", (ev) => { if (ev.target === cy) { this.cancelLink(); this.showReport(); } });
     cy.on("select unselect", () => setTimeout(() => this.onSelect(), 0));
-    cy.on("drag", "node", () => this.followNotes());
+    cy.on("drag", "node[type='divider']", (ev) => this.dragDivider(ev.target as NodeSingular));
+    cy.on("mouseover", "node[type='divider']", (ev) => ev.target.addClass("hover"));
+    cy.on("mouseout", "node[type='divider']", (ev) => ev.target.removeClass("hover"));
     cy.on("dragfree", "node", (ev) => {
+      if ((ev.target as NodeSingular).data("type") === "divider") return this.dropDivider();
+      const moved = cy.$("node:selected").union(ev.target).toArray() as NodeSingular[];
       if (this.snapBox.checked) {
-        for (const n of cy.$("node:selected").union(ev.target).toArray() as NodeSingular[]) {
+        for (const n of moved) {
           const p = n.position();
           n.position({ x: Math.round(p.x / GRID) * GRID, y: Math.round(p.y / GRID) * GRID });
         }
       }
+      // 옮긴 상자는 놓인 칸 소속이 된다. 칸 밖(양 끝)으로 나가면 바깥 칸을 넓힌다
+      this.assignLanes(moved.filter(isBox));
       this.relane();
       this.commit();
     });
@@ -215,6 +232,7 @@ export class DfdReport {
 
   private load(r: Report) {
     const cy = this.cy!;
+    this.lanes = r.lanes ? r.lanes.map((l) => ({ ...l })) : null;
     cy.batch(() => {
       cy.elements().remove();
       cy.add(r.nodes.filter((n) => !n.hidden).map((n) => ({ group: "nodes" as const, data: { ...n }, position: { x: n.x, y: n.y }, classes: n.gone ? "gone" : "" })));
@@ -230,6 +248,8 @@ export class DfdReport {
   }
 
   private hiddenNodes: ReportNode[] = [];
+  /** 칸 경계 (null 이면 다음 relane 에서 노드에 맞춘다) */
+  private lanes: LaneSpan[] | null = null;
   private hiddenEdges: ReportEdge[] = [];
 
   private addAttach(noteId: string, target: string) {
@@ -241,34 +261,98 @@ export class DfdReport {
     cy.add({ group: "edges", data: { id: `att:${noteId}`, source: noteId, target: to, kind: "attach", label: "" }, selectable: false });
   }
 
-  private followNotes() { /* 붙임선은 노드를 따라 저절로 다시 그려진다 */ }
+  /** 칸마다 상자가 차지한 가로 범위 */
+  private spans(): LaneSpan[] {
+    const ns = this.cy!.nodes().filter((n) => isBox(n as NodeSingular));
+    const out: LaneSpan[] = [];
+    for (let i = 0; i < LANES.length; i++) {
+      const ln = ns.filter((n) => n.data("lane") === i);
+      if (!ln.length) continue;
+      const bb = ln.boundingBox({});
+      out.push({ i, x1: bb.x1, x2: bb.x2 });
+    }
+    return out;
+  }
 
-  /** 칸 배경을 노드 자리에 맞춰 다시 */
+  private fitLanesNow() {
+    this.lanes = fitLanes(this.spans());
+    this.relane();
+    this.commit();
+  }
+
+  /** 상자를 놓인 칸 소속으로. 양 끝 칸 밖이면 그 칸을 넓힌다 */
+  private assignLanes(ns: NodeSingular[]) {
+    const L = this.lanes;
+    if (!L || !L.length) return;
+    for (const n of ns) {
+      const x = n.position().x, bb = n.boundingBox({});
+      let k = L.findIndex((l) => x >= l.x1 && x < l.x2);
+      if (k < 0) k = x < L[0].x1 ? 0 : L.length - 1;
+      n.data("lane", L[k].i);
+      if (k === 0) L[0].x1 = Math.min(L[0].x1, Math.round(bb.x1 - 24));
+      if (k === L.length - 1) L[k].x2 = Math.max(L[k].x2, Math.round(bb.x2 + 24));
+    }
+  }
+
+  /** 칸 경계 손잡이를 끄는 중 — 이웃 칸 경계를 함께 옮긴다 (손잡이는 가로로만) */
+  private dragDivider(d: NodeSingular) {
+    const L = this.lanes;
+    if (!L) return;
+    const k = d.data("k") as number;
+    const lo = k > 0 ? L[k - 1].x1 + 60 : -Infinity;
+    const hi = k < L.length ? L[k].x2 - 60 : Infinity;
+    const x = Math.max(lo, Math.min(hi, Math.round(d.position().x)));
+    d.position({ x, y: d.data("y") });
+    if (k > 0) L[k - 1].x2 = x;
+    if (k < L.length) L[k].x1 = x;
+    this.paintLanes();
+  }
+
+  private dropDivider() {
+    // 경계가 바뀌었으니 상자의 칸 소속을 다시 (가운데가 든 칸)
+    const L = this.lanes;
+    if (L) for (const n of this.cy!.nodes().filter((x) => isBox(x as NodeSingular)).toArray() as NodeSingular[]) {
+      const x = n.position().x;
+      const l = L.find((s) => x >= s.x1 && x < s.x2);
+      if (l) n.data("lane", l.i);
+    }
+    this.relane();
+    this.commit();
+  }
+
+  /** 칸 배경 상자만 경계에 맞춰 다시 (손잡이를 끄는 중에) */
+  private paintLanes() {
+    const cy = this.cy!;
+    for (const l of this.lanes ?? []) {
+      const n = cy.getElementById(`lane:${l.i}`);
+      if (!n.length) continue;
+      n.data("w", l.x2 - l.x1);
+      n.position({ x: (l.x1 + l.x2) / 2, y: n.position().y });
+    }
+  }
+
+  /** 칸 배경과 경계 손잡이를 다시 그린다. 경계가 없거나 칸 수가 바뀌었으면 노드에 맞춘다 */
   private relane() {
     const cy = this.cy!;
     cy.batch(() => {
-      cy.nodes("[type='lane']").remove();
-      const ns = cy.nodes().filter((n) => n.data("type") !== "note" && n.data("type") !== "lane");
+      cy.nodes("[type='lane'], [type='divider']").remove();
+      const ns = cy.nodes().filter((n) => isBox(n as NodeSingular));
       if (!ns.length) return;
+      const spans = this.spans();
+      if (!this.lanes || spans.some((s) => !this.lanes!.some((l) => l.i === s.i))) {
+        // 처음이거나 새 칸이 생겼으면 (새 것 넣기 등) 노드에 다시 맞춘다
+        this.lanes = fitLanes(spans);
+      }
+      const L = this.lanes;
       const bb = ns.boundingBox({});
-      const y1 = bb.y1 - 46, y2 = bb.y2 + 16;
-      const lanes: { i: number; x1: number; x2: number }[] = [];
-      for (let i = 0; i < LANES.length; i++) {
-        const ln = ns.filter((n) => n.data("lane") === i);
-        if (!ln.length) continue;
-        const b = ln.boundingBox({});
-        lanes.push({ i, x1: b.x1 - 18, x2: b.x2 + 18 });
+      const y1 = bb.y1 - 46, y2 = bb.y2 + 16, cyy = (y1 + y2) / 2;
+      for (const l of L) {
+        cy.add({ group: "nodes", data: { id: `lane:${l.i}`, type: "lane", label: LANES[l.i], alt: l.i % 2 === 1, w: l.x2 - l.x1, h: y2 - y1 },
+          position: { x: (l.x1 + l.x2) / 2, y: cyy }, selectable: false, grabbable: false });
       }
-      // 옮기다 보면 칸이 겹친다 — 이웃 칸과 겹치는 만큼 가운데에서 자른다
-      for (let k = 1; k < lanes.length; k++) {
-        if (lanes[k - 1].x2 <= lanes[k].x1) continue;
-        const mid = (Math.max(lanes[k - 1].x1, lanes[k].x1) + Math.min(lanes[k - 1].x2, lanes[k].x2)) / 2;
-        lanes[k - 1].x2 = Math.max(lanes[k - 1].x1 + 40, mid - 3);
-        lanes[k].x1 = Math.min(lanes[k].x2 - 40, mid + 3);
-      }
-      for (const l of lanes) {
-        cy.add({ group: "nodes", data: { id: `lane:${l.i}`, type: "lane", label: LANES[l.i], w: l.x2 - l.x1, h: y2 - y1 },
-          position: { x: (l.x1 + l.x2) / 2, y: (y1 + y2) / 2 }, selectable: false, grabbable: false });
+      for (let k = 0; k <= L.length; k++) {
+        const x = k < L.length ? L[k].x1 : L[L.length - 1].x2;
+        cy.add({ group: "nodes", data: { id: `div:${k}`, type: "divider", k, y: cyy, w: 8, h: y2 - y1 }, position: { x, y: cyy }, selectable: false });
       }
     });
   }
@@ -278,7 +362,7 @@ export class DfdReport {
     const r = this.r;
     const cy = this.cy;
     if (!r || !cy) return null;
-    const nodes: ReportNode[] = cy.nodes().filter((n) => n.data("type") !== "lane").map((x) => {
+    const nodes: ReportNode[] = cy.nodes().filter((n) => isItem(n as NodeSingular)).map((x) => {
       const n = x as NodeSingular;
       const d = { ...n.data() } as ReportNode;
       const p = n.position();
@@ -293,7 +377,8 @@ export class DfdReport {
       for (const k of Object.keys(d) as (keyof ReportEdge)[]) if (d[k] === undefined || d[k] === "" || d[k] === false) delete d[k];
       return d;
     });
-    return { ...r, name: this.nameIn.value.trim() || r.name, nodes: [...nodes, ...this.hiddenNodes], edges: [...edges, ...this.hiddenEdges] };
+    return { ...r, name: this.nameIn.value.trim() || r.name, nodes: [...nodes, ...this.hiddenNodes], edges: [...edges, ...this.hiddenEdges],
+      lanes: this.lanes ? this.lanes.map((l) => ({ ...l })) : undefined };
   }
 
   /** 바뀐 것을 기억한다 (되돌리기) */
@@ -338,7 +423,7 @@ export class DfdReport {
     if ((e.ctrlKey || e.metaKey) && k === "z") { e.preventDefault(); this.undo(); }
     else if ((e.ctrlKey || e.metaKey) && k === "y") { e.preventDefault(); this.redo(); }
     else if ((e.ctrlKey || e.metaKey) && k === "s") { e.preventDefault(); void this.save(); }
-    else if ((e.ctrlKey || e.metaKey) && k === "a") { e.preventDefault(); this.cy?.nodes().filter((n) => n.data("type") !== "lane").select(); }
+    else if ((e.ctrlKey || e.metaKey) && k === "a") { e.preventDefault(); this.cy?.nodes().filter((n) => isItem(n as NodeSingular)).select(); }
     else if (e.key === "Delete") { e.preventDefault(); this.removeSelected(); }
     else if (e.key === "Escape") { this.cancelLink(); this.cy?.elements().unselect(); this.showReport(); }
   }
@@ -381,11 +466,11 @@ export class DfdReport {
 
   private async autoLayout() {
     const cy = this.cy!;
-    const ns = cy.nodes().filter((n) => n.data("type") !== "note" && n.data("type") !== "lane");
+    const ns = cy.nodes().filter((n) => isBox(n as NodeSingular));
     const es = cy.edges().filter((e) => e.data("kind") !== "attach" && ns.contains(e.source()) && ns.contains(e.target()));
     const graph = {
       id: "root",
-      layoutOptions: { "elk.algorithm": "layered", "elk.direction": "RIGHT", "elk.partitioning.activate": "true",
+      layoutOptions: { "elk.algorithm": "layered", "elk.direction": "RIGHT", "elk.partitioning.activate": "true", "elk.separateConnectedComponents": "false",
         "elk.spacing.nodeNode": "26", "elk.layered.spacing.nodeNodeBetweenLayers": "80", "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
         "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF", "elk.layered.nodePlacement.favorStraightEdges": "true" },
       children: ns.map((n) => ({ id: n.id(), width: n.width(), height: n.height(), layoutOptions: { "elk.partitioning.partition": String(n.data("lane") ?? 1) } })),
@@ -394,6 +479,7 @@ export class DfdReport {
     try {
       const laid = await this.elk!.layout(graph);
       cy.batch(() => { for (const c of laid.children ?? []) cy.getElementById(c.id).position({ x: (c.x ?? 0) + (c.width ?? 0) / 2, y: (c.y ?? 0) + (c.height ?? 0) / 2 }); });
+      this.lanes = null; // 새 자리에 칸을 다시 맞춘다
     } catch (e) {
       return toast(`배치 실패: ${errOf(e).message}`, "error");
     }
@@ -436,7 +522,7 @@ export class DfdReport {
   }
 
   private onTapNode(n: NodeSingular) {
-    if (n.data("type") === "lane") return;
+    if (!isItem(n)) return;
     if (this.linking === undefined) return;
     if (this.linking === null) {
       this.linking = n.id();
@@ -639,7 +725,7 @@ export class DfdReport {
     const bottom = new Map<number, { x: number; y: number }>();
     for (const n of cy.nodes().toArray() as NodeSingular[]) {
       const lane = n.data("lane");
-      if (n.data("type") === "lane" || n.data("type") === "note") continue;
+      if (!isBox(n)) continue;
       const p = n.position(), cur = bottom.get(lane);
       if (!cur || p.y + n.height() / 2 > cur.y) bottom.set(lane, { x: p.x, y: p.y + n.height() / 2 });
     }
@@ -670,7 +756,13 @@ export class DfdReport {
   // ── 내보내기 ─────────────────────────────────
 
   private png(): string {
-    return this.cy!.png({ output: "base64uri", full: true, scale: 2, bg: "#ffffff", maxWidth: 12000, maxHeight: 12000 });
+    const divs = this.cy!.nodes("[type='divider']");
+    divs.style("display", "none");
+    try {
+      return this.cy!.png({ output: "base64uri", full: true, scale: 2, bg: "#ffffff", maxWidth: 12000, maxHeight: 12000 });
+    } finally {
+      divs.removeStyle("display");
+    }
   }
 
   private fileBase() {

@@ -7,7 +7,7 @@ import type { Core, EdgeSingular, NodeSingular } from "cytoscape";
 import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { errOf } from "./api";
-import { type Base, type DfdSource, type EdgeKind, LANES, buildBase, buildView, busiest, edgesOf, packageOf } from "./dfd-model";
+import { type Base, type DfdSource, type EdgeKind, LANES, type LaneSpan, buildBase, buildView, busiest, edgesOf, fitLanes, packageOf } from "./dfd-model";
 import { field, h, modal, toast } from "./ui";
 import { showMenu } from "./ctxmenu";
 import type { DfdReport, Report } from "./dfd-report";
@@ -224,7 +224,7 @@ export class DfdView {
       id: "root",
       layoutOptions: {
         "elk.algorithm": "layered", "elk.direction": "RIGHT", "elk.edgeRouting": "ORTHOGONAL",
-        "elk.partitioning.activate": "true",
+        "elk.partitioning.activate": "true", "elk.separateConnectedComponents": "false",
         "elk.spacing.nodeNode": "26", "elk.layered.spacing.nodeNodeBetweenLayers": "80",
         "elk.spacing.edgeNode": "16", "elk.spacing.edgeEdge": "12", "elk.layered.spacing.edgeEdgeBetweenLayers": "12",
         "elk.layered.spacing.edgeNodeBetweenLayers": "16",
@@ -255,17 +255,14 @@ export class DfdView {
       // 칸 배경 — 칸마다 노드가 차지한 가로 범위, 세로는 전체
       const ys = [...pos.values()];
       const y1 = Math.min(...ys.map((p) => p.y)) - 46, y2 = Math.max(...ys.map((p) => p.y + p.h)) + 16;
-      const lanes: { i: number; x1: number; x2: number }[] = [];
+      const spans: LaneSpan[] = [];
       for (let i = 0; i < LANES.length; i++) {
         const ps = view.nodes.filter((n) => n.lane === i).map((n) => pos.get(n.id)!);
-        if (ps.length) lanes.push({ i, x1: Math.min(...ps.map((p) => p.x)) - 18, x2: Math.max(...ps.map((p) => p.x + p.w)) + 18 });
+        if (ps.length) spans.push({ i, x1: Math.min(...ps.map((p) => p.x)), x2: Math.max(...ps.map((p) => p.x + p.w)) });
       }
-      for (let k = 1; k < lanes.length; k++) {
-        const mid = (lanes[k - 1].x2 + lanes[k].x1) / 2;
-        lanes[k - 1].x2 = Math.min(lanes[k - 1].x2, mid - 3);
-        lanes[k].x1 = Math.max(lanes[k].x1, mid + 3);
-      }
-      cy.add(lanes.map((l) => ({ group: "nodes" as const, data: { id: `lane:${l.i}`, type: "lane", label: LANES[l.i], w: l.x2 - l.x1, h: y2 - y1 },
+      // 칸끼리 빈틈·겹침 없이 맞붙게
+      const lanes = fitLanes(spans);
+      cy.add(lanes.map((l) => ({ group: "nodes" as const, data: { id: `lane:${l.i}`, type: "lane", label: LANES[l.i], alt: l.i % 2 === 1, w: l.x2 - l.x1, h: y2 - y1 },
         position: { x: (l.x1 + l.x2) / 2, y: (y1 + y2) / 2 }, selectable: false, grabbable: false })));
       cy.add(view.nodes.map((n) => {
         const p = pos.get(n.id)!;
@@ -392,6 +389,8 @@ export function dfdStyle(): unknown[] {
     { selector: "node[?more]", style: { label: (n: NodeSingular) => `${n.data("label")}  ＋` } },
     { selector: "node[type='lane']", style: { shape: "rectangle", "z-index": 0, events: "no", "background-color": v("--text"), "background-opacity": 0.04,
       "border-width": 0, label: "data(label)", "text-valign": "top", "text-margin-y": 26, "font-size": 13, "font-weight": "bold", color: v("--dim") } },
+    // 맞붙은 칸을 가려 보이게 — 가운데(처리) 칸을 조금 진하게
+    { selector: "node[type='lane'][?alt]", style: { "background-opacity": 0.09 } },
     { selector: "node:selected", style: { "overlay-color": v("--accent"), "overlay-opacity": 0.18 } },
     { selector: "edge", style: { width: 2, "curve-style": "segments", "edge-distances": "endpoints" as never, // @types 에 아직 없는 값 (3.30 은 지원) "segment-radius": 6,
       "target-arrow-shape": "triangle", "arrow-scale": 0.9, "z-index-compare": "manual", "z-index": 5,

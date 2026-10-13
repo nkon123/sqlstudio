@@ -229,3 +229,17 @@ export function buildView(b: Base, o: ViewOptions): View {
 export function edgesOf(b: Base, id: string) {
   return { ins: b.edges.filter((e) => e.t === id), outs: b.edges.filter((e) => e.s === id) };
 }
+
+export interface LaneSpan { i: number; x1: number; x2: number }
+
+/** 칸 경계 — 칸마다 노드가 차지한 가로 범위를 받아, 빈틈·겹침 없이 맞붙은 칸으로.
+ *  이웃 칸 사이 경계는 두 칸 노드 사이 한가운데, 바깥은 pad. 노드가 칸을 넘어가 있어도 칸은 최소 폭을 지킨다. */
+export function fitLanes(spans: LaneSpan[], pad = 24, minW = 60): LaneSpan[] {
+  const s = [...spans].sort((a, b) => a.i - b.i);
+  if (!s.length) return [];
+  const b: number[] = [s[0].x1 - pad];
+  for (let k = 1; k < s.length; k++) b.push((s[k - 1].x2 + s[k].x1) / 2);
+  b.push(s[s.length - 1].x2 + pad);
+  for (let k = 1; k < b.length; k++) b[k] = Math.max(b[k], b[k - 1] + minW);
+  return s.map((x, k) => ({ i: x.i, x1: Math.round(b[k]), x2: Math.round(b[k + 1]) }));
+}

@@ -19,6 +19,7 @@ import { SqlEditor } from "./editor";
 import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from "./format";
 import type { GitPanel } from "./git";
 import { ResultGrid } from "./grid";
+import { guessTable, toCsv as toCsvText, toInserts as toInsertsText, unsupported as unsupportedCols } from "./export-text";
 import { aliasMap, showColumns } from "./colpopup";
 import { openHistory } from "./history";
 import { openImport } from "./importer";
@@ -63,6 +64,8 @@ class Tab {
   readonly discardBtn = h("button", { class: "small", hidden: true, title: "고친 것을 버린다" }, "되돌리기");
   readonly delRowBtn = h("button", { class: "small", hidden: true, title: "선택한 행을 지울 행으로 표시 (다시 누르면 풀림, Delete 키)" }, "행 삭제");
   private dbg: DebugView | null = null;
+  /** 글을 새 탭으로 (INSERT 문 내보내기) */
+  private openText: (text: string) => void = () => {};
   private an: AnalysisView | null = null;
   private mon: MonitorView | null = null;
 
@@ -131,6 +134,12 @@ class Tab {
     this.discardBtn.onclick = () => this.grid.discardChanges();
     this.delRowBtn.onclick = () => this.grid.toggleDeleteSelected();
     const gridPane = h("div", { class: "pane result" }, this.grid.el);
+    // 내보내기: 엑셀 · CSV · INSERT 문 (보이는 열·정렬·거르기 그대로)
+    const exportSel = h("select", { class: "small export-sel", title: "결과 내보내기 — 보이는 열·정렬·거르기 그대로" },
+      h("option", { value: "" }, "내보내기…"), h("option", { value: "xlsx" }, "엑셀 (.xlsx)"), h("option", { value: "csv" }, "CSV 파일"),
+      h("option", { value: "insert-tab" }, "INSERT 문 → 새 탭"), h("option", { value: "insert-file" }, "INSERT 문 → 파일 (.sql)"));
+    exportSel.onchange = () => { const v = exportSel.value as "xlsx" | "csv" | "insert-tab" | "insert-file"; exportSel.value = ""; if (v) this.exportResult(v); };
+    this.openText = (text) => void app.newTab(true, text);
     this.panes.set("result", gridPane).set("output", this.output).set("plan", this.plan).set("desc", this.desc);
     const btn = (p: Pane, label: string) => {
       const b = h("button", { class: "pane-tab", onclick: () => this.show(p) }, label);
@@ -142,7 +151,7 @@ class Tab {
         this.filterIn, this.editBtn, this.delRowBtn, this.applyBtn, this.discardBtn,
         h("span", { class: "spacer" }), this.gridStatus,
         h("button", { class: "small", title: "가져온 행을 CSV 로 복사", onclick: () => this.copyCsv() }, "CSV 복사"),
-        h("button", { class: "small", title: "결과를 엑셀(.xlsx) 파일로 저장 — 보이는 열·정렬·필터 그대로", onclick: () => this.exportExcel() }, "엑셀")),
+        exportSel),
       gridPane, this.output, this.plan, this.desc);
     const splitter = h("div", { class: "splitter" });
     this.root = h("div", { class: "tab-body" }, editorHost, splitter, bottom);
@@ -193,14 +202,16 @@ class Tab {
     this.output.scrollTop = this.output.scrollHeight;
   }
 
-  async exportExcel() {
+  /** 결과 내보내기: 엑셀 · CSV 파일 · INSERT 문(새 탭 / 파일). 보이는 열·정렬·거르기 그대로 */
+  async exportResult(kind: "xlsx" | "csv" | "insert-tab" | "insert-file") {
     if (!this.grid.rowCount()) return toast("내보낼 결과가 없습니다", "info");
-    const LIMIT = 1_048_575;
+    const LIMIT = kind === "xlsx" ? 1_048_575 : kind === "insert-tab" ? 50_000 : 5_000_000;
+    const what = { xlsx: "엑셀", csv: "CSV", "insert-tab": "INSERT 문", "insert-file": "INSERT 문" }[kind];
     if (this.grid.hasMoreRows()) {
-      const choice = await modal<"all" | "loaded">("엑셀로 내보내기",
+      const choice = await modal<"all" | "loaded">(`${what}로 내보내기`,
         h("pre", { class: "modal-text" },
           `지금 ${this.grid.rowCount().toLocaleString()}행을 가져왔고, 서버에 행이 더 남아 있습니다.\n\n` +
-          "전체를 내보내려면 남은 행을 모두 가져옵니다 (행이 많으면 시간이 걸립니다).\n엑셀 한 시트는 1,048,575행까지입니다."),
+          `전체를 내보내려면 남은 행을 모두 가져옵니다 (행이 많으면 시간이 걸립니다).\n${what}는 ${LIMIT.toLocaleString()}행까지 내보냅니다.`),
         [{ label: "가져온 행만", value: "loaded" }, { label: "전체 가져와서 내보내기", value: "all", kind: "primary" }]);
       if (!choice) return;
       if (choice === "all") {
@@ -210,7 +221,7 @@ class Tab {
         try {
           const r = await this.grid.loadAll(LIMIT, (n) => { this.gridStatus.textContent = `${n.toLocaleString()}행 가져오는 중…`; }, () => stop);
           if (r === "cancelled") return toast("내보내기를 멈췄습니다 (가져온 행은 그리드에 남아 있습니다)", "info");
-          if (r === "limit") toast(`엑셀 한도(${LIMIT.toLocaleString()}행)까지만 내보냅니다`, "info", 6000);
+          if (r === "limit") toast(`${LIMIT.toLocaleString()}행까지만 내보냅니다`, "info", 6000);
         } catch (e) {
           return toast(errOf(e).message, "error");
         } finally {
@@ -220,15 +231,47 @@ class Tab {
     }
     const data = this.grid.exportData();
     if (!data.rows.length) return toast("필터에 맞는 행이 없습니다", "info");
+    const rows = data.rows.length > LIMIT ? data.rows.slice(0, LIMIT) : data.rows;
     const stamp = new Date().toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "_");
     const base = this.filePath ? this.filePath.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "") : "result";
-    const path = await saveDialog({ filters: [{ name: "Excel", extensions: ["xlsx"] }], defaultPath: `${base}_${stamp}.xlsx` });
-    if (!path) return;
-    const rows = data.rows.length > LIMIT ? data.rows.slice(0, LIMIT) : data.rows;
-    this.gridStatus.textContent = `${rows.length.toLocaleString()}행을 엑셀로 쓰는 중…`;
     try {
-      const n = await api.exportXlsx(path, data.columns, rows, this.lastQuery?.sql ?? null);
-      toast(`${n.toLocaleString()}행을 엑셀로 저장했습니다`, "ok");
+      if (kind === "xlsx") {
+        const path = await saveDialog({ filters: [{ name: "Excel", extensions: ["xlsx"] }], defaultPath: `${base}_${stamp}.xlsx` });
+        if (!path) return;
+        this.gridStatus.textContent = `${rows.length.toLocaleString()}행을 엑셀로 쓰는 중…`;
+        const n = await api.exportXlsx(path, data.columns, rows, this.lastQuery?.sql ?? null);
+        return void toast(`${n.toLocaleString()}행을 엑셀로 저장했습니다`, "ok");
+      }
+      if (kind === "csv") {
+        const delim = h("select", {}, h("option", { value: "," }, "쉼표 ,"), h("option", { value: "\t" }, "탭"), h("option", { value: ";" }, "세미콜론 ;"));
+        const enc = h("select", {}, h("option", { value: "utf-8-bom" }, "UTF-8 (BOM — 엑셀에서 한글이 안 깨짐)"), h("option", { value: "utf-8" }, "UTF-8"), h("option", { value: "cp949" }, "CP949 (EUC-KR)"));
+        const head = h("input", { type: "checkbox", checked: true });
+        const ok = await modal("CSV 로 내보내기", h("div", { class: "form" },
+          field("구분자", delim), field("인코딩", enc), h("label", { class: "check" }, head, "첫 줄에 컬럼 이름"),
+          h("small", {}, `${rows.length.toLocaleString()}행 × ${data.columns.length}열 · 날짜는 화면에 보이는 형식(YYYY-MM-DD HH24:MI:SS) 그대로`)),
+          [{ label: "취소", value: false }, { label: "저장", value: true, kind: "primary" }]);
+        if (!ok) return;
+        const ext = delim.value === "\t" ? "tsv" : "csv";
+        const path = await saveDialog({ filters: [{ name: "CSV", extensions: [ext, "txt"] }], defaultPath: `${base}_${stamp}.${ext}` });
+        if (!path) return;
+        await api.writeFile(path, toCsvText(data.columns, rows, { delimiter: delim.value, header: head.checked }), enc.value);
+        return void toast(`${rows.length.toLocaleString()}행을 CSV 로 저장했습니다`, "ok");
+      }
+      // INSERT 문
+      const table = h("input", { value: this.editTable ?? guessTable(this.lastQuery?.sql), placeholder: "스키마.테이블", style: "width:100%" });
+      const bad = unsupportedCols(data.columns);
+      const ok = await modal("INSERT 문으로 내보내기", h("div", { class: "form" },
+        field("넣을 테이블", table, "다른 DB·스키마로 옮길 때 바꿔 쓰세요"),
+        h("small", {}, `${rows.length.toLocaleString()}행 · 날짜는 TO_DATE/TO_TIMESTAMP, 4000바이트가 넘는 글자는 TO_CLOB 로`),
+        bad.length ? h("small", { class: "warn" }, `바이너리 열은 NULL 로 넣습니다: ${bad.join(", ")}`) : ""),
+        [{ label: "취소", value: false }, { label: kind === "insert-tab" ? "새 탭에 넣기" : "저장", value: true, kind: "primary" }]);
+      if (!ok || !table.value.trim()) return;
+      const text = toInsertsText(table.value.trim(), data.columns, rows);
+      if (kind === "insert-tab") return void this.openText(`-- ${rows.length.toLocaleString()}행 · ${new Date().toLocaleString()}\n${text}`);
+      const path = await saveDialog({ filters: [{ name: "SQL", extensions: ["sql"] }], defaultPath: `${table.value.trim().replace(/[\\/:*?"<>|]/g, "_")}_${stamp}.sql` });
+      if (!path) return;
+      await api.writeFile(path, text, "utf-8");
+      toast(`${rows.length.toLocaleString()}행을 INSERT 문으로 저장했습니다`, "ok");
     } catch (e) {
       toast(errOf(e).message, "error");
     } finally {

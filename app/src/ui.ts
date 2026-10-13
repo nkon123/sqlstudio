@@ -86,24 +86,49 @@ export async function passwordBox(profile: string, user: string): Promise<{ pass
   return r ? { password: input.value, remember: remember.checked } : null;
 }
 
-/** 바인드 변수 입력. 지난 값을 기억해 채워 준다. 빈 칸 + NULL 체크 = NULL. */
-const lastBinds: Record<string, string | null> = {};
+/**
+ * 바인드 변수 입력. 이름마다 최근 값 10개를 이 PC 에 남겨 두고(다시 켜도 남음) 마지막 값을 채운다.
+ * 칸을 누르면 최근 값 목록에서 고른다. 빈 칸 + NULL 체크 = NULL.
+ */
+const BIND_KEY = "binds.history";
+const BIND_KEEP = 10;
+type BindHist = Record<string, (string | null)[]>;
+function loadBinds(): BindHist {
+  try { const v = JSON.parse(localStorage.getItem(BIND_KEY) ?? "{}"); return v && typeof v === "object" ? v : {}; } catch { return {}; }
+}
+function saveBinds(hist: BindHist) {
+  // 이름이 너무 많아지면 오래된 것부터 (최근에 쓴 이름이 뒤에 온다)
+  const names = Object.keys(hist);
+  for (const n of names.slice(0, Math.max(0, names.length - 300))) delete hist[n];
+  try { localStorage.setItem(BIND_KEY, JSON.stringify(hist)); } catch { /* 저장 못 해도 실행은 된다 */ }
+}
+let bindSeq = 0;
 export async function bindBox(names: string[]): Promise<[string, string | null][] | null> {
+  const hist = loadBinds();
   const rows = names.map((n) => {
-    const v = h("input", { value: lastBinds[n] ?? "", placeholder: "값" });
-    const isNull = h("input", { type: "checkbox", checked: lastBinds[n] === null });
-    return { n, v, isNull, el: h("div", { class: "bind-row" }, h("code", {}, `:${n}`), v, h("label", {}, isNull, "NULL")) };
+    const past = hist[n] ?? [];
+    const last = past[0];
+    const listId = `bind-hist-${++bindSeq}`;
+    const v = h("input", { value: last ?? "", placeholder: past.length ? "값 (칸을 눌러 최근 값 고르기)" : "값" });
+    v.setAttribute("list", listId);
+    const list = h("datalist", { id: listId }, ...past.filter((x): x is string => x != null && x !== "").map((x) => h("option", { value: x })));
+    const isNull = h("input", { type: "checkbox", checked: past.length > 0 && last === null });
+    v.addEventListener("input", () => { if (v.value) isNull.checked = false; });
+    return { n, v, isNull, el: h("div", { class: "bind-row" }, h("code", {}, `:${n}`), v, list, h("label", {}, isNull, "NULL")) };
   });
   const r = await modal("바인드 변수", h("div", { class: "bind-list" }, ...rows.map((x) => x.el)), [
     { label: "취소", value: false },
     { label: "실행", value: true, kind: "primary" },
   ]);
   if (!r) return null;
-  return rows.map(({ n, v, isNull }) => {
-    const val = isNull.checked ? null : v.value;
-    lastBinds[n] = val;
-    return [n, val];
-  });
+  const out = rows.map(({ n, v, isNull }): [string, string | null] => [n, isNull.checked ? null : v.value]);
+  for (const [n, val] of out) {
+    const prev = (hist[n] ?? []).filter((x) => x !== val);
+    delete hist[n];
+    hist[n] = [val, ...prev].slice(0, BIND_KEEP);
+  }
+  saveBinds(hist);
+  return out;
 }
 
 export function toast(text: string, kind: "info" | "error" | "ok" = "info", ms = 3500) {

@@ -491,3 +491,6 @@ dialog.imp { width: min(1100px, 95vw); }
 #app.dfd-window .dfd { height: 100%; }
 .dfd-empty { padding: 40px; text-align: center; color: var(--text); }
 .dfd-empty .hint { color: var(--dim); }
+
+/* ── 결과 내보내기 ── */
+.export-sel { font-size: 12px; padding: 1px 4px; }

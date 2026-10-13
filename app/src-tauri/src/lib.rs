@@ -14,6 +14,7 @@ mod git;
 mod history;
 mod import;
 mod monitor;
+mod schemacmp;
 mod state;
 
 use state::AppState;
@@ -123,6 +124,11 @@ pub fn run() {
             analyze::analysis_peek,
             analyze::analysis_import,
             analyze::analysis_remove_set,
+            schemacmp::schema_compare_start,
+            schemacmp::schema_compare_cancel,
+            schemacmp::schema_compare_detail,
+            schemacmp::schema_compare_script,
+            schemacmp::schema_compare_close,
             analyze::dfd_reports,
             analyze::dfd_report_get,
             analyze::dfd_report_save,

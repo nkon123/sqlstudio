@@ -22,6 +22,7 @@ import { ResultGrid } from "./grid";
 import { guessTable, toCsv as toCsvText, toInserts as toInsertsText, unsupported as unsupportedCols } from "./export-text";
 import { aliasMap, showColumns } from "./colpopup";
 import { showMenu, type MenuItem } from "./ctxmenu";
+import { SchemaCompareView } from "./schemacmp";
 import { openHistory } from "./history";
 import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
@@ -71,6 +72,8 @@ class Tab {
   private openText: (text: string) => void = () => {};
   private an: AnalysisView | null = null;
   private mon: MonitorView | null = null;
+  private cmp: SchemaCompareView | null = null;
+  private app: App;
 
   /** 디버거 화면 (탭의 접속을 쓴다) */
   debugger(): DebugView {
@@ -78,6 +81,7 @@ class Tab {
       this.dbg = new DebugView(() => this.conn?.id, () => this.showEditor());
       this.root.append(this.dbg.el);
     }
+    if (this.cmp) this.cmp.el.hidden = true;
     for (const p of this.editorParts) p.hidden = true;
     if (this.an) this.an.el.hidden = true;
     if (this.mon) this.mon.el.hidden = true;
@@ -90,6 +94,7 @@ class Tab {
       this.an = new AnalysisView(() => this.conn?.id, () => this.showEditor());
       this.root.append(this.an.el);
     }
+    if (this.cmp) this.cmp.el.hidden = true;
     for (const p of this.editorParts) p.hidden = true;
     if (this.dbg) this.dbg.el.hidden = true;
     if (this.mon) this.mon.el.hidden = true;
@@ -102,20 +107,36 @@ class Tab {
       this.mon = new MonitorView(() => this.conn?.id, () => this.showEditor());
       this.root.append(this.mon.el);
     }
+    if (this.cmp) this.cmp.el.hidden = true;
     for (const p of this.editorParts) p.hidden = true;
     if (this.dbg) this.dbg.el.hidden = true;
     if (this.an) this.an.el.hidden = true;
     return this.mon;
   }
 
+  /** 스키마 비교 (탭의 접속이 원본) */
+  compare(): SchemaCompareView {
+    if (!this.cmp) {
+      this.cmp = new SchemaCompareView(() => this.conn?.id, () => this.conn?.profile, () => this.showEditor(), (text) => void this.app.newTab(false, text));
+      this.root.append(this.cmp.el);
+    }
+    for (const p of this.editorParts) p.hidden = true;
+    if (this.dbg) this.dbg.el.hidden = true;
+    if (this.an) this.an.el.hidden = true;
+    if (this.mon) this.mon.el.hidden = true;
+    return this.cmp;
+  }
+
   showEditor() {
     if (this.an) this.an.el.hidden = true;
     if (this.mon) this.mon.el.hidden = true;
+    if (this.cmp) this.cmp.el.hidden = true;
     for (const p of this.editorParts) p.hidden = false;
     this.editor.focus();
   }
 
   constructor(app: App, text = "") {
+    this.app = app;
     const editorHost = h("div", { class: "editor-host" });
     this.grid = new ResultGrid({
       onNeedMore: async () => (this.conn ? api.fetchMore(this.conn.id, 1000) : null),
@@ -335,6 +356,7 @@ class App {
       b("debug", "디버그", "PL/SQL 디버거 — 커서 위치 블록을 디버그로 연다 (탐색기에서 프로시저·패키지를 골라도 된다)", () => this.debugActive()),
       b("dfd", "흐름도", "데이터 흐름도를 별도 창으로 — 분석 결과에서 테이블 ← 처리 ← 테이블 흐름 (테이블 상세의 '흐름도'로 열면 그 테이블 기준)", () => this.openDfd()),
       b("analyze", "분석", "PL/SQL 분석 — 패키지·프로시저를 조각내어 (로컬) 모델로 분석하고 호출 관계·테이블 CRUD 를 통합한다", () => this.analyzeActive()),
+      b("compare", "비교", "스키마 비교 — 이 탭(원본)과 다른 접속(대상)의 테이블·뷰·시퀀스·소스를 맞대고 맞추는 스크립트를 만든다", () => this.compareActive()),
       b("monitor", "세션", "세션·락 모니터 — 누가 무엇을 막고 있는지, 세션의 SQL·트랜잭션, 세션 종료(확인 후)", () => this.monitorActive()),
       b("cancel", "중지", "실행 중인 쿼리를 취소", () => this.cancel(), "danger"),
       h("span", { class: "sep" }),
@@ -968,6 +990,12 @@ class App {
     t.debugger().openBlock(text);
   }
 
+  private compareActive() {
+    const t = this.need();
+    if (!t) return;
+    void t.compare().open();
+  }
+
   private monitorActive() {
     const t = this.need();
     if (!t) return;
@@ -1593,7 +1621,7 @@ class App {
     const busy = !!t?.running;
     this.btn.connect.disabled = busy;
     this.btn.disconnect.disabled = !c || busy;
-    for (const k of ["run", "script", "explain", "debug", "monitor"]) this.btn[k].disabled = !c || busy;
+    for (const k of ["run", "script", "explain", "debug", "monitor", "compare"]) this.btn[k].disabled = !c || busy;
     // 분석은 접속 없이도 — 가져온 결과를 본다
     this.btn.analyze.disabled = busy;
     this.btn.cancel.disabled = !busy;

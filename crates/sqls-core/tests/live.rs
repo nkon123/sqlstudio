@@ -488,6 +488,8 @@ async fn schema_compare_two_schemas() {
     let s = Session::connect(spec(false)).await.unwrap();
     let me = s.info().user.clone();
     let _ = s.execute("CREATE USER cmp_b IDENTIFIED BY cmp_b", ExecOptions::default()).await;
+    // 테이블을 만들 자리 (기본 테이블스페이스 할당량)
+    exec(&s, "ALTER USER cmp_b QUOTA UNLIMITED ON SYSTEM").await;
     for t in ["cmp_orders", "cmp_new", "cmp_b.cmp_orders", "cmp_b.cmp_gone"] {
         let _ = s.execute(&format!("DROP TABLE {t} CASCADE CONSTRAINTS"), ExecOptions::default()).await;
     }

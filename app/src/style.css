@@ -536,3 +536,18 @@ dialog.imp { width: min(1100px, 95vw); }
 .conn-report { max-height: 320px; overflow: auto; white-space: pre-wrap; user-select: text; }
 .conn-events { max-height: 300px; overflow: auto; }
 .conn-events tr.warn td { color: var(--warn); }
+
+/* 스키마 비교 */
+.sc-main { grid-template-columns: minmax(200px, 38%) 1px minmax(0, 1fr); }
+.an-gutter-static { background: var(--line); }
+.sc-detail { overflow: auto; min-width: 0; }
+.sc-details li { font-family: var(--mono); font-size: 12px; }
+.sc-diff { overflow: auto; }
+.sc-table { border-collapse: collapse; width: 100%; font: 12px/1.45 var(--mono); table-layout: fixed; }
+.sc-table th { position: sticky; top: 0; background: var(--panel); text-align: left; font: 600 12px var(--sans, inherit); color: var(--dim); border-bottom: 1px solid var(--line); padding: 3px 6px; }
+.sc-table td { vertical-align: top; padding: 0 6px; white-space: pre-wrap; word-break: break-all; }
+.sc-ln { width: 44px; color: var(--dim); text-align: right; user-select: none; border-right: 1px solid var(--line); }
+.sc-del { background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.sc-add { background: color-mix(in srgb, var(--ok) 16%, transparent); }
+.sc-empty { background: color-mix(in srgb, var(--text) 4%, transparent); }
+.sc-fold td { color: var(--dim); text-align: center; font-style: italic; background: color-mix(in srgb, var(--text) 3%, transparent); }

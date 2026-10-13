@@ -54,6 +54,14 @@ pub fn run() {
     tracing::info!("SQLStudio {} 시작 — 설정 {}", env!("CARGO_PKG_VERSION"), sqls_core::config::config_path().display());
     // 접속·끊김·다시 접속 기록 (설정 > 정보 > 접속 진단 이 요약한다)
     sqls_core::connlog::init(log_dir().join("connection.jsonl"));
+    // 예상 못 한 오류(패닉)도 남긴다 — 세션 작업 스레드에서 나면 그 세션이 닫혀 '끊김' 으로 보인다
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current().name().unwrap_or("?").to_string();
+        tracing::error!("패닉 (스레드 {thread}): {info}");
+        sqls_core::connlog::record(sqls_core::connlog::Ev { kind: "panic".into(), who: thread, msg: info.to_string(), ..Default::default() });
+        default_hook(info);
+    }));
 
     let state = AppState::load();
 

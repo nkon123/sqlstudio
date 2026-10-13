@@ -17,6 +17,8 @@ export interface Profile {
 }
 export interface Connected {
   id: number; user: string; connect_string: string; server_version: string; read_only: boolean; color?: string | null; production?: boolean;
+  /** 서버 세션 번호 — 같으면 같은 접속 */
+  sid?: number;
 }
 export interface Column { name: string; type_name: string; nullable: boolean }
 export interface RowPage { columns: Column[]; rows: (string | null)[][]; has_more: boolean; fetched_total: number }

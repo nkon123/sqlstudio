@@ -29,7 +29,7 @@ import { showShortcuts } from "./shortcuts";
 import { DEFAULT_SNIPPETS, loadSnippets, parse as parseSnippets, saveSnippets, snippets, type Snip } from "./snippets";
 import { alertBox, bindBox, confirmBox, field, h, modal, passwordBox, toast } from "./ui";
 
-type Conn = Connected & { profile: string };
+type Conn = Connected & { profile: string; /** 접속한 때 (ms) */ at?: number };
 type Pane = "result" | "output" | "plan" | "desc";
 
 let tabSeq = 1;
@@ -589,7 +589,7 @@ class App {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const c = await api.connect(p.name, password, remember);
-        t.conn = { ...c, profile: p.name };
+        t.conn = { ...c, profile: p.name, at: Date.now() };
         t.txnPending = false;
         t.refreshTitle();
         t.log(`접속: ${c.user}@${c.connect_string} — ${c.server_version}${c.read_only ? " (읽기 전용)" : ""}`, "ok");
@@ -637,7 +637,7 @@ class App {
         if (t.conn || !this.tabs.includes(t)) return; // 그새 사용자가 접속했거나 탭을 닫았다
         try {
           const c = await api.connect(old.profile);
-          t.conn = { ...c, profile: old.profile };
+          t.conn = { ...c, profile: old.profile, at: Date.now() };
           t.refreshTitle();
           this.refresh();
           if (t === this.active) this.loadBrowser();
@@ -1628,7 +1628,8 @@ class App {
     this.btn.commit.disabled = !c || busy || !t?.txnPending;
     this.btn.rollback.disabled = !c || busy || !t?.txnPending;
     this.txnBadge.hidden = !t?.txnPending;
-    this.connBadge.textContent = c ? `${c.production ? "운영 · " : ""}${c.user}@${c.connect_string}${c.read_only ? " · 읽기 전용" : ""}` : "접속 안 됨";
+    this.connBadge.textContent = c ? `${c.production ? "운영 · " : ""}${c.user}@${c.connect_string}${c.read_only ? " · 읽기 전용" : ""}${c.sid ? ` · SID ${c.sid}` : ""}` : "접속 안 됨";
+    this.connBadge.title = c ? `세션 SID ${c.sid ?? "?"} · ${c.at ? `${new Date(c.at).toLocaleTimeString()} 에 접속` : ""} — 화면을 오가도 SID 가 같으면 같은 접속입니다 (다시 접속하면 바뀝니다)` : "";
     this.connBadge.classList.toggle("prod", !!c?.production);
     this.connBadge.style.background = c?.color ?? "";
     this.connBadge.classList.toggle("on", !!c);

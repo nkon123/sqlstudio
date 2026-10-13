@@ -230,6 +230,10 @@ pub fn summarize(evs: &[Ev], since: u64, until: u64, mask: bool, app_version: &s
             s.push_str(&format!("  어디서: {}\n", per.iter().map(|(k, n)| format!("{k} {n}회")).collect::<Vec<_>>().join(", ")));
         }
     }
+    let panics = evs.iter().filter(|e| e.kind == "panic").count();
+    if panics > 0 {
+        s.push_str(&format!("- 앱 내부 오류(패닉) {panics}회 — 세션 스레드에서 났으면 그 세션이 닫혀 끊김처럼 보입니다. 로그(sqlstudio.log)의 '패닉' 줄을 확인하세요\n"));
+    }
     if rec_ok + rec_fail > 0 {
         s.push_str(&format!("- 다시 접속: {}회 중 {}회 성공\n", rec_ok + rec_fail, rec_ok));
     }

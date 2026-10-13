@@ -556,3 +556,51 @@ async fn schema_compare_two_schemas() {
     assert!(left.is_empty(), "스크립트를 돌린 뒤에도 다른 것: {left:#?}\n{script}");
     s.close();
 }
+
+/// 화면을 오가는 사용: 작업 탭에 트랜잭션을 열어 둔 채, 사전 조회 세션으로 분석·흐름도처럼 조회하고, 쉬었다가(keepalive)
+/// 편집기로 돌아와 실행하기를 되풀이한다 — 두 세션 모두 끊기지 않고 같은 세션(SID)이며, 트랜잭션도 그대로여야 한다
+#[tokio::test]
+#[ignore]
+async fn sessions_survive_switching_between_views() {
+    let mut ws = spec(false);
+    ws.keepalive = Some(Duration::from_secs(1));
+    let work = Session::connect(ws).await.unwrap();
+    let mut ms = spec(true);
+    ms.keepalive = Some(Duration::from_secs(1));
+    ms.module = "SQLStudio-Meta".into();
+    ms.dbms_output = false;
+    ms.call_timeout = Some(Duration::from_secs(120));
+    let meta = Session::connect(ms).await.unwrap();
+    let (sid_w, sid_m) = (work.info().sid, meta.info().sid);
+
+    let _ = work.execute("CREATE TABLE keep_t (id NUMBER)", ExecOptions::default()).await;
+    exec(&work, "INSERT INTO keep_t VALUES (1)").await;
+    assert_eq!(work.in_transaction(), Some(true));
+    let me = work.info().user.clone();
+    for round in 0..3 {
+        // 분석·흐름도: 사전 조회 세션으로 목록·소스·의존성 (작업 세션은 쉰다)
+        for _ in 0..5 {
+            meta.query("SELECT object_name, object_type FROM all_objects WHERE owner = :o AND ROWNUM <= 500", vec![("O".into(), Some(me.clone()))], 1000).await.unwrap();
+        }
+        meta.query("SELECT referenced_name FROM all_dependencies WHERE owner = :o AND ROWNUM <= 200", vec![("O".into(), Some(me.clone()))], 1000).await.unwrap();
+        meta.query("SELECT text FROM all_source WHERE owner = 'SYS' AND name = 'DBMS_OUTPUT' AND type = 'PACKAGE'", vec![], 10_000).await.unwrap();
+        // 화면을 보며 쉰다 — keepalive 가 두 세션에 몇 번 돈다
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        // 편집기로 돌아와 실행
+        let r = exec(&work, "SELECT COUNT(*) FROM keep_t").await;
+        assert_eq!(rows(&r.outcome).rows[0][0].as_deref(), Some("1"), "{round}회째: 커밋 안 한 행이 보여야 한다 (같은 트랜잭션)");
+        assert!(!work.is_lost() && !meta.is_lost(), "{round}회째: 끊김으로 표시되면 안 된다");
+        assert_eq!(work.in_transaction(), Some(true), "{round}회째: 트랜잭션이 그대로");
+    }
+    // 같은 세션인지: 서버가 보는 SID 그대로, keepalive 가 돌았고 실패는 없다
+    let sid_now = exec(&work, "SELECT SYS_CONTEXT('USERENV', 'SID') FROM dual").await;
+    assert_eq!(rows(&sid_now.outcome).rows[0][0].as_deref(), Some(sid_w.to_string().as_str()));
+    let m = meta.query("SELECT SYS_CONTEXT('USERENV', 'SID') FROM dual", vec![], 1).await.unwrap();
+    assert_eq!(m.rows[0][0].as_deref(), Some(sid_m.to_string().as_str()));
+    let (pw, pm) = (work.keepalive_state(), meta.keepalive_state());
+    assert!(pw.0 >= 3 && pw.1.is_none(), "작업 세션 keepalive {pw:?}");
+    assert!(pm.0 >= 1 && pm.1.is_none(), "사전 조회 세션 keepalive {pm:?}");
+    work.rollback().await.unwrap();
+    work.close();
+    meta.close();
+}

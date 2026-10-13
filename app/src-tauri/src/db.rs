@@ -158,6 +158,8 @@ pub struct Connected {
     read_only: bool,
     color: Option<String>,
     production: bool,
+    /// 서버 세션 번호 — 화면을 오간 뒤에도 같으면 같은 접속 (다시 접속하면 바뀐다)
+    sid: i64,
 }
 
 #[tauri::command]
@@ -236,6 +238,7 @@ pub async fn connect(
         read_only: info.read_only,
         color: p.color.clone(),
         production: p.production,
+        sid: info.sid,
     })
 }
 

@@ -1,10 +1,19 @@
 // 테이블 컬럼 팝업 — 편집기 위에 떠 있는 작은 창. 여러 개 띄울 수 있고, 띄운 채로 SQL 을 계속 쓴다.
 //
 // 편집기에서 F4 (커서의 테이블·별칭), 왼쪽 테이블 목록에서 우클릭.
-// 클릭: 행 선택 (Ctrl·Shift 로 여러 개) · 더블클릭: 컬럼 이름 넣기 · Ctrl+C: 고른 행 복사 · Esc: 닫기 · 머리 끌기: 옮기기 · 오른쪽 아래 모서리: 크기
+// 결과 그리드와 같다: 셀 단위 선택(끌기·Shift) · Ctrl+C 고른 셀 복사(컬럼 칸만 고르면 이름만) · 머리 눌러 정렬 · 열 너비
+// 더블클릭: 컬럼 이름 넣기 · 우클릭: 이름 복사·넣기 · Esc: 닫기 · 머리 끌기: 옮기기 · 오른쪽 아래 모서리: 크기
 
-import type { TableDesc } from "./api";
+import type { Column, TableDesc } from "./api";
+import { showMenu } from "./ctxmenu";
+import { ResultGrid } from "./grid";
 import { h, toast } from "./ui";
+
+const col = (name: string, type_name = "VARCHAR2"): Column => ({ name, type_name, nullable: true });
+/** 컬럼 그리드의 열 — 순서는 그리드 왼쪽 번호 (머리를 세 번 누르면 원래 순서) */
+const COLS = [col("컬럼"), col("형식"), col("NULL"), col("기본값"), col("설명"), col("키·인덱스")];
+const NAME = 0;
+const IDX_COLS = [col("인덱스"), col("유일"), col("컬럼")];
 
 export interface ColPopupOpts {
   /** 화면 좌표 — 이 근처에 띄운다 */
@@ -16,7 +25,6 @@ export interface ColPopupOpts {
   ddl?: () => void;
 }
 
-type SortKey = "no" | "name" | "type" | "null" | "default" | "comment";
 const open: HTMLElement[] = [];
 let zTop = 60;
 /** 떠 있는 창 → 내용 바꾸기 (캐시로 먼저 띄운 뒤 전체 구조가 오면) */
@@ -45,9 +53,6 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
     rows = x.columns.map((c, i) => ({ no: i + 1, ...c }));
   };
   setData(d);
-  let sort: { k: SortKey; desc: boolean } = { k: "no", desc: false };
-  const picked = new Set<string>();
-  let anchor = -1;
   let view = "cols" as "cols" | "idx";
 
   const filter = h("input", { placeholder: "컬럼·형식·설명 거르기", class: "cp-filter" });
@@ -59,10 +64,31 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   const subText = () => ` ${d.object_type}${d.comment ? ` — ${d.comment}` : ""}${d.num_rows ? ` · ${Number(d.num_rows).toLocaleString()}행` : ""}${d.partial ? " · 나머지 읽는 중…" : ""}`;
   sub.textContent = subText();
   const prefix = o.alias ? `${o.alias}.` : "";
+  /** 고른 행의 컬럼 이름 (고른 게 없으면 보이는 전체) */
   const names = () => {
-    const sel = shown().filter((r) => picked.has(r.name));
-    return (sel.length ? sel : shown()).map((r) => prefix + r.name);
+    const sel = grid.selectedRows();
+    return (sel.length ? sel : grid.viewRows()).map((r) => prefix + (r[NAME] ?? ""));
   };
+  const copyNames = () => {
+    const v = names();
+    navigator.clipboard.writeText(v.join("\n")).then(() => toast(`컬럼 이름 ${v.length}개 복사`, "info", 1500)).catch(() => {});
+  };
+  const grid: ResultGrid = new ResultGrid({
+    onStatus: () => { count.textContent = view === "cols" && grid.viewRows().length !== rows.length ? `${grid.viewRows().length}/${rows.length}` : ""; },
+    onDoubleClick: (r) => { if (view === "cols" && r[NAME]) o.insert(prefix + r[NAME]); return true; },
+    onContextMenu: (_r, _c, e) => {
+      if (view !== "cols") return;
+      const n = grid.selectedRows().length;
+      showMenu(e.clientX, e.clientY, [
+        { label: n > 1 ? `컬럼 이름 복사 (${n}개, 줄마다)` : "컬럼 이름 복사", hint: "", run: copyNames },
+        { label: "쉼표로 이어 복사", run: () => navigator.clipboard.writeText(names().join(", ")).catch(() => {}) },
+        { label: "고른 셀 복사", hint: "Ctrl+C", run: () => navigator.clipboard.writeText(grid.selectionText()).catch(() => {}) },
+        { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(grid.selectionText(true)).catch(() => {}) },
+        { sep: true },
+        { label: "컬럼 넣기", run: () => o.insert(names().join(", ")) },
+      ]);
+    },
+  });
   const win = h("div", { class: "cp-win", tabindex: "-1", "data-key": key },
     h("div", { class: "cp-head", title: "끌어서 옮기기" },
       h("strong", {}, `${d.owner}.${d.name}`),
@@ -70,66 +96,21 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
       h("span", { class: "spacer" }),
       h("button", { class: "cp-x", title: "닫기 (Esc)", onclick: () => close() }, "×")),
     h("div", { class: "cp-tools" }, tabCols, tabIdx, filter, count, h("span", { class: "spacer" }),
+      h("button", { class: "small", title: "고른 행(없으면 보이는 전체)의 컬럼 이름을 줄마다 복사", onclick: copyNames }, "이름 복사"),
       h("button", { class: "small", title: "고른 컬럼(없으면 보이는 전체)을 쉼표로 넣는다", onclick: () => o.insert(names().join(", ")) }, "컬럼 넣기"),
       h("button", { class: "small", title: "SELECT 문을 넣는다", onclick: () => o.insert(`SELECT ${names().join(", ")}\n  FROM ${d.owner}.${d.name}${o.alias ? ` ${o.alias}` : ""}\n WHERE ROWNUM <= 100`) }, "SELECT"),
       o.ddl ? h("button", { class: "small", onclick: () => o.ddl!() }, "DDL") : ""),
     body);
 
-  function shown() {
-    const q = filter.value.trim().toUpperCase();
-    const v = q ? rows.filter((r) => `${r.name} ${r.data_type} ${r.comment ?? ""} ${r.default ?? ""}`.toUpperCase().includes(q)) : rows.slice();
-    const val = (r: (typeof rows)[number]): string | number =>
-      sort.k === "no" ? r.no : sort.k === "name" ? r.name : sort.k === "type" ? r.data_type : sort.k === "null" ? (r.nullable ? 1 : 0) : sort.k === "default" ? r.default ?? "" : r.comment ?? "";
-    v.sort((a, b) => { const x = val(a), y = val(b); const c = typeof x === "number" ? x - (y as number) : String(x).localeCompare(String(y)); return sort.desc ? -c : c; });
-    return v;
-  }
-
   function render() {
     if (view === "idx") {
       count.textContent = "";
-      body.replaceChildren(d.indexes.length ? h("table", { class: "cp-grid" },
-        h("thead", {}, h("tr", {}, ...["인덱스", "유일", "컬럼"].map((x) => h("th", {}, x)))),
-        h("tbody", {}, ...d.indexes.map((i) => h("tr", {}, h("td", {}, i.name), h("td", {}, i.unique ? "UNIQUE" : ""), h("td", {}, i.columns.join(", "))))))
-        : h("div", { class: "cp-empty" }, "인덱스가 없습니다"));
+      grid.setPage({ columns: IDX_COLS, rows: d.indexes.map((i) => [i.name, i.unique ? "UNIQUE" : "", i.columns.join(", ")]), has_more: false, fetched_total: d.indexes.length });
       return;
     }
-    const v = shown();
-    count.textContent = v.length === rows.length ? "" : `${v.length}/${rows.length}`;
-    const th = (k: SortKey, label: string) => {
-      const el = h("th", { class: "sortable", title: "눌러서 정렬" }, label, sort.k === k ? (sort.desc ? " ▼" : " ▲") : "");
-      el.onclick = () => { sort = { k, desc: sort.k === k ? !sort.desc : false }; render(); };
-      return el;
-    };
-    const tbody = h("tbody", {});
-    v.forEach((r, i) => {
-      const tr = h("tr", { class: picked.has(r.name) ? "sel" : "" },
-        h("td", { class: "num" }, String(r.no)),
-        h("td", { class: "cp-name" }, pk.has(r.name) ? h("span", { class: "cp-pk", title: "기본 키" }, "PK") : "", r.name),
-        h("td", {}, r.data_type),
-        h("td", { class: "cp-nn" }, r.nullable ? "" : "NOT NULL"),
-        h("td", { class: "cp-def", title: r.default ?? "" }, r.default ?? ""),
-        h("td", { title: [r.comment, idxCols.has(r.name) ? `인덱스: ${idxCols.get(r.name)!.join(", ")}` : ""].filter(Boolean).join("\n") }, r.comment ?? ""));
-      tr.onmousedown = (e) => {
-        if (e.shiftKey && anchor >= 0) {
-          const [a, b] = [Math.min(anchor, i), Math.max(anchor, i)];
-          if (!e.ctrlKey) picked.clear();
-          for (let k = a; k <= b; k++) picked.add(v[k].name);
-        } else if (e.ctrlKey || e.metaKey) {
-          picked.has(r.name) ? picked.delete(r.name) : picked.add(r.name);
-          anchor = i;
-        } else {
-          picked.clear(); picked.add(r.name); anchor = i;
-        }
-        e.preventDefault();
-        win.focus();
-        render();
-      };
-      tr.ondblclick = () => o.insert(prefix + r.name);
-      tbody.append(tr);
-    });
-    body.replaceChildren(h("table", { class: "cp-grid" },
-      h("thead", {}, h("tr", {}, th("no", "#"), th("name", "컬럼"), th("type", "형식"), th("null", "NULL"), th("default", "기본값"), th("comment", "설명"))),
-      tbody));
+    const data = rows.map((r) => [r.name, r.data_type, r.nullable ? "" : "NOT NULL", r.default ?? "", r.comment ?? "",
+      [pk.has(r.name) ? "PK" : "", ...(idxCols.get(r.name) ?? [])].filter(Boolean).join(", ")]);
+    grid.setPage({ columns: COLS, rows: data, has_more: false, fetched_total: data.length });
   }
 
   function close() {
@@ -139,20 +120,12 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
 
   tabCols.onclick = () => { view = "cols"; tabCols.classList.add("on"); tabIdx.classList.remove("on"); render(); };
   tabIdx.onclick = () => { view = "idx"; tabIdx.classList.add("on"); tabCols.classList.remove("on"); render(); };
-  filter.addEventListener("input", render);
+  // 거르기: 아무 칸에 든 글자 (그리드 필터식도 된다: 형식~DATE)
+  filter.addEventListener("input", () => grid.setFilter(filter.value));
+  filter.addEventListener("keydown", (e) => { if (e.key === "ArrowDown") { e.preventDefault(); grid.el.focus(); } });
+  body.append(grid.el);
   win.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { e.stopPropagation(); close(); }
-    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c" && e.target !== filter && view === "cols") {
-      const v = shown().filter((r) => picked.has(r.name));
-      if (!v.length) return;
-      e.preventDefault();
-      const tsv = v.map((r) => [r.name, r.data_type, r.nullable ? "" : "NOT NULL", r.default ?? "", r.comment ?? ""].join("\t")).join("\n");
-      navigator.clipboard.writeText(tsv).then(() => toast(`${v.length}행 복사`, "info", 1500)).catch(() => {});
-    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a" && e.target !== filter) {
-      e.preventDefault();
-      for (const r of shown()) picked.add(r.name);
-      render();
-    }
   });
   win.addEventListener("mousedown", () => { win.style.zIndex = String(++zTop); });
 

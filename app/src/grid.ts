@@ -179,6 +179,11 @@ export class ResultGrid {
     this.status();
   }
 
+  /** 지금 보이는 행 전부 (필터·정렬 반영, 화면 순서) */
+  viewRows(): (string | null)[][] {
+    return this.view.map((i) => this.rows[i]);
+  }
+
   /** 선택 영역에 걸친 행들 (화면 순서) */
   selectedRows(): (string | null)[][] {
     const s = this.sel;

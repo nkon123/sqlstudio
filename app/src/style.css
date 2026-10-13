@@ -394,7 +394,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .cp-tab.on { background: var(--sel); border-color: var(--accent); }
 .cp-filter { width: 160px; padding: 1px 6px; }
 .cp-count { color: var(--dim); }
-.cp-body { flex: 1; overflow: auto; min-height: 0; }
+.cp-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 .cp-grid { width: 100%; border-collapse: collapse; }
 .cp-grid th { position: sticky; top: 0; background: var(--panel); text-align: left; color: var(--dim); font-weight: 600; border-bottom: 1px solid var(--line); padding: 2px 6px; white-space: nowrap; }
 .cp-grid th.sortable { cursor: pointer; }

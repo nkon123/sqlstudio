@@ -249,6 +249,8 @@ pub struct Session {
     pings: Arc<std::sync::Mutex<(u32, Option<String>)>>,
     /// 마지막 호출이 끝난 때 (유닉스 초) — 끊기기 전에 얼마나 쉬었는지
     last_done: Arc<std::sync::atomic::AtomicU64>,
+    /// 서버가 알려 준 트랜잭션 상태: 1 진행 중, 0 없음, -1 모름 (Client 12.1 미만 등)
+    txn: Arc<std::sync::atomic::AtomicI8>,
     /// 다시 접속할 때 쓴다 ([`Session::reopen`]). 비밀번호는 메모리에만
     spec: Arc<ConnectSpec>,
 }
@@ -282,6 +284,7 @@ impl Session {
                         let (abandoned, abandoned_rx) = watch::channel(false);
                         let lost = Arc::new(watch::channel(false).0);
                         let pings = Arc::new(std::sync::Mutex::new((0, None)));
+                        let txn = Arc::new(std::sync::atomic::AtomicI8::new(-1));
                         let session = Session {
                             tx: ctx,
                             conn: conn.clone(),
@@ -291,6 +294,7 @@ impl Session {
                             lost: lost.clone(),
                             pings: pings.clone(),
                             last_done: Arc::new(std::sync::atomic::AtomicU64::new(connlog::now())),
+                            txn: txn.clone(),
                             spec: keep,
                         };
                         let sid = session.info.sid;
@@ -298,7 +302,7 @@ impl Session {
                             let _ = conn.close();
                             return;
                         }
-                        Worker::new(conn, spec, busy, abandoned_rx, lost, pings, sid).run(crx);
+                        Worker::new(conn, spec, busy, abandoned_rx, lost, pings, sid, txn).run(crx);
                     }
                     Err(e) => {
                         let _ = tx.send(Err(e));
@@ -364,6 +368,16 @@ impl Session {
         match tokio::time::timeout(REOPEN_LIMIT, Session::connect((*self.spec).clone())).await {
             Ok(r) => r,
             Err(_) => Err(Error::ConnectionLost(format!("다시 접속하지 못했습니다 ({}초 안에 응답 없음)", REOPEN_LIMIT.as_secs()))),
+        }
+    }
+
+    /// 커밋하지 않은 트랜잭션이 있는지 — 드라이버가 서버 응답으로 아는 값 (DB 왕복 없음).
+    /// SELECT … FOR UPDATE·LOCK TABLE·프로시저 안의 DML 도 잡고, DML 없는 블록은 잡지 않는다. 모르면 None
+    pub fn in_transaction(&self) -> Option<bool> {
+        match self.txn.load(Ordering::Relaxed) {
+            1 => Some(true),
+            0 => Some(false),
+            _ => None,
         }
     }
 
@@ -538,6 +552,7 @@ struct Worker {
     lost: Arc<watch::Sender<bool>>,
     pings: Arc<std::sync::Mutex<(u32, Option<String>)>>,
     sid: i64,
+    txn: Arc<std::sync::atomic::AtomicI8>,
     /// 마지막으로 명령을 받은 때 — keepalive 로 끊김을 알았을 때 얼마나 쉬었는지
     last_cmd: Instant,
     cursor: Option<OpenCursor>,
@@ -552,8 +567,9 @@ impl Worker {
         lost: Arc<watch::Sender<bool>>,
         pings: Arc<std::sync::Mutex<(u32, Option<String>)>>,
         sid: i64,
+        txn: Arc<std::sync::atomic::AtomicI8>,
     ) -> Self {
-        Self { conn, spec, busy, abandoned, lost, pings, sid, last_cmd: Instant::now(), cursor: None }
+        Self { conn, spec, busy, abandoned, lost, pings, sid, txn, last_cmd: Instant::now(), cursor: None }
     }
 
     /// 쉬는 동안 ping — 작업 스레드 안에서 하므로 사용자의 호출과 겹치지 않는다.
@@ -626,10 +642,23 @@ impl Worker {
         let _ = self.conn.close();
     }
 
+    /// 트랜잭션 상태를 읽어 둔다 — 답을 보내기 전에 (부른 쪽이 바로 읽는다)
+    fn note_txn(&self) {
+        use oracle::oci_attr::TransactionInProgress;
+        let v = match self.conn.oci_attr::<TransactionInProgress>() {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(_) => -1,
+        };
+        self.txn.store(v, Ordering::Relaxed);
+    }
+
     fn handle(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Exec { sql, opts, reply } => {
-                let _ = reply.send(self.exec(&sql, &opts));
+                let r = self.exec(&sql, &opts);
+                self.note_txn();
+                let _ = reply.send(r);
             }
             Cmd::FetchMore { rows, reply } => {
                 let _ = reply.send(self.fetch_more(rows));
@@ -642,19 +671,27 @@ impl Worker {
                 let _ = reply.send(self.explain(&sql));
             }
             Cmd::Commit { reply } => {
-                let _ = reply.send(self.conn.commit().map_err(Error::from));
+                let r = self.conn.commit().map_err(Error::from);
+                self.note_txn();
+                let _ = reply.send(r);
             }
             Cmd::Rollback { reply } => {
-                let _ = reply.send(self.conn.rollback().map_err(Error::from));
+                let r = self.conn.rollback().map_err(Error::from);
+                self.note_txn();
+                let _ = reply.send(r);
             }
             Cmd::Ping { reply } => {
                 let _ = reply.send(self.conn.ping().map_err(Error::from));
             }
             Cmd::Call { sql, ins, outs, reply } => {
-                let _ = reply.send(self.call_plsql(&sql, &ins, &outs));
+                let r = self.call_plsql(&sql, &ins, &outs);
+                self.note_txn();
+                let _ = reply.send(r);
             }
             Cmd::Batch { sql, rows, skip_errors, reply } => {
-                let _ = reply.send(self.batch(&sql, &rows, skip_errors));
+                let r = self.batch(&sql, &rows, skip_errors);
+                self.note_txn();
+                let _ = reply.send(r);
             }
             Cmd::Shutdown => {}
         }

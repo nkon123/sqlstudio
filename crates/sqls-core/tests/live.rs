@@ -454,3 +454,28 @@ async fn keepalive_notices_killed_session() {
     again.close();
     admin.close();
 }
+
+/// 커밋 전 상태는 드라이버가 알려 준다 — FOR UPDATE·블록 안 DML 도, DML 없는 블록은 아니다
+#[tokio::test]
+#[ignore]
+async fn transaction_state_from_driver() {
+    let s = Session::connect(spec(false)).await.unwrap();
+    let _ = s.execute("CREATE TABLE txn_t (id NUMBER)", ExecOptions::default()).await;
+    exec(&s, "DELETE FROM txn_t").await;
+    s.commit().await.unwrap();
+    assert_eq!(s.in_transaction(), Some(false), "11g 서버 + 19c 클라이언트에서도 알아야 한다");
+    exec(&s, "INSERT INTO txn_t VALUES (1)").await;
+    assert_eq!(s.in_transaction(), Some(true));
+    s.rollback().await.unwrap();
+    assert_eq!(s.in_transaction(), Some(false));
+    exec(&s, "BEGIN NULL; END;").await;
+    assert_eq!(s.in_transaction(), Some(false), "DML 없는 블록은 트랜잭션이 아니다");
+    exec(&s, "BEGIN INSERT INTO txn_t VALUES (2); END;").await;
+    assert_eq!(s.in_transaction(), Some(true), "블록 안 DML");
+    exec(&s, "COMMIT").await;
+    assert_eq!(s.in_transaction(), Some(false), "COMMIT 문을 직접 쳐도");
+    exec(&s, "SELECT * FROM txn_t FOR UPDATE").await;
+    assert_eq!(s.in_transaction(), Some(true), "FOR UPDATE 는 행을 잠근다");
+    s.rollback().await.unwrap();
+    s.close();
+}

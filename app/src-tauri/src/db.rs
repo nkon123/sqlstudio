@@ -336,7 +336,13 @@ pub struct ExecView {
     txn_pending: bool,
 }
 
-fn track_txn(kind: StmtKind, outcome: &ExecOutcome, flag: &AtomicBool) {
+/// 커밋 전 표시. 드라이버가 트랜잭션 상태를 알려 주면 그것을 쓰고 (SELECT … FOR UPDATE·프로시저 안 DML 도 맞다),
+/// 모르면(Client 12.1 미만) 문장 종류로 짐작한다.
+fn track_txn(s: &sqls_core::Session, kind: StmtKind, outcome: &ExecOutcome, flag: &AtomicBool) {
+    if let Some(b) = s.in_transaction() {
+        flag.store(b, Ordering::Relaxed);
+        return;
+    }
     match kind {
         StmtKind::Dml if matches!(outcome, ExecOutcome::Affected { .. }) => flag.store(true, Ordering::Relaxed),
         // DDL 은 앞뒤로 암묵적 커밋을 한다
@@ -402,8 +408,12 @@ pub async fn execute(st: State<'_, AppState>, args: ExecArgs) -> R<ExecView> {
     let started = std::time::Instant::now();
     let r = s.execute(&args.sql, opts(args.page_size, args.binds)).await;
     remember(&st, args.id, &s.info().user, &args.sql, &r, started);
+    // 실패해도 앞의 변경은 남아 있을 수 있다 — 드라이버가 알면 그대로
+    if let (Err(_), Some(b)) = (&r, s.in_transaction()) {
+        txn.store(b, Ordering::Relaxed);
+    }
     let r = r?;
-    track_txn(r.kind, &r.outcome, &txn);
+    track_txn(&s, r.kind, &r.outcome, &txn);
     if matches!(r.kind, StmtKind::Ddl | StmtKind::PlsqlUnit) {
         crate::complete::after_ddl(&st, args.id);
     }
@@ -468,7 +478,7 @@ pub async fn execute_script(
         match res {
             Ok(r) => {
                 ok += 1;
-                track_txn(r.kind, &r.outcome, &txn);
+                track_txn(&s, r.kind, &r.outcome, &txn);
                 if matches!(r.kind, StmtKind::Ddl | StmtKind::PlsqlUnit) {
                     crate::complete::after_ddl(&st, id);
                 }

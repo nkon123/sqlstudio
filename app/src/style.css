@@ -494,3 +494,14 @@ dialog.imp { width: min(1100px, 95vw); }
 
 /* ── 결과 내보내기 ── */
 .export-sel { font-size: 12px; padding: 1px 4px; }
+
+/* ── 우클릭 메뉴 ── */
+.ctx-menu { position: fixed; z-index: 200; min-width: 200px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  box-shadow: 0 6px 22px rgba(0,0,0,.2); padding: 4px 0; font-size: 12px; user-select: none; }
+.ctx-item { display: flex; align-items: center; gap: 16px; padding: 4px 12px; cursor: default; white-space: nowrap; }
+.ctx-item.on { background: var(--sel); }
+.ctx-item.disabled { color: var(--dim); opacity: .6; }
+.ctx-label { flex: 1; }
+.ctx-hint { color: var(--dim); font-size: 11px; font-family: var(--mono); max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+.ctx-sep { height: 1px; background: var(--line); margin: 4px 0; }
+.ctx-title { padding: 3px 12px 4px; color: var(--dim); font-size: 11px; font-family: var(--mono); white-space: nowrap; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }

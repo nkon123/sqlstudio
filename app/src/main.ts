@@ -21,6 +21,7 @@ import type { GitPanel } from "./git";
 import { ResultGrid } from "./grid";
 import { guessTable, toCsv as toCsvText, toInserts as toInsertsText, unsupported as unsupportedCols } from "./export-text";
 import { aliasMap, showColumns } from "./colpopup";
+import { showMenu, type MenuItem } from "./ctxmenu";
 import { openHistory } from "./history";
 import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
@@ -166,6 +167,7 @@ class Tab {
       history: () => app.showHistory(),
     }, text, sqlCompletion(() => this.conn?.id));
     this.editor.view.dom.addEventListener("input", () => this.setDirty(true));
+    this.editor.view.dom.addEventListener("contextmenu", (e) => void app.editorMenu(this, e));
     dragSplit(splitter, editorHost);
     this.show("result");
     this.grid.clear("Ctrl+Enter: 커서 위치 문장 실행 · F5: 스크립트 실행 · Ctrl+E: 실행계획");
@@ -352,7 +354,7 @@ class App {
       h("div", { class: "browser-head" }, this.browserOwner, this.browserType),
       this.browserFilter,
       this.browserList,
-      h("small", { class: "hint" }, "클릭: 구조 · 우클릭: 컬럼 팝업 · 더블클릭: 이름 넣기 · 체크: AI 문맥에 포함"));
+      h("small", { class: "hint" }, "클릭: 구조 · 우클릭: 메뉴 · 더블클릭: 이름 넣기 · 체크: AI 문맥에 포함"));
     // 왼쪽 영역: 테이블 | 프로젝트
     const sideTabs = h("div", { class: "side-tabs" });
     const panes: Record<string, HTMLElement> = { table: tablePane, git: this.gitPane };
@@ -996,7 +998,7 @@ class App {
       const row = h("div", { class: `obj ${o.status === "INVALID" ? "invalid" : ""}`, title: `${o.object_type} · ${o.status} · ${o.last_ddl_time}` },
         check, h("span", {}, o.name), this.browserType.value ? "" : h("small", { class: "obj-type" }, o.object_type));
       row.addEventListener("click", () => this.showObject(o));
-      if (tableLike) row.addEventListener("contextmenu", (e) => { e.preventDefault(); this.popupColumns(`"${o.owner}"."${o.name}"`, { x: e.clientX, y: e.clientY }); });
+      row.addEventListener("contextmenu", (e) => this.objectMenu(o, e));
       row.addEventListener("dblclick", () => t?.editor.insert(o.owner === t.conn?.user ? o.name : q));
       frag.append(row);
     }
@@ -1177,23 +1179,9 @@ class App {
     });
   }
 
-  /** 이름으로 찾아 팝업 (사전 조회 세션으로 — 작업 세션에서 쿼리가 돌고 있어도 기다리지 않는다) */
-  private async popupColumns(name: string, at?: { x: number; y: number }, alias?: string) {
-    const t = this.active;
-    if (!t?.conn) return toast("먼저 접속하세요", "error");
-    try {
-      this.openColumns(await api.describe(t.conn.id, name), at, alias);
-    } catch (e) {
-      toast(errOf(e).message, "error");
-    }
-  }
-
-  /** F4: 커서 위치의 테이블(또는 별칭·스키마.테이블·별칭.컬럼)의 컬럼 팝업 */
-  async describeAtCursor() {
-    const t = this.active;
-    if (!t?.conn) return toast("먼저 접속하세요", "error");
+  /** 편집기 위치의 낱말에서 테이블 후보 (스키마.테이블 → 별칭 → 별칭.컬럼의 앞 → 그 낱말). DB 는 묻지 않는다 */
+  private tableCandidatesAt(t: Tab, pos: number): { raw: string; tries: { name: string; alias?: string }[] } {
     const view = t.editor.view;
-    const pos = view.state.selection.main.head;
     const line = view.state.doc.lineAt(pos);
     const s = line.text;
     const ch = /[\w$#."]/;
@@ -1202,13 +1190,11 @@ class App {
     while (b < s.length && ch.test(s[b])) b++;
     const raw = s.slice(a, b);
     const parts = raw.replace(/"/g, "").split(".").filter(Boolean);
-    if (!parts.length) return toast("커서를 테이블 이름(또는 별칭) 위에 두고 F4", "info");
-    const cur = Math.min(parts.length - 1, (s.slice(a, pos).match(/\./g) ?? []).length);
+    if (!parts.length) return { raw, tries: [] };
+    const cur = Math.min(parts.length - 1, (s.slice(a, pos - line.from).match(/\./g) ?? []).length);
     const doc = view.state.doc;
-    const around = doc.sliceString(Math.max(0, pos - 30000), Math.min(doc.length, pos + 30000));
-    const aliases = aliasMap(around);
+    const aliases = aliasMap(doc.sliceString(Math.max(0, pos - 30000), Math.min(doc.length, pos + 30000)));
     const word = parts[cur];
-    // 시도 순서: 스키마.테이블 → 별칭 → (별칭.컬럼이면) 앞쪽 별칭/테이블 → 그 낱말
     const tries: { name: string; alias?: string }[] = [];
     if (cur >= 1) tries.push({ name: parts.slice(cur - 1, cur + 1).join(".") });
     if (aliases.has(word.toUpperCase())) tries.push({ name: aliases.get(word.toUpperCase())!, alias: word });
@@ -1218,18 +1204,144 @@ class App {
     }
     tries.push({ name: word });
     if (cur === 0 && parts.length > 1) tries.push({ name: parts.slice(0, 2).join(".") });
-    const c = view.coordsAtPos(pos);
-    const at = c ? { x: c.left, y: c.bottom } : undefined;
+    return { raw, tries };
+  }
+
+  /** 후보를 차례로 사전에서 찾는다 (사전 조회 세션) */
+  private async resolveTable(t: Tab, tries: { name: string; alias?: string }[]): Promise<{ d: TableDesc; alias?: string } | { error: unknown }> {
     let last: unknown = null;
     for (const x of tries) {
       try {
-        const d = await api.describe(t.conn.id, x.name);
-        return this.openColumns(d, at, x.alias);
+        return { d: await api.describe(t.conn!.id, x.name), alias: x.alias };
       } catch (e) {
         last = e;
       }
     }
-    toast(`'${raw}' 를 테이블·뷰로 찾지 못했습니다${last ? ` — ${errOf(last).message}` : ""}`, "error");
+    return { error: last };
+  }
+
+  /** F4: 커서 위치의 테이블(또는 별칭·스키마.테이블·별칭.컬럼)의 컬럼 팝업 */
+  async describeAtCursor() {
+    const t = this.active;
+    if (!t?.conn) return toast("먼저 접속하세요", "error");
+    const view = t.editor.view;
+    const pos = view.state.selection.main.head;
+    const { raw, tries } = this.tableCandidatesAt(t, pos);
+    if (!tries.length) return toast("커서를 테이블 이름(또는 별칭) 위에 두고 F4", "info");
+    const c = view.coordsAtPos(pos);
+    const r = await this.resolveTable(t, tries);
+    if ("d" in r) return this.openColumns(r.d, c ? { x: c.left, y: c.bottom } : undefined, r.alias);
+    toast(`'${raw}' 를 테이블·뷰로 찾지 못했습니다${r.error ? ` — ${errOf(r.error).message}` : ""}`, "error");
+  }
+
+  // ── 우클릭 메뉴 ─────────────────────────────────
+
+  /** 객체 메뉴 (테이블 목록·편집기 공통). 테이블·뷰는 SQL 만들기·데이터, 코드는 소스·컴파일 */
+  private objectMenuItems(t: Tab, o: { owner: string; name: string; object_type: string }, at: { x: number; y: number }, alias?: string): MenuItem[] {
+    const id = t.conn!.id;
+    const type = o.object_type.toUpperCase();
+    const q = `"${o.owner}"."${o.name}"`;
+    const shown = o.owner === t.conn!.user ? o.name : `${o.owner}.${o.name}`;
+    const insert = (text: string) => { t.editor.insert(text); t.editor.view.focus(); };
+    const withDesc = (f: (d: TableDesc) => void) => () => { api.describe(id, q).then(f).catch((e) => toast(errOf(e).message, "error")); };
+    const ddl = () => api.getDdl(id, type, q).then((x) => this.newTab(true, x)).catch((e) => toast(errOf(e).message, "error"));
+    const copyName = { label: "이름 복사", hint: shown, run: () => navigator.clipboard.writeText(shown).then(() => toast(`복사: ${shown}`, "ok", 1500)).catch(() => {}) };
+    if (["TABLE", "VIEW", "MATERIALIZED VIEW"].includes(type)) {
+      // 커서 줄에 글이 있으면 문서 끝에 빈 줄을 두고 넣는다 (쓰던 문장 가운데에 끼어들지 않게)
+      const block = (text: string) => {
+        const v = t.editor.view;
+        if (!v.state.doc.lineAt(v.state.selection.main.head).text.trim()) return insert(text);
+        const doc = v.state.doc.toString();
+        const pre = doc.endsWith("\n\n") ? "" : doc.endsWith("\n") ? "\n" : "\n\n";
+        const from = doc.length + pre.length;
+        v.dispatch({ changes: { from: doc.length, insert: pre + text }, selection: { anchor: from, head: from + text.length }, scrollIntoView: true });
+        v.focus();
+      };
+      const sql = (kind: "select" | "insert" | "update" | "delete") => withDesc((d) => block(sqlTemplate(kind, shown, d, alias)));
+      return [
+        { title: `${type} ${shown}${alias ? ` (${alias})` : ""}` },
+        { label: "컬럼 보기", hint: "F4", run: withDesc((d) => this.openColumns(d, at, alias)) },
+        { label: "데이터 보기 (앞 200행)", run: () => this.previewData(t, q) },
+        { label: "건수 세기", hint: "COUNT(*)", run: () => this.runQuery(t, `SELECT COUNT(*) AS cnt FROM ${q}`) },
+        { label: "상세 보기", hint: "구조 탭", run: () => this.showObject(o) },
+        { sep: true },
+        { label: "SQL 만들기", sub: [
+          { label: "SELECT", run: sql("select") }, { label: "INSERT", run: sql("insert") },
+          { label: "UPDATE", run: sql("update") }, { label: "DELETE", run: sql("delete") },
+        ] },
+        { label: "DDL", hint: "새 탭", run: ddl },
+        { sep: true },
+        { label: "흐름도 — 어디서 오나", hint: "출력 기준", run: () => this.openDfd(`${o.owner}.${o.name}`, "up") },
+        { label: "흐름도 — 어디로 가나", hint: "입력 기준", run: () => this.openDfd(`${o.owner}.${o.name}`, "down") },
+        ...(type === "TABLE" ? [{ label: "데이터 가져오기…", hint: "엑셀·CSV", run: () => openImport({ id, owner: o.owner, table: o.name, done: (r) => { t.txnPending = r.txn_pending; this.refresh(); } }) }] : []),
+        { sep: true },
+        copyName,
+      ];
+    }
+    const code = ["PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY"].includes(type);
+    return [
+      { title: `${type} ${shown}` },
+      { label: code ? "소스 열기" : "DDL", hint: "새 탭", run: ddl },
+      { label: "상세 보기", hint: "구조 탭", run: () => this.showObject(o) },
+      ...(code ? [
+        { label: "컴파일", run: () => this.compileObject(t, o.owner, o.name, type, () => {}) },
+        { label: "디버그", run: () => t.debugger().openUnit(o.owner, o.name, type) },
+        ...(type !== "TYPE" ? [{ label: "분석", run: () => this.analyzeActive(o.owner, o.name) }] : []),
+      ] : []),
+      ...(type === "PROCEDURE" || type === "FUNCTION" ? [{ label: "흐름도", hint: "입력·출력 테이블", run: () => this.openDfd(`${o.owner}.${o.name}`, "both") }] : []),
+      ...(type === "SEQUENCE" ? [{ label: "NEXTVAL 넣기", run: () => insert(`${shown}.NEXTVAL`) }] : []),
+      { sep: true },
+      copyName,
+    ];
+  }
+
+  /** 테이블 목록에서 우클릭 */
+  private objectMenu(o: ObjectEntry, e: MouseEvent) {
+    e.preventDefault();
+    const t = this.active;
+    if (!t?.conn) return;
+    showMenu(e.clientX, e.clientY, this.objectMenuItems(t, o, { x: e.clientX, y: e.clientY }));
+  }
+
+  /** 편집기에서 우클릭: 그 자리의 테이블 메뉴 + 편집 메뉴 */
+  async editorMenu(t: Tab, e: MouseEvent) {
+    e.preventDefault();
+    const view = t.editor.view;
+    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+    // 선택 영역 밖을 누르면 커서를 그 자리로 (Toad 처럼)
+    const sel = view.state.selection.main;
+    if (pos != null && (sel.empty || pos < sel.from || pos > sel.to)) view.dispatch({ selection: { anchor: pos } });
+    const at = { x: e.clientX, y: e.clientY };
+    const edit: MenuItem[] = [
+      { label: "실행", hint: "Ctrl+Enter", run: () => this.runStatement() },
+      { label: "SQL 포맷", hint: "Ctrl+Shift+F", run: () => this.formatSql() },
+      { sep: true },
+      { label: "잘라내기", hint: "Ctrl+X", disabled: view.state.selection.main.empty, run: () => { view.focus(); document.execCommand("cut"); } },
+      { label: "복사", hint: "Ctrl+C", disabled: view.state.selection.main.empty, run: () => { view.focus(); document.execCommand("copy"); } },
+      { label: "붙여넣기", hint: "Ctrl+V", run: () => navigator.clipboard.readText().then((x) => { t.editor.insert(x); view.focus(); }).catch(() => toast("Ctrl+V 로 붙여 넣으세요", "info")) },
+      { label: "모두 선택", hint: "Ctrl+A", run: () => { view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } }); view.focus(); } },
+    ];
+    const { raw, tries } = pos != null ? this.tableCandidatesAt(t, pos) : { raw: "", tries: [] };
+    if (!t.conn || !tries.length) return showMenu(at.x, at.y, edit);
+    // 사전에서 찾는 동안 기다리지 않게 — 편집 메뉴를 먼저 띄우고, 찾으면 테이블 메뉴로 바꾼다
+    showMenu(at.x, at.y, [{ title: `${raw} — 찾는 중…` }, { sep: true }, ...edit]);
+    const r = await this.resolveTable(t, tries);
+    if (!document.querySelector(".ctx-menu")) return; // 그새 닫았으면 그대로
+    if ("d" in r) showMenu(at.x, at.y, [...this.objectMenuItems(t, { owner: r.d.owner, name: r.d.name, object_type: r.d.object_type }, at, r.alias), { sep: true }, ...edit]);
+    else showMenu(at.x, at.y, [{ title: `${raw} — 테이블·뷰가 아님` }, { sep: true }, ...edit]);
+  }
+
+  /** 문장 하나를 이 탭에서 실행해 결과 그리드로 (건수 세기 등) */
+  private async runQuery(t: Tab, sql: string) {
+    if (!t.conn) return;
+    await this.running(t, async () => {
+      try {
+        const r = await api.execute(t.conn!.id, sql, [], false);
+        this.showResult(t, r);
+      } catch (e) {
+        this.showError(t, errOf(e), sql, 0);
+      }
+    });
   }
 
   // ── 파일 ─────────────────────────────────────────
@@ -1735,6 +1847,23 @@ function hintFor(err: ErrView): string {
 }
 
 /** 왼쪽(테이블)·오른쪽(AI) 영역: 경계선을 끌어 너비 조절, 접기/펼치기, 상태는 다음 실행에도 유지 */
+/** 우클릭 "SQL 만들기" — 컬럼으로 틀을 만든다. 값 자리는 :컬럼 바인드, WHERE 는 기본 키 */
+function sqlTemplate(kind: "select" | "insert" | "update" | "delete", table: string, d: TableDesc, alias?: string) {
+  const cols = d.columns.map((c) => c.name);
+  const pk = d.primary_key.length ? d.primary_key : cols.slice(0, 1);
+  const where = pk.map((c) => `${c} = :${c}`).join("\n   AND ");
+  const a = alias ? `${alias}.` : "";
+  switch (kind) {
+    case "select": return `SELECT ${cols.map((c) => a + c).join(",\n       ")}\n  FROM ${table}${alias ? ` ${alias}` : ""}\n WHERE 1 = 1`;
+    case "insert": return `INSERT INTO ${table} (\n       ${cols.join(",\n       ")})\nVALUES (\n       ${cols.map((c) => `:${c}`).join(",\n       ")})`;
+    case "update": {
+      const set = cols.filter((c) => !pk.includes(c));
+      return `UPDATE ${table}\n   SET ${(set.length ? set : cols).map((c) => `${c} = :${c}`).join(",\n       ")}\n WHERE ${where}`;
+    }
+    case "delete": return `DELETE FROM ${table}\n WHERE ${where}`;
+  }
+}
+
 /** 경로 비교용: 구분자·대소문자 무시 (Windows) */
 function normPath(p: string) {
   return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();

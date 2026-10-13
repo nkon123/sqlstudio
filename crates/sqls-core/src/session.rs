@@ -243,7 +243,12 @@ impl Session {
         thread::Builder::new()
             .name(format!("ora-{}", spec.user))
             .spawn(move || {
+                let started = Instant::now();
                 let r = open(&spec);
+                match &r {
+                    Ok((_, info)) => tracing::info!("접속 {}@{} sid={} module={} ({}ms)", spec.user, spec.connect_string, info.sid, spec.module, started.elapsed().as_millis()),
+                    Err(e) => tracing::warn!("접속 실패 {}@{} module={} ({}ms): {e}", spec.user, spec.connect_string, spec.module, started.elapsed().as_millis()),
+                }
                 let keep = Arc::new(spec.clone());
                 match r {
                     Ok((conn, info)) => {
@@ -263,11 +268,12 @@ impl Session {
                             pings: pings.clone(),
                             spec: keep,
                         };
+                        let sid = session.info.sid;
                         if tx.send(Ok(session)).is_err() {
                             let _ = conn.close();
                             return;
                         }
-                        Worker::new(conn, spec, busy, abandoned_rx, lost, pings).run(crx);
+                        Worker::new(conn, spec, busy, abandoned_rx, lost, pings, sid).run(crx);
                     }
                     Err(e) => {
                         let _ = tx.send(Err(e));
@@ -305,6 +311,7 @@ impl Session {
     /// 커밋하지 않은 변경은 롤백된다. 서버 쪽 SQL 은 끝날 때까지 돌 수 있다
     /// (DBA 권한이 있으면 ALTER SYSTEM KILL SESSION 으로 멈춘다).
     pub fn abandon(&self) {
+        tracing::info!("세션 버림 sid={} ({})", self.info.sid, self.spec.module);
         let _ = self.abandoned.send(true);
         let _ = self.conn.break_execution();
         let _ = self.tx.send(Cmd::Shutdown);
@@ -327,6 +334,7 @@ impl Session {
     /// 같은 접속 정보로 새 세션을 연다 (이 세션은 버린다). 커밋하지 않은 변경·세션 설정은 사라진다.
     /// 네트워크가 죽어 있으면 오래 매달리지 않게 시간 제한을 둔다.
     pub async fn reopen(&self) -> Result<Session> {
+        tracing::info!("다시 접속 sid={} ({}@{})", self.info.sid, self.spec.user, self.spec.connect_string);
         self.abandon();
         match tokio::time::timeout(REOPEN_LIMIT, Session::connect((*self.spec).clone())).await {
             Ok(r) => r,
@@ -357,7 +365,10 @@ impl Session {
             r = rx => r.map_err(|_| Error::SessionClosed).and_then(|r| r),
             _ = gone.wait_for(|v| *v) => return Err(Error::SessionClosed),
         };
-        if matches!(r, Err(Error::ConnectionLost(_)) | Err(Error::SessionClosed)) {
+        if let Err(e @ (Error::ConnectionLost(_) | Error::SessionClosed)) = &r {
+            if !self.is_lost() {
+                tracing::warn!("끊김 sid={} ({}): {e}", self.info.sid, self.spec.module);
+            }
             self.mark_lost();
         }
         r
@@ -428,6 +439,7 @@ impl Session {
 
     /// 세션을 닫는다. 커밋하지 않은 변경은 롤백된다 (OCI 기본 동작).
     pub fn close(&self) {
+        tracing::info!("접속 닫음 sid={} ({})", self.info.sid, self.spec.module);
         let _ = self.tx.send(Cmd::Shutdown);
     }
 }
@@ -490,6 +502,7 @@ struct Worker {
     abandoned: watch::Receiver<bool>,
     lost: Arc<watch::Sender<bool>>,
     pings: Arc<std::sync::Mutex<(u32, Option<String>)>>,
+    sid: i64,
     cursor: Option<OpenCursor>,
 }
 
@@ -501,8 +514,9 @@ impl Worker {
         abandoned: watch::Receiver<bool>,
         lost: Arc<watch::Sender<bool>>,
         pings: Arc<std::sync::Mutex<(u32, Option<String>)>>,
+        sid: i64,
     ) -> Self {
-        Self { conn, spec, busy, abandoned, lost, pings, cursor: None }
+        Self { conn, spec, busy, abandoned, lost, pings, sid, cursor: None }
     }
 
     /// 쉬는 동안 ping — 작업 스레드 안에서 하므로 사용자의 호출과 겹치지 않는다.
@@ -527,7 +541,7 @@ impl Worker {
             Ok(()) => {}
             // ping 이 30초 안에 돌아오지 않았으면(ORA-03156) 네트워크가 죽은 것으로 본다
             Err(e) if e.is_connection_lost() || matches!(e, Error::Driver(_) | Error::Db { code: 3156, .. }) => {
-                tracing::warn!("keepalive ping 실패 — 접속이 끊긴 것으로 본다: {e}");
+                tracing::warn!("keepalive ping 실패 sid={} ({}) — 접속이 끊긴 것으로 본다: {e}", self.sid, self.spec.module);
                 self.lost.send_replace(true);
             }
             Err(e) => tracing::debug!("keepalive ping: {e}"),

@@ -601,6 +601,7 @@ class App {
     if (!old || t.recovering) return;
     const hadTxn = t.txnPending;
     t.recovering = true;
+    api.log("warn", `탭 #${old.id} (${old.profile}) ${why}${hadTxn ? " — 커밋 안 한 변경 있었음" : ""} → 다시 접속 시도`);
     try {
       await api.abandon(old.id).catch(() => {});
       t.conn = null;
@@ -622,12 +623,14 @@ class App {
             ? "다시 접속했습니다. 커밋하지 않았던 변경은 서버에서 롤백되었습니다 — 확인하고 다시 실행하세요."
             : "다시 접속했습니다. 세션 설정(ALTER SESSION·패키지 변수)은 처음으로 돌아갔습니다. 필요하면 다시 실행하세요.", hadTxn ? "err" : "warn");
           toast(hadTxn ? "다시 접속함 — 커밋하지 않은 변경은 롤백됨" : "DB 에 다시 접속했습니다", hadTxn ? "error" : "info", hadTxn ? 8000 : 3000);
+          api.log("info", `탭 다시 접속 #${old.id} → #${c.id} (${old.profile})`);
           this.status(`${old.profile} 다시 접속됨`);
           return;
         } catch (e) {
           const err = errOf(e);
           if (err.kind === "password_required" || err.ora_code === 1017) break;
           t.log(`다시 접속 실패: ${err.message}`, "err");
+          api.log("warn", `탭 #${old.id} 다시 접속 실패: ${err.message}`);
         }
       }
       this.status("접속 끊김");
@@ -1633,6 +1636,8 @@ class App {
     return h("div", { class: "about" },
       h("p", {}, h("strong", {}, `SQLStudio ${info.version}`)),
       h("p", { class: "hint" }, `설정 파일: ${info.config_path}`),
+      info.log_dir ? h("p", { class: "hint" }, `로그: ${info.log_dir} `,
+        h("button", { class: "small", title: "접속·끊김·다시 접속 기록 — 문제가 생기면 이 폴더의 sqlstudio.log 를 보내 주세요", onclick: () => invoke("open_log_dir").catch((e) => toast(errOf(e).message, "error")) }, "로그 폴더 열기")) : "",
       h("h4", {}, "오픈소스 라이선스"),
       h("p", { class: "hint" }, "이 프로그램에 포함된 오픈소스 구성 요소와 라이선스입니다. 설치 폴더의 THIRD_PARTY_NOTICES.html 과 같은 내용입니다."),
       h("iframe", { class: "about-notices", src: "/third-party-notices.html", title: "오픈소스 라이선스 고지" }));

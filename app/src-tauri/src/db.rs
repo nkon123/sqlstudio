@@ -19,6 +19,7 @@ pub struct AppInfo {
     version: &'static str,
     config_path: String,
     config_error: Option<String>,
+    log_dir: String,
 }
 
 #[tauri::command]
@@ -27,6 +28,29 @@ pub fn app_info(st: State<'_, AppState>) -> AppInfo {
         version: env!("CARGO_PKG_VERSION"),
         config_path: config_path().display().to_string(),
         config_error: st.config_error.clone(),
+        log_dir: crate::log_dir().display().to_string(),
+    }
+}
+
+/// 로그 폴더를 탐색기로 연다
+#[tauri::command]
+pub fn open_log_dir() -> R<()> {
+    let d = crate::log_dir();
+    std::fs::create_dir_all(&d).map_err(|e| ErrView::msg("io", e.to_string()))?;
+    #[cfg(windows)]
+    let r = std::process::Command::new("explorer.exe").arg(&d).spawn();
+    #[cfg(not(windows))]
+    let r = std::process::Command::new("xdg-open").arg(&d).spawn();
+    r.map(|_| ()).map_err(|e| ErrView::msg("io", format!("{}: {e}", d.display())))
+}
+
+/// 화면에서 일어난 일(탭 다시 접속 등)을 같은 로그에 남긴다
+#[tauri::command]
+pub fn client_log(level: String, message: String) {
+    let m: String = message.chars().take(2000).collect();
+    match level.as_str() {
+        "warn" | "error" => tracing::warn!(target: "ui", "{m}"),
+        _ => tracing::info!(target: "ui", "{m}"),
     }
 }
 
@@ -145,10 +169,12 @@ pub async fn connect(
     crate::complete::ensure_hub(&st, &app, &p, &pw);
     let id = st.next_id();
     let info = session.info().clone();
+    tracing::info!("탭 접속 #{id} {} ({}@{}) sid={}", p.name, info.user, info.connect_string, info.sid);
     // 쉬는 동안 끊긴 것을 알면 (keepalive) 화면에 알려 미리 다시 접속하게 한다
     let mut lost = session.lost_signal();
     tauri::async_runtime::spawn(async move {
         if lost.wait_for(|v| *v).await.is_ok() {
+            tracing::warn!("탭 #{id} 접속 끊김 감지 — 화면에 알림");
             let _ = tauri::Emitter::emit(&app, "session-lost", serde_json::json!({ "id": id }));
         }
     });

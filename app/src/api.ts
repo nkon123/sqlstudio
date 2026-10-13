@@ -74,7 +74,9 @@ export interface CompletionStatus { profile: string; phase: string; objects: num
 export interface McpSettings { allowed_connections: string[]; call_timeout_secs: number; allow_explain: boolean }
 
 export const api = {
-  appInfo: () => invoke<{ version: string; config_path: string; config_error?: string | null }>("app_info"),
+  appInfo: () => invoke<{ version: string; config_path: string; config_error?: string | null; log_dir?: string }>("app_info"),
+  /** 화면에서 일어난 일을 앱 로그 파일에 (접속 끊김·다시 접속 등) */
+  log: (level: "info" | "warn", message: string) => { invoke("client_log", { level, message }).catch(() => {}); },
   listProfiles: () => invoke<Profile[]>("list_profiles"),
   saveProfile: (profile: Profile, originalName?: string) => invoke<void>("save_profile", { profile, originalName }),
   deleteProfile: (name: string) => invoke<void>("delete_profile", { name }),

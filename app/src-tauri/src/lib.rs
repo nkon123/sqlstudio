@@ -23,13 +23,34 @@ pub(crate) fn webview_dir() -> Option<std::path::PathBuf> {
     sqls_core::config::portable_data_dir().map(|d| d.join("webview"))
 }
 
+/// 로그 폴더 (설정 파일 옆 logs)
+pub(crate) fn log_dir() -> std::path::PathBuf {
+    sqls_core::config::config_path().parent().map(|p| p.join("logs")).unwrap_or_else(|| "logs".into())
+}
+
+/// 로그 파일 — 접속·끊김·다시 접속을 사후에 볼 수 있게. 5MB 를 넘으면 .1 로 밀어 둔다 (둘만 남김)
+fn open_log_file() -> Option<std::fs::File> {
+    let dir = log_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let p = dir.join("sqlstudio.log");
+    if std::fs::metadata(&p).map(|m| m.len() > 5 << 20).unwrap_or(false) {
+        let _ = std::fs::rename(&p, dir.join("sqlstudio.1.log"));
+    }
+    std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
+}
+
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("SQLSTUDIO_LOG")
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
+    let filter = || tracing_subscriber::EnvFilter::try_from_env("SQLSTUDIO_LOG").unwrap_or_else(|_| "info".into());
+    match open_log_file() {
+        Some(f) => tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .with_ansi(false)
+            .with_writer(std::io::stdout.and(std::sync::Mutex::new(f)))
+            .init(),
+        None => tracing_subscriber::fmt().with_env_filter(filter()).init(),
+    }
+    tracing::info!("SQLStudio {} 시작 — 설정 {}", env!("CARGO_PKG_VERSION"), sqls_core::config::config_path().display());
 
     let state = AppState::load();
 
@@ -38,6 +59,8 @@ pub fn run() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             db::app_info,
+            db::open_log_dir,
+            db::client_log,
             db::list_profiles,
             db::save_profile,
             db::delete_profile,

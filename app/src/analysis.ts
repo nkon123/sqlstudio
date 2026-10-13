@@ -9,6 +9,8 @@ import { listen } from "@tauri-apps/api/event";
 import { api, errOf, type Provider } from "./api";
 import type { DfdView } from "./dfd";
 import { confirmBox, h, toast } from "./ui";
+import { ResultGrid } from "./grid";
+import { showMenu, type MenuItem } from "./ctxmenu";
 
 interface UnitRef { owner: string; name: string; unit_type: string }
 interface UnitRow extends UnitRef {
@@ -102,6 +104,13 @@ function colSplitter(grid: HTMLElement, key: string, min = 90): HTMLElement {
   return handle;
 }
 
+/** 흐름도 가운데: 무엇을, 처리 상자를 프로시저 단위로 볼지 패키지 단위로 볼지 */
+interface DfdTarget { focus: string; unit: "proc" | "pkg" }
+
+/** 단위 목록 그리드의 열 — 마지막(키)은 숨긴다 */
+const LIST_COLS = ["✓", "형식", "이름", "분석", "분석 시각", "모델", "키"].map((name) => ({ name, type_name: "VARCHAR2", nullable: true }));
+const KEY_COL = LIST_COLS.length - 1;
+
 const TYPE_LABEL: Record<string, string> = { "PACKAGE BODY": "패키지", PROCEDURE: "프로시저", FUNCTION: "함수", TRIGGER: "트리거", "TYPE BODY": "타입" };
 
 export class AnalysisView {
@@ -117,7 +126,14 @@ export class AnalysisView {
   private stopBtn = h("button", { class: "danger", disabled: true }, "중지");
   private statusEl = h("span", { class: "dbg-status" }, "");
   private bar = h("div", { class: "an-bar-fill" });
-  private listEl = h("tbody", {});
+  private grid = new ResultGrid({
+    hiddenCols: [KEY_COL],
+    onCellClick: (row, col) => this.onListClick(row[KEY_COL] ?? "", col),
+    onDoubleClick: () => true,
+    onContextMenu: (row, _col, e) => this.unitMenu(row[KEY_COL] ?? "", e),
+  });
+  /** 그리드에 마지막으로 넣은 목록 (같으면 행만 바꾸어 정렬·선택을 지킨다) */
+  private gridOf: UnitRow[] | null = null;
   private allBox = h("input", { type: "checkbox", title: "전체 선택" });
   private content = h("div", { class: "an-content" });
   private navBtns = new Map<View, HTMLButtonElement>();
@@ -133,7 +149,9 @@ export class AnalysisView {
   private dfd: DfdView | null = null;
   /** DFD 에 넘긴 결과 (같으면 다시 그리지 않는다) */
   private dfdOf: Integrated | null = null;
-  private dfdFocus: string | null = null;
+  private dfdFocus: DfdTarget | null = null;
+  /** 흐름도에 마지막으로 가운데 둔 것 — 탭을 오갈 때 사용자가 옮긴 가운데를 덮어쓰지 않게 */
+  private dfdCentered: string | null = null;
 
   constructor(private sessionId: () => number | undefined, private onClose: () => void) {
     this.startBtn.onclick = () => this.start();
@@ -170,9 +188,9 @@ export class AnalysisView {
     tab("quality", "품질");
     nav.append(h("span", { class: "spacer" }), h("button", { class: "small", title: "저장된 조각 결과로 통합 분석을 다시 만든다 (모델 없이)", onclick: () => this.reload(true) }, "다시 통합"));
     const left = h("div", { class: "an-left" },
-      h("table", { class: "an-list" },
-        h("thead", {}, h("tr", {}, h("th", {}, this.allBox), h("th", {}, "형식"), h("th", {}, "이름"), h("th", {}, "분석"))),
-        this.listEl));
+      h("div", { class: "an-listbar" }, h("label", { class: "check", title: "목록 전체를 분석 대상으로" }, this.allBox, "전체"),
+        h("span", { class: "dim" }, "✓ 칸을 눌러 분석 대상 · 우클릭: 흐름도·결과")),
+      this.grid.el);
     this.main = h("div", { class: "an-main" }, left);
     this.main.append(colSplitter(this.main, "analysis.col.units"), h("div", { class: "an-right" }, nav, this.content));
     this.el = h("div", { class: "debugger analysis", hidden: true }, toolbar,
@@ -232,23 +250,89 @@ export class AnalysisView {
   }
 
   private renderList() {
-    this.listEl.replaceChildren(...this.rows.map((r) => {
+    const rows = this.rows.map((r) => {
       const k = keyOf(r);
-      const box = h("input", { type: "checkbox", checked: this.checked.has(k), disabled: !!r.warning });
-      box.onchange = () => { box.checked ? this.checked.add(k) : this.checked.delete(k); this.statusEl.textContent = `${this.checked.size}개 선택`; };
-      const state = r.warning ? h("span", { class: "dim", title: r.warning }, "읽을 수 없음")
-        : r.analyzed_at ? h("span", { class: r.failed ? "warn" : "ok", title: `${when(r.analyzed_at)}${r.model ? ` · ${r.model}` : " · 정적"}${r.summary ? `\n${r.summary}` : ""}` },
-          `${r.chunks ?? 0}조각${r.failed ? ` · 실패 ${r.failed}` : ""}${r.model ? "" : " · 정적"}`)
-          : h("span", { class: "dim" }, "—");
-      const tr = h("tr", { class: this.selectedUnit === k ? "active" : "" },
-        h("td", {}, box), h("td", { class: "dim", title: r.unit_type }, TYPE_LABEL[r.unit_type] ?? r.unit_type), h("td", {}, r.name), h("td", { class: "an-state" }, state));
-      tr.addEventListener("click", (e) => {
-        if ((e.target as HTMLElement).tagName === "INPUT") return;
-        if (r.analyzed_at) this.showUnit(k);
-      });
-      return tr;
-    }));
+      const state = r.warning ? "읽을 수 없음" : r.analyzed_at ? `${r.chunks ?? 0}조각${r.failed ? ` · 실패 ${r.failed}` : ""}` : "—";
+      return [this.checked.has(k) ? "✓" : "", TYPE_LABEL[r.unit_type] ?? r.unit_type, r.name, state,
+        r.analyzed_at ? when(r.analyzed_at) : "", r.analyzed_at ? (r.model ?? "정적") : "", k];
+    });
+    if (this.gridOf !== this.rows) {
+      this.gridOf = this.rows;
+      this.grid.setPage({ columns: LIST_COLS, rows, has_more: false, fetched_total: rows.length });
+    } else this.grid.replaceRows(rows);
   }
+
+  private rowOf(key: string) {
+    return this.rows.find((r) => keyOf(r) === key);
+  }
+
+  private toggleCheck(keys: string[], on?: boolean) {
+    for (const k of keys) {
+      const r = this.rowOf(k);
+      if (!r || r.warning) continue;
+      (on ?? !this.checked.has(k)) ? this.checked.add(k) : this.checked.delete(k);
+    }
+    this.statusEl.textContent = `${this.checked.size}개 선택`;
+    this.renderList();
+  }
+
+  private onListClick(key: string, col: number) {
+    if (col === 0) return this.toggleCheck([key]);
+    if (this.rowOf(key)?.analyzed_at) this.showUnit(key);
+  }
+
+  /** 단위를 흐름도 가운데에 — 패키지는 패키지 상자로, 단독 프로시저·함수·트리거는 그 노드로 */
+  private unitTarget(r: UnitRow): DfdTarget {
+    const body = r.unit_type === "PACKAGE BODY" || r.unit_type === "TYPE BODY";
+    return { focus: `${r.owner}.${r.name}`, unit: body ? "pkg" : "proc" };
+  }
+
+  private showDfd(t: DfdTarget) {
+    this.dfdFocus = t;
+    this.view = "dfd";
+    this.render();
+  }
+
+  private popDfd(t: DfdTarget) {
+    invoke("open_dfd_window", { id: this.sessionId(), center: t.focus, dir: "both", unit: t.unit }).catch((e) => toast(errOf(e).message, "error"));
+  }
+
+  private unitMenu(key: string, e: MouseEvent) {
+    const r = this.rowOf(key);
+    if (!r) return;
+    const picked = this.grid.selectedRows().map((x) => x[KEY_COL] ?? "").filter(Boolean);
+    const keys = picked.includes(key) ? picked : [key];
+    const done = !!r.analyzed_at && !!this.g;
+    const t = this.unitTarget(r);
+    const items: MenuItem[] = [
+      { title: `${TYPE_LABEL[r.unit_type] ?? r.unit_type} ${r.name}` },
+      { label: "흐름도 보기", hint: t.unit === "pkg" ? "패키지 단위" : "", disabled: !done, run: () => this.showDfd(t) },
+      { label: "흐름도 새 창", disabled: !done, run: () => this.popDfd(t) },
+      { label: "분석 결과 보기", disabled: !r.analyzed_at, run: () => this.showUnit(key) },
+      ...(t.unit === "proc" ? [{ label: "호출 관계", disabled: !done, run: () => { this.focusNode = t.focus; this.view = "calls"; this.render(); } }] : []),
+      { sep: true },
+      { label: keys.length > 1 ? `분석 대상으로 (${keys.length}개)` : "분석 대상으로", run: () => this.toggleCheck(keys, true) },
+      { label: keys.length > 1 ? `분석 대상에서 빼기 (${keys.length}개)` : "분석 대상에서 빼기", run: () => this.toggleCheck(keys, false) },
+      { label: "이름 복사", run: () => navigator.clipboard.writeText(keys.map((k) => this.rowOf(k)?.name ?? "").join("\n")).catch(() => {}) },
+    ];
+    if (!done) items.splice(1, 0, { title: "아직 분석하지 않아 흐름도가 없습니다" });
+    showMenu(e.clientX, e.clientY, items);
+  }
+
+  /** 서브프로그램 이름 우클릭 */
+  private nodeMenu(id: string, e: MouseEvent) {
+    e.preventDefault();
+    const t: DfdTarget = { focus: id, unit: "proc" };
+    showMenu(e.clientX, e.clientY, [
+      { title: short(id) || id },
+      { label: "흐름도 보기", run: () => this.showDfd(t) },
+      { label: "흐름도 새 창", run: () => this.popDfd(t) },
+      { label: "호출 관계", run: () => { this.focusNode = id; this.view = "calls"; this.render(); } },
+      { sep: true },
+      { label: "이름 복사", run: () => navigator.clipboard.writeText(id).catch(() => {}) },
+    ]);
+  }
+
 
   private async start() {
     const id = this.sessionId();
@@ -436,6 +520,7 @@ export class AnalysisView {
   private nodeLink(id: string): HTMLElement {
     const a = h("a", { href: "#", class: "an-link", title: id }, short(id) || id);
     a.onclick = (e) => { e.preventDefault(); this.view = "calls"; this.focusNode = id; this.render(); };
+    a.oncontextmenu = (e) => this.nodeMenu(id, e);
     return a;
   }
 
@@ -453,6 +538,7 @@ export class AnalysisView {
       list.replaceChildren(...nodes.map((n) => {
         const li = h("li", { class: n.id === this.focusNode ? "active" : "" }, short(n.id));
         li.onclick = () => { this.focusNode = n.id; fill(); };
+        li.oncontextmenu = (e) => this.nodeMenu(n.id, e);
         return li;
       }));
       detail.replaceChildren(this.focusNode ? this.nodeDetail(g, this.focusNode) : h("div", { class: "hint" }, "왼쪽에서 서브프로그램을 고르세요"));
@@ -475,11 +561,20 @@ export class AnalysisView {
       if (this.view !== "dfd") return;
     }
     this.content.replaceChildren(this.dfd.el);
-    if (this.dfdOf !== g || this.dfdFocus) {
+    // 가운데: 방금 고른 것 → 호출 관계에서 보던 서브프로그램 → 열어 둔 단위. 바뀌었을 때만 옮긴다 (사용자가 옮긴 가운데를 지킨다)
+    const want = this.dfdFocus ?? this.defaultDfdTarget(g);
+    this.dfdFocus = null;
+    if (this.dfdOf !== g || (want && `${want.unit}:${want.focus}` !== this.dfdCentered)) {
       this.dfdOf = g;
-      this.dfd.setData(g, this.dfdFocus);
-      this.dfdFocus = null;
+      this.dfd.setData(g, want?.focus ?? null, want ? "both" : null, want?.unit ?? null);
+      this.dfdCentered = want ? `${want.unit}:${want.focus}` : null;
     }
+  }
+
+  private defaultDfdTarget(g: Integrated): DfdTarget | null {
+    if (this.focusNode && g.nodes.some((n) => n.id === this.focusNode)) return { focus: this.focusNode, unit: "proc" };
+    const r = this.selectedUnit ? this.rowOf(this.selectedUnit) : undefined;
+    return r ? this.unitTarget(r) : null;
   }
 
   private nodeDetail(g: Integrated, id: string): HTMLElement {
@@ -489,7 +584,7 @@ export class AnalysisView {
     const tables = g.tables.filter((t) => t.by[id]);
     const box = h("div", { class: "an-pad" },
       h("div", { class: "an-head" }, h("strong", {}, id),
-        h("button", { class: "small", title: "이 서브프로그램을 가운데에 두고 데이터 흐름도로 본다", onclick: () => { this.dfdFocus = id; this.view = "dfd"; this.render(); } }, "흐름도")),
+        h("button", { class: "small", title: "이 서브프로그램을 가운데에 두고 데이터 흐름도로 본다", onclick: () => this.showDfd({ focus: id, unit: "proc" }) }, "흐름도")),
       n ? h("div", { class: "an-sig" }, `${n.signature}   (${n.start_line}~${n.end_line}행, 복잡도 ${n.complexity}${n.commits ? ", COMMIT/ROLLBACK" : ""})`) : "",
       n?.summary ? h("p", {}, n.summary) : "");
     box.append(h("h4", {}, `부르는 곳 ${callers.length}`),

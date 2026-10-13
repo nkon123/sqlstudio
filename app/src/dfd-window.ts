@@ -27,7 +27,8 @@ async function start() {
   }
   const v = new DfdView(null);
   root.replaceChildren(v.el);
-  v.setData(g, q.get("center"), q.get("dir"));
+  const unit = q.get("unit");
+  v.setData(g, q.get("center"), q.get("dir"), unit === "pkg" || unit === "proc" ? unit : null);
 }
 
 start();

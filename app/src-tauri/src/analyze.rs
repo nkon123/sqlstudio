@@ -234,7 +234,7 @@ static NEXT_DFD: AtomicU64 = AtomicU64::new(1);
 /// 데이터 흐름도를 별도 창으로. center 는 노드 id (OWNER.TABLE, OWNER.PKG.PROC), dir 은 up | down | both
 /// async 여야 한다 — Windows 에서 동기 명령 안에서 창을 만들면 교착된다 (창이 멈춘다)
 #[tauri::command]
-pub async fn open_dfd_window(app: AppHandle, st: State<'_, AppState>, id: u64, center: Option<String>, dir: Option<String>) -> R<()> {
+pub async fn open_dfd_window(app: AppHandle, st: State<'_, AppState>, id: u64, center: Option<String>, dir: Option<String>, unit: Option<String>) -> R<()> {
     let profile = profile_of(&st, id)?;
     let enc = |s: &str| s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>();
     let mut url = format!("dfd.html?profile={}", enc(&profile));
@@ -243,6 +243,9 @@ pub async fn open_dfd_window(app: AppHandle, st: State<'_, AppState>, id: u64, c
     }
     if let Some(d) = dir.filter(|d| matches!(d.as_str(), "up" | "down" | "both")) {
         url.push_str(&format!("&dir={d}"));
+    }
+    if let Some(u) = unit.filter(|u| matches!(u.as_str(), "proc" | "pkg")) {
+        url.push_str(&format!("&unit={u}"));
     }
     let label = format!("dfd-{}", NEXT_DFD.fetch_add(1, Ordering::Relaxed));
     let mut b = tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))

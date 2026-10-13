@@ -16,6 +16,14 @@ export interface GridOptions {
   onStatus?: (text: string) => void;
   /** 편집 중 바뀐 셀·지울 행 수가 달라질 때 */
   onDirty?: (changes: number) => void;
+  /** 화면에 보이지 않는 열 (행을 찾는 키 등) */
+  hiddenCols?: number[];
+  /** 셀을 눌렀을 때 (선택한 뒤). 행 값과 열 번호 */
+  onCellClick?: (row: (string | null)[], col: number, e: MouseEvent) => void;
+  /** 우클릭. 선택 밖을 누르면 그 셀을 고른 뒤 부른다 */
+  onContextMenu?: (row: (string | null)[], col: number, e: MouseEvent) => void;
+  /** 더블클릭. 참을 돌려주면 값 보기 창을 띄우지 않는다 */
+  onDoubleClick?: (row: (string | null)[], col: number) => boolean;
 }
 
 /** 편집 모드 설정: ROWID 열 위치와 고칠 수 있는 열 */
@@ -102,6 +110,16 @@ export class ResultGrid {
     new ResizeObserver(() => this.schedule()).observe(this.viewport);
     this.el.addEventListener("keydown", (e) => this.onKey(e));
     this.body.addEventListener("mousedown", (e) => this.onMouseDown(e));
+    this.body.addEventListener("contextmenu", (e) => {
+      const at = this.cellAt(e);
+      if (!at || !this.opts.onContextMenu) return;
+      e.preventDefault();
+      if (!this.inSel(at.r, at.c)) {
+        this.sel = { r0: at.r, c0: at.c, r1: at.r, c1: at.c };
+        this.update();
+      }
+      this.opts.onContextMenu(this.rows[this.view[at.r]], at.c, e);
+    });
     // 더블클릭: 첫 클릭이 셀을 다시 그려 dblclick 이 사라지므로 mousedown 의 두 번째 클릭으로 받는다
     this.measureCtx.font = "12px ui-monospace, Consolas, monospace";
   }
@@ -143,6 +161,31 @@ export class ResultGrid {
     this.viewport.scrollLeft = 0;
     this.update();
     this.status();
+  }
+
+  /** 행만 바꾼다 — 정렬·필터·선택·스크롤은 그대로 (목록 상태가 바뀌었을 때) */
+  replaceRows(rows: (string | null)[][]) {
+    this.rows = rows.slice();
+    this.rebuildView();
+    if (this.sel) {
+      const max = this.view.length - 1;
+      if (max < 0) this.sel = null;
+      else {
+        this.sel.r0 = Math.min(this.sel.r0, max);
+        this.sel.r1 = Math.min(this.sel.r1, max);
+      }
+    }
+    this.update();
+    this.status();
+  }
+
+  /** 선택 영역에 걸친 행들 (화면 순서) */
+  selectedRows(): (string | null)[][] {
+    const s = this.sel;
+    if (!s) return [];
+    const out: (string | null)[][] = [];
+    for (let r = Math.min(s.r0, s.r1); r <= Math.max(s.r0, s.r1); r++) out.push(this.rows[this.view[r]]);
+    return out;
   }
 
   append(page: RowPage) {
@@ -356,7 +399,7 @@ export class ResultGrid {
   }
 
   private hiddenCol(i: number) {
-    return this.edit?.rowidCol === i;
+    return this.edit?.rowidCol === i || !!this.opts.hiddenCols?.includes(i);
   }
 
   private totalWidth() {
@@ -505,6 +548,7 @@ export class ResultGrid {
       this.sel = { r0: at.r, c0: at.c, r1: at.r, c1: at.c };
     }
     this.update();
+    if (e.button === 0 && !e.shiftKey) this.opts.onCellClick?.(this.rows[this.view[at.r]], at.c, e);
     const move = (ev: MouseEvent) => {
       const p = this.cellAt(ev);
       if (p && this.sel && (p.r !== this.sel.r1 || p.c !== this.sel.c1)) {
@@ -526,6 +570,7 @@ export class ResultGrid {
     if (!at) return;
     const cellEl = (e.target as HTMLElement).closest(".grid-cell") as HTMLElement;
     if (this.edit && this.startEdit(at.r, at.c, cellEl)) return;
+    if (this.opts.onDoubleClick?.(this.rows[this.view[at.r]], at.c)) return;
     const v = this.value(this.view[at.r], at.c);
     // 긴 값(CLOB 등)은 창으로 본다
     const dlg = document.createElement("dialog");

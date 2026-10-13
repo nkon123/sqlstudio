@@ -231,7 +231,11 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .an-progress { height: 3px; background: var(--line); }
 .an-bar-fill { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
 .an-main { flex: 1; display: grid; grid-template-columns: var(--c1, minmax(280px, 34%)) 5px 1fr; min-height: 0; }
-.an-left { overflow: auto; min-width: 0; }
+.an-left { display: flex; flex-direction: column; overflow: hidden; min-width: 0; min-height: 0; }
+.an-left > .grid { flex: 1; min-height: 0; }
+.an-listbar { display: flex; align-items: center; gap: 8px; padding: 3px 6px; font-size: 12px; border-bottom: 1px solid var(--line); }
+.an-listbar .check { margin: 0; gap: 4px; }
+.an-listbar .dim { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .an-list, .an-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .an-list th, .an-table th { position: sticky; top: 0; background: var(--panel); text-align: left; font-weight: 600; color: var(--dim); border-bottom: 1px solid var(--line); padding: 3px 6px; }
 .an-list td, .an-table td { border-bottom: 1px solid var(--line); padding: 2px 6px; vertical-align: top; }

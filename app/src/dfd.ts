@@ -92,11 +92,13 @@ export class DfdView {
   }
 
   /** 분석 결과를 받는다. focus 가 있으면 그 노드를 가운데로 */
-  setData(g: DfdSource, focus?: string | null, dir?: string | null) {
+  /** unit: 처리 상자 단위 — 패키지를 가운데 두려면 "pkg". 없으면 가운데가 있을 때 프로시저 단위 */
+  setData(g: DfdSource, focus?: string | null, dir?: string | null, unit?: "proc" | "pkg" | null) {
     this.src = g;
     if (dir && ["up", "down", "both"].includes(dir)) this.dirSel.value = dir;
+    if (unit) this.unitSel.value = unit;
     // 프로시저에서 넘어오면 프로시저 단위로
-    if (focus) this.unitSel.value = "proc";
+    else if (focus) this.unitSel.value = "proc";
     this.base = buildBase(g, this.unitSel.value === "pkg");
     this.hidden.clear();
     const all = this.fillNames();

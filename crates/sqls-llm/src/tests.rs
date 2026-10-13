@@ -275,6 +275,15 @@ fn internal_hosts_go_direct() {
     assert!(!c.use_proxy());
 }
 
+#[test]
+fn missing_model_is_explained() {
+    let c = ProviderConfig::new("o", ProviderKind::Ollama, "gemma4:e2b");
+    let e = crate::api_error(404, r#"{"error":"model 'gemma4:e2b' not found"}"#, &c).to_string();
+    assert!(e.contains("ollama pull gemma4:e2b") && !e.contains("경로"), "{e}");
+    let e = crate::api_error(404, "404 page not found", &c).to_string();
+    assert!(e.contains("경로"), "{e}");
+}
+
 #[tokio::test]
 async fn connect_error_explains() {
     // 아무도 듣지 않는 포트 → 연결 거부 안내 + 경로

@@ -493,10 +493,13 @@ fn connect_error(url: &str, e: reqwest::Error, proxied: bool) -> Error {
 }
 
 /// API 오류 안내 — 404 는 주소 경로·종류, 407/프록시 차단 페이지는 프록시
-fn api_error(status: u16, text: &str, cfg: &ProviderConfig) -> Error {
+pub(crate) fn api_error(status: u16, text: &str, cfg: &ProviderConfig) -> Error {
     let mut message = api_message(text);
     let lower = text.to_lowercase();
+    let model_missing = status == 404 && lower.contains("model") && (lower.contains("not found") || lower.contains("does not exist"));
+    let pull = format!("모델 '{}' 이 서버에 없습니다 — 서버에서 `ollama list` 로 받은 모델 이름을 보고 설정의 모델을 그 이름으로 바꾸거나, `ollama pull {}` 로 받으세요.", cfg.model, cfg.model);
     let tip = match status {
+        _ if model_missing => Some(pull.as_str()),
         404 | 405 => Some(match cfg.kind {
             ProviderKind::Ollama => "주소의 경로가 맞지 않습니다 — 종류가 Ollama 면 http://서버:11434 처럼 경로 없이 넣으세요. OpenAI 호환 서버면 종류를 'OpenAI 호환'으로.",
             ProviderKind::OpenaiCompatible => "주소의 경로가 맞지 않습니다 — OpenAI 호환 서버는 보통 http://서버:포트/v1 입니다. Ollama 서버면 종류를 'Ollama'로 바꾸세요. 모델 이름도 확인하세요.",

@@ -1807,7 +1807,12 @@ class App {
               const np = await persist();
               result.textContent = "연결 확인 중…";
               const models = await api.testProvider(np.name);
-              result.textContent = `연결됨 · 모델 ${models.length}개\n${models.slice(0, 30).join("\n")}`;
+              // 서버에는 붙었어도 설정한 모델이 없으면 질문이 "모델 없음"으로 실패한다
+              const has = !np.model || models.some((m) => m === np.model || m.replace(/:latest$/, "") === np.model);
+              result.textContent = (has ? `연결됨 · 모델 ${models.length}개`
+                : `연결됨 — 그런데 설정한 모델 '${np.model}' 이 이 서버에 없습니다. 아래 이름 중 하나로 바꾸세요 (또는 서버에서 ollama pull ${np.model}).`) +
+                `\n${models.slice(0, 30).join("\n")}`;
+              result.classList.toggle("warn", !has);
             } catch (err) { result.textContent = errOf(err).message; }
           } }, "연결 테스트")),
         result);

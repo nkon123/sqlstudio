@@ -509,3 +509,4 @@ dialog.imp { width: min(1100px, 95vw); }
 /* ── 설정 > AI: 문법 안내 ── */
 .guides-box { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; padding: 4px 0 8px; border-bottom: 1px solid var(--line); margin-bottom: 8px; }
 .guides-box .hint { color: var(--dim); flex: 1; min-width: 240px; }
+.modal-text.warn { color: var(--warn); }

@@ -16,10 +16,12 @@
 - 이름은 따옴표 없이 쓰면 대문자로 저장된다.
 
 @@ paging11 | 페이징·상위 N건 (11g: ROWNUM) | 페이징, 페이지, 상위, top, 처음, 몇 건, 몇건, 최근 n, rownum, limit, 10개, 10건, 100건, 일부만 | -11
-ROWNUM 은 ORDER BY 보다 먼저 매겨진다. 정렬한 결과를 인라인 뷰로 감싼 뒤 자른다.
+ROWNUM 은 ORDER BY 보다 먼저 매겨진다. 반드시 이 순서로 쓴다:
+① 안쪽 쿼리에서 JOIN·WHERE·GROUP BY·ORDER BY 를 끝낸다 ② 그것을 괄호로 감싸 별칭 t 를 붙인다 ③ 바깥에서 `WHERE ROWNUM <= n`.
+ORDER BY 뒤에 WHERE 를 다시 쓸 수 없다. 상위 N 의 N 은 상수로 쓴다.
 ```sql
--- 상위 10건
-SELECT * FROM (SELECT o.* FROM orders o ORDER BY o.order_dt DESC) WHERE ROWNUM <= 10;
+-- 상위 10건: 정렬(·집계)은 안쪽, ROWNUM 은 바깥. GROUP BY 쿼리 안에 ROWNUM 을 넣지 않는다
+SELECT t.* FROM (SELECT o.cust_id, SUM(o.amt) amt FROM orders o GROUP BY o.cust_id ORDER BY amt DESC) t WHERE ROWNUM <= 10;
 -- 21~30번째 (3페이지, 10건씩)
 SELECT * FROM (
   SELECT a.*, ROWNUM rn FROM (SELECT o.* FROM orders o ORDER BY o.order_dt DESC) a
@@ -37,11 +39,13 @@ ORDER BY 없이 자르면 순서가 보장되지 않는다. 같은 값까지 포
 
 @@ topn_group | 그룹별 상위 N건·최신 1건 | 그룹별, 별로 최신, 별 최신, 마지막 1건, 최근 1건, 가장 최근, 첫 번째, 그룹마다, 고객별, 부서별, 상위 3, row_number, partition by | 
 ROW_NUMBER 로 순번을 매긴 인라인 뷰에서 거른다 (WHERE 에서 분석 함수를 바로 쓸 수 없다).
+인라인 뷰에 별칭(t)을 붙이고, 바깥에서는 t. 만 쓴다 — 안쪽 별칭(o, c)은 바깥에서 보이지 않는다.
 ```sql
-SELECT * FROM (
-  SELECT o.*, ROW_NUMBER() OVER (PARTITION BY o.cust_id ORDER BY o.order_dt DESC) rn
-    FROM orders o)
- WHERE rn = 1;   -- 고객별 최신 1건 (rn <= 3 이면 상위 3건)
+SELECT t.cust_id, t.cust_nm, t.order_id, t.order_dt
+  FROM (SELECT o.cust_id, c.cust_nm, o.order_id, o.order_dt,
+               ROW_NUMBER() OVER (PARTITION BY o.cust_id ORDER BY o.order_dt DESC) rn
+          FROM orders o JOIN customers c ON c.cust_id = o.cust_id) t
+ WHERE t.rn = 1;   -- 고객별 최신 1건 (t.rn <= 3 이면 상위 3건). "최신"은 날짜로 정렬한다 (번호의 MAX 가 아니라)
 ```
 같은 값을 함께 살리려면 RANK / DENSE_RANK. 한 컬럼만 필요하면 `MAX(col) KEEP (DENSE_RANK LAST ORDER BY dt)` 도 된다.
 

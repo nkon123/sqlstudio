@@ -478,6 +478,9 @@ pub struct Item {
     pub apply: Option<String>,
     /// 화면 정렬 가중치 (-99..99)
     pub boost: i32,
+    /// 이름이 아니라 설명(COMMENT)이 맞아 나온 후보 — 화면이 이름으로 다시 거르면 안 된다
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub note: bool,
     #[serde(skip)]
     score: i32,
 }
@@ -1262,8 +1265,8 @@ struct Out<'a> {
     prefix: &'a str,
     /// 대문자로 바꾼 입력 (한 번만 만든다)
     upper: String,
-    /// 입력에 한글이 있다 — 이름이 아니라 설명(COMMENT)으로 찾는다 ("주문일" → ORD_DT)
-    by_comment: bool,
+    /// 설명(COMMENT)과 맞댈 입력 — 소문자, 너무 짧으면(영문 1자) None
+    note_key: Option<String>,
     lower: bool,
     items: Vec<Item>,
     seen: HashSet<u64>,
@@ -1271,6 +1274,10 @@ struct Out<'a> {
     /// 이보다 낮은 점수는 만들지 않는다 (상위 limit 개만 남기므로)
     floor: i32,
 }
+
+/// 설명으로만 맞은 후보의 점수 — 이름이 맞은 후보(400~)보다 아래
+const NOTE_FRONT: i32 = 380;
+const NOTE_INSIDE: i32 = 300;
 
 impl<'a> Out<'a> {
     fn case(&self, s: &str) -> String {
@@ -1281,43 +1288,53 @@ impl<'a> Out<'a> {
         if self.lower { s.to_lowercase() } else { s.to_string() }
     }
 
-    /// 설명으로 찾을 때의 점수 — 앞에서 맞으면 높게, 안에 있으면 그다음
-    fn comment_score(&self, comment: Option<&String>) -> Option<i32> {
+    /// 설명으로 찾을 때의 점수 — 앞에서 맞으면 조금 높게
+    fn note_score(&self, comment: Option<&String>) -> Option<i32> {
+        let key = self.note_key.as_deref()?;
         let c = comment?;
-        let p = self.prefix.trim();
-        if c.starts_with(p) {
-            Some(800 - (c.chars().count() as i32 - p.chars().count() as i32).clamp(0, 100))
-        } else if c.contains(p) {
-            Some(650)
+        // 한글 설명은 그대로, 영문이 섞이면 대소문자 무시
+        // 앞에서 맞으면 설명이 짧을수록 위로 (그래도 안에서 맞은 것보다는 위)
+        let hit = |c: &str| {
+            if c.starts_with(key) {
+                Some(NOTE_FRONT - (c.chars().count() as i32 - key.chars().count() as i32).clamp(0, 60))
+            } else if c.contains(key) {
+                Some(NOTE_INSIDE)
+            } else {
+                None
+            }
+        };
+        if c.is_ascii() || c.chars().any(|x| x.is_ascii_alphabetic()) {
+            hit(&c.to_lowercase())
         } else {
-            None
+            hit(c)
         }
     }
 
-    /// 이미 만든 글자 (스니펫, 조인 조건 등 — 개수가 적다)
+    fn with_note(info: Option<&String>, detail: Option<String>) -> Option<String> {
+        Some(match (info, detail) {
+            (Some(c), Some(d)) => format!("{c} · {d}"),
+            (Some(c), None) => c.clone(),
+            (None, d) => d.unwrap_or_default(),
+        })
+    }
+
+    /// 이미 만든 글자 (스니펫, 조인 조건 등 — 개수가 적다). 이름이 안 맞으면 설명으로
     fn push(&mut self, label: String, kind: &'static str, base: i32, detail: Option<String>, info: Option<String>, apply: Option<String>) {
-        if self.by_comment {
-            // 한글 입력: 설명이 맞는 컬럼만, 설명을 보이게
-            let Some(m) = self.comment_score(info.as_ref()) else { return };
-            if !self.seen.insert(hash_key(&label, kind)) {
-                return;
-            }
-            let detail = Some(match (&info, detail) {
-                (Some(c), Some(d)) => format!("{c} · {d}"),
-                (Some(c), None) => c.clone(),
-                (None, d) => d.unwrap_or_default(),
-            });
-            self.items.push(Item { label, kind, detail, info, apply, boost: 0, score: m + base });
-            return;
-        }
-        let Some(m) = match_score(&label, self.prefix) else { return };
+        let (m, note) = match match_score(&label, self.prefix) {
+            Some(m) => (m, false),
+            None => match self.note_score(info.as_ref()) {
+                Some(m) => (m, true),
+                None => return,
+            },
+        };
         if !self.seen.insert(hash_key(&label, kind)) {
             return;
         }
-        self.items.push(Item { label, kind, detail, info, apply, boost: 0, score: m + base });
+        let detail = if note { Self::with_note(info.as_ref(), detail) } else { detail };
+        self.items.push(Item { label, kind, detail, info, apply, boost: 0, note, score: m + base });
     }
 
-    /// 사전의 이름 — 수만 개를 훑으므로, 맞는 것만 글자를 만든다
+    /// 사전의 이름 — 수만 개를 훑으므로, 맞는 것만 글자를 만든다. 이름이 안 맞으면 설명으로
     fn name(
         &mut self,
         name: &str,
@@ -1326,27 +1343,19 @@ impl<'a> Out<'a> {
         detail: impl FnOnce() -> Option<String>,
         info: Option<&String>,
     ) {
-        if self.by_comment {
-            let Some(m) = self.comment_score(info) else { return };
-            if m + base < self.floor || !self.seen.insert(hash_key(name, kind)) {
-                return;
-            }
-            let label = self.case(name);
-            let d = detail();
-            let detail = Some(match d {
-                Some(d) => format!("{} · {d}", info.map(String::as_str).unwrap_or("")),
-                None => info.cloned().unwrap_or_default(),
-            });
-            self.items.push(Item { label, kind, detail, info: info.cloned(), apply: None, boost: 0, score: m + base });
-            self.prune();
-            return;
-        }
-        let Some(m) = fast_score(name, &self.upper) else { return };
+        let (m, note) = match fast_score(name, &self.upper) {
+            Some(m) => (m, false),
+            None => match self.note_score(info) {
+                Some(m) => (m, true),
+                None => return,
+            },
+        };
         if m + base < self.floor || !self.seen.insert(hash_key(name, kind)) {
             return;
         }
         let label = self.case(name);
-        self.items.push(Item { label, kind, detail: detail(), info: info.cloned(), apply: None, boost: 0, score: m + base });
+        let detail = if note { Self::with_note(info, detail()) } else { detail() };
+        self.items.push(Item { label, kind, detail, info: info.cloned(), apply: None, boost: 0, note, score: m + base });
         self.prune();
     }
 
@@ -1366,7 +1375,11 @@ pub fn suggest(a: &Analysis, cache: &SchemaCache, limit: usize) -> Completion {
     let mut out = Out {
         prefix: &a.prefix,
         upper: a.prefix.to_uppercase(),
-        by_comment: a.prefix.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c) || ('\u{3131}'..='\u{318E}').contains(&c)),
+        // 영문은 2자부터 (1자면 설명에 너무 많이 걸린다), 한글은 1자부터
+        note_key: {
+            let p = a.prefix.trim().to_lowercase();
+            (p.chars().count() >= 2 || p.chars().any(|c| !c.is_ascii())).then_some(p).filter(|p| !p.is_empty())
+        },
         lower: a.lower,
         items: Vec::new(),
         seen: HashSet::new(),

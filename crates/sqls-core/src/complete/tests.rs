@@ -363,6 +363,11 @@ fn korean_finds_by_comment() {
     assert!(r.items[0].detail.as_deref().unwrap_or("").contains("주문"), "후보에 설명을 보인다");
     let r = at("select 주문일| from orders", &c);
     assert_eq!(labels(&r, 1), ["ord_dt"]);
+    // 영문으로 쳐도 이름이 먼저, 설명만 맞는 것은 그 아래 (설명에 영문이 있는 경우)
+    c.set_columns("SCOTT", "CUST", vec![cm("CID", "NUMBER", "Customer id"), cm("CUST_NM", "VARCHAR2", "고객명")]);
+    let r = at("select cust| from cust", &c);
+    assert_eq!(labels(&r, 2), ["cust_nm", "cid"], "이름이 맞은 것 먼저: {:?}", labels(&r, 5));
+    assert!(r.items.iter().find(|i| i.label == "cid").unwrap().note, "설명으로 맞은 후보 표시");
     let r = at("select o.고객| from orders o", &c);
     assert_eq!(labels(&r, 1), ["cust_id"], "별칭 뒤에서도: {:?}", labels(&r, 5));
     // 결과 컬럼 → 설명

@@ -70,6 +70,8 @@ export interface AiAnswer {
 }
 export interface CompletionItem {
   label: string; kind: string; detail?: string | null; info?: string | null; apply?: string | null; boost: number;
+  /** 이름이 아니라 설명(COMMENT)으로 맞은 후보 */
+  note?: boolean;
 }
 export interface CompletionResultView { from: number; items: CompletionItem[]; context: string }
 export interface CompletionStatus { profile: string; phase: string; objects: number; columns: number; error?: string | null }

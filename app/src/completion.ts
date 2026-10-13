@@ -16,8 +16,6 @@ const CLAUSE = new Set([
   "HAVING", "USING", "DISTINCT", "EXEC", "EXECUTE", "CALL", "DESC", "DESCRIBE", "WITH", "NOT", "PRIOR",
 ]);
 const IDENT_END = /[\p{L}\p{N}_$#]*$/u;
-/** 한글 — 이름이 아니라 설명(COMMENT)으로 찾는다 */
-const HANGUL = /[\u3131-\u318E\uAC00-\uD7A3]/;
 const VALID = /^[\p{L}\p{N}_$#]*$/u;
 
 const TYPE: Record<string, string> = {
@@ -71,8 +69,8 @@ export function sqlCompletion(sessionId: () => number | undefined): CompletionSo
       return null;
     }
     if (ctx.aborted || !r.items.length) return null;
-    // 한글로 찾으면 후보 이름(ORD_DT)이 친 글자(주문일)와 다르다 — 화면이 이름으로 거르지 않게, 칠 때마다 다시 묻는다
-    if (HANGUL.test(word)) {
+    // 설명(COMMENT)으로 맞은 후보가 있으면 이름(ORD_DT)이 친 글자(주문일)와 다르다 — 화면이 이름으로 거르지 않게, 칠 때마다 다시 묻는다
+    if (r.items.some((i) => i.note)) {
       return { from: from + byteToUtf16(text, r.from), options: r.items.map(toCompletion), filter: false };
     }
     return {

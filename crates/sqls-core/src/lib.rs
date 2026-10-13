@@ -13,6 +13,7 @@ pub mod complete;
 pub mod config;
 pub mod connlog;
 pub mod debug;
+pub mod dml;
 pub mod edit;
 pub mod error;
 pub mod meta;

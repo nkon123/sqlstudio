@@ -22,6 +22,7 @@ use oracle::{Connection, Connector, Privilege, ResultSet, Row};
 use serde::Serialize;
 use tokio::sync::{oneshot, watch};
 
+use crate::connlog;
 use crate::error::{Error, Result};
 use crate::sql::{self, StmtKind};
 
@@ -76,6 +77,20 @@ impl ConnectSpec {
             keepalive: Some(KEEPALIVE),
         }
     }
+}
+
+/// 접속 기록에 보일 이름 (module → 무엇에 쓰는 세션인지)
+fn who(module: &str) -> String {
+    match module {
+        "SQLStudio" => "작업 탭".into(),
+        "SQLStudio-Meta" => "사전 조회".into(),
+        m if m.contains("analyze") => "분석 CLI".into(),
+        m => m.to_string(),
+    }
+}
+
+fn target(spec: &ConnectSpec) -> String {
+    format!("{}@{}", spec.user.to_uppercase(), spec.connect_string)
 }
 
 /// 기본 keepalive — 사내 방화벽의 유휴 끊기(보통 5분~1시간)보다 짧게
@@ -232,6 +247,8 @@ pub struct Session {
     lost: Arc<watch::Sender<bool>>,
     /// keepalive ping 횟수와 마지막 실패 (진단용)
     pings: Arc<std::sync::Mutex<(u32, Option<String>)>>,
+    /// 마지막 호출이 끝난 때 (유닉스 초) — 끊기기 전에 얼마나 쉬었는지
+    last_done: Arc<std::sync::atomic::AtomicU64>,
     /// 다시 접속할 때 쓴다 ([`Session::reopen`]). 비밀번호는 메모리에만
     spec: Arc<ConnectSpec>,
 }
@@ -245,9 +262,16 @@ impl Session {
             .spawn(move || {
                 let started = Instant::now();
                 let r = open(&spec);
+                let ms = started.elapsed().as_millis() as u64;
                 match &r {
-                    Ok((_, info)) => tracing::info!("접속 {}@{} sid={} module={} ({}ms)", spec.user, spec.connect_string, info.sid, spec.module, started.elapsed().as_millis()),
-                    Err(e) => tracing::warn!("접속 실패 {}@{} module={} ({}ms): {e}", spec.user, spec.connect_string, spec.module, started.elapsed().as_millis()),
+                    Ok((_, info)) => {
+                        tracing::info!("접속 {}@{} sid={} module={} ({ms}ms)", spec.user, spec.connect_string, info.sid, spec.module);
+                        connlog::record(connlog::Ev { kind: "connect_ok".into(), who: who(&spec.module), target: target(&spec), sid: Some(info.sid), ms: Some(ms), ..Default::default() });
+                    }
+                    Err(e) => {
+                        tracing::warn!("접속 실패 {}@{} module={} ({ms}ms): {e}", spec.user, spec.connect_string, spec.module);
+                        connlog::record(connlog::Ev { kind: "connect_fail".into(), who: who(&spec.module), target: target(&spec), ms: Some(ms), code: connlog::code_of(e), msg: e.to_string(), ..Default::default() });
+                    }
                 }
                 let keep = Arc::new(spec.clone());
                 match r {
@@ -266,6 +290,7 @@ impl Session {
                             abandoned: Arc::new(abandoned),
                             lost: lost.clone(),
                             pings: pings.clone(),
+                            last_done: Arc::new(std::sync::atomic::AtomicU64::new(connlog::now())),
                             spec: keep,
                         };
                         let sid = session.info.sid;
@@ -357,6 +382,8 @@ impl Session {
             return Err(Error::SessionClosed);
         }
         let (tx, rx) = oneshot::channel();
+        let began = Instant::now();
+        let idle = connlog::now().saturating_sub(self.last_done.load(Ordering::Relaxed));
         if self.tx.send(make(tx)).is_err() {
             self.mark_lost();
             return Err(Error::SessionClosed);
@@ -365,9 +392,17 @@ impl Session {
             r = rx => r.map_err(|_| Error::SessionClosed).and_then(|r| r),
             _ = gone.wait_for(|v| *v) => return Err(Error::SessionClosed),
         };
+        self.last_done.store(connlog::now(), Ordering::Relaxed);
         if let Err(e @ (Error::ConnectionLost(_) | Error::SessionClosed)) = &r {
             if !self.is_lost() {
                 tracing::warn!("끊김 sid={} ({}): {e}", self.info.sid, self.spec.module);
+                // 버린 세션(SessionClosed)은 끊김이 아니다
+                if matches!(e, Error::ConnectionLost(_)) {
+                    connlog::record(connlog::Ev {
+                        kind: "lost".into(), who: who(&self.spec.module), target: target(&self.spec), sid: Some(self.info.sid), via: Some("call".into()),
+                        idle: Some(idle), ms: Some(began.elapsed().as_millis() as u64), code: connlog::code_of(e), msg: e.to_string(), ..Default::default()
+                    });
+                }
             }
             self.mark_lost();
         }
@@ -503,6 +538,8 @@ struct Worker {
     lost: Arc<watch::Sender<bool>>,
     pings: Arc<std::sync::Mutex<(u32, Option<String>)>>,
     sid: i64,
+    /// 마지막으로 명령을 받은 때 — keepalive 로 끊김을 알았을 때 얼마나 쉬었는지
+    last_cmd: Instant,
     cursor: Option<OpenCursor>,
 }
 
@@ -516,7 +553,7 @@ impl Worker {
         pings: Arc<std::sync::Mutex<(u32, Option<String>)>>,
         sid: i64,
     ) -> Self {
-        Self { conn, spec, busy, abandoned, lost, pings, sid, cursor: None }
+        Self { conn, spec, busy, abandoned, lost, pings, sid, last_cmd: Instant::now(), cursor: None }
     }
 
     /// 쉬는 동안 ping — 작업 스레드 안에서 하므로 사용자의 호출과 겹치지 않는다.
@@ -542,6 +579,10 @@ impl Worker {
             // ping 이 30초 안에 돌아오지 않았으면(ORA-03156) 네트워크가 죽은 것으로 본다
             Err(e) if e.is_connection_lost() || matches!(e, Error::Driver(_) | Error::Db { code: 3156, .. }) => {
                 tracing::warn!("keepalive ping 실패 sid={} ({}) — 접속이 끊긴 것으로 본다: {e}", self.sid, self.spec.module);
+                connlog::record(connlog::Ev {
+                    kind: "lost".into(), who: who(&self.spec.module), target: target(&self.spec), sid: Some(self.sid), via: Some("keepalive".into()),
+                    idle: Some(self.last_cmd.elapsed().as_secs()), code: connlog::code_of(&e), msg: e.to_string(), ..Default::default()
+                });
                 self.lost.send_replace(true);
             }
             Err(e) => tracing::debug!("keepalive ping: {e}"),
@@ -567,6 +608,7 @@ impl Worker {
                     Err(_) => break,
                 },
             };
+            self.last_cmd = Instant::now();
             if matches!(cmd, Cmd::Shutdown) || *self.abandoned.borrow() {
                 break;
             }

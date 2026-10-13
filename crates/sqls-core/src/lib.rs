@@ -11,6 +11,7 @@
 
 pub mod complete;
 pub mod config;
+pub mod connlog;
 pub mod debug;
 pub mod edit;
 pub mod error;

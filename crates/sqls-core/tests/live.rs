@@ -414,6 +414,9 @@ async fn batch_insert() {
 #[tokio::test]
 #[ignore]
 async fn keepalive_notices_killed_session() {
+    let log = std::env::temp_dir().join(format!("sqls-connlog-{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    sqls_core::connlog::init(log.clone());
     let mut sp = spec(false);
     sp.keepalive = Some(Duration::from_secs(1));
     let victim = Session::connect(sp).await.unwrap();
@@ -436,6 +439,14 @@ async fn keepalive_notices_killed_session() {
     }
     let e = victim.execute("SELECT 1 FROM dual", ExecOptions::default()).await.unwrap_err();
     assert!(e.is_connection_lost(), "{e:?}");
+    // 접속 기록: 접속들, 쉬는 동안 끊김 (keepalive) 이 남고 요약에 나온다
+    let evs = sqls_core::connlog::read(&log, 0);
+    assert!(evs.iter().filter(|e| e.kind == "connect_ok").count() >= 2, "{evs:?}");
+    let lost = evs.iter().find(|e| e.kind == "lost").expect("끊김 기록");
+    assert_eq!(lost.via.as_deref(), Some("keepalive"), "{lost:?}");
+    assert!(lost.code.is_some(), "{lost:?}");
+    let sum = sqls_core::connlog::summarize(&evs, 0, sqls_core::connlog::now(), true, "test");
+    assert!(sum.contains("쉬는 동안 1회"), "{sum}");
     // 같은 정보로 다시 접속
     let again = victim.reopen().await.unwrap();
     assert!(!again.is_lost() && again.info().sid != 0);

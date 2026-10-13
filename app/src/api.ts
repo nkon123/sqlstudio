@@ -77,6 +77,8 @@ export const api = {
   appInfo: () => invoke<{ version: string; config_path: string; config_error?: string | null; log_dir?: string }>("app_info"),
   /** 화면에서 일어난 일을 앱 로그 파일에 (접속 끊김·다시 접속 등) */
   log: (level: "info" | "warn", message: string) => { invoke("client_log", { level, message }).catch(() => {}); },
+  /** 탭 다시 접속 결과를 접속 기록에 */
+  connEvent: (kind: "recover_ok" | "recover_fail", message: string) => { invoke("conn_event", { kind, message }).catch(() => {}); },
   listProfiles: () => invoke<Profile[]>("list_profiles"),
   saveProfile: (profile: Profile, originalName?: string) => invoke<void>("save_profile", { profile, originalName }),
   deleteProfile: (name: string) => invoke<void>("delete_profile", { name }),

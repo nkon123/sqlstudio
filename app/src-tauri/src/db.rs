@@ -44,6 +44,47 @@ pub fn open_log_dir() -> R<()> {
     r.map(|_| ()).map_err(|e| ErrView::msg("io", format!("{}: {e}", d.display())))
 }
 
+/// 화면이 한 다시 접속의 결과를 접속 기록에 (recover_ok / recover_fail)
+#[tauri::command]
+pub fn conn_event(kind: String, message: String) {
+    if !matches!(kind.as_str(), "recover_ok" | "recover_fail") {
+        return;
+    }
+    let code = sqls_core::connlog::code_in(&message);
+    sqls_core::connlog::record(sqls_core::connlog::Ev { kind, who: "작업 탭".into(), code, msg: message, ..Default::default() });
+}
+
+#[derive(Serialize)]
+pub struct ConnReport {
+    summary: String,
+    /// 최근 것부터 (가리기를 고르면 주소·계정을 '접속N' 으로)
+    events: Vec<sqls_core::connlog::Ev>,
+    path: String,
+}
+
+/// 접속 진단 — 최근 days 일의 접속 기록 요약
+#[tauri::command]
+pub fn conn_report(days: u64, mask: bool) -> ConnReport {
+    use sqls_core::connlog;
+    let path = connlog::path().unwrap_or_else(|| crate::log_dir().join("connection.jsonl"));
+    let until = connlog::now();
+    let since = until.saturating_sub(days.clamp(1, 365) * 86400);
+    let evs = connlog::read(&path, since);
+    let summary = connlog::summarize(&evs, since, until, mask, env!("CARGO_PKG_VERSION"));
+    let mut names = std::collections::HashMap::new();
+    let mut events: Vec<connlog::Ev> = evs.into_iter().rev().take(300).collect();
+    if mask {
+        for e in events.iter_mut().rev() {
+            if !e.target.is_empty() {
+                let n = names.len() + 1;
+                e.target = names.entry(e.target.clone()).or_insert_with(|| format!("접속{n}")).clone();
+            }
+            e.msg.clear();
+        }
+    }
+    ConnReport { summary, events, path: path.display().to_string() }
+}
+
 /// 화면에서 일어난 일(탭 다시 접속 등)을 같은 로그에 남긴다
 #[tauri::command]
 pub fn client_log(level: String, message: String) {

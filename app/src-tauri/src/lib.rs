@@ -51,6 +51,8 @@ pub fn run() {
         None => tracing_subscriber::fmt().with_env_filter(filter()).init(),
     }
     tracing::info!("SQLStudio {} 시작 — 설정 {}", env!("CARGO_PKG_VERSION"), sqls_core::config::config_path().display());
+    // 접속·끊김·다시 접속 기록 (설정 > 정보 > 접속 진단 이 요약한다)
+    sqls_core::connlog::init(log_dir().join("connection.jsonl"));
 
     let state = AppState::load();
 
@@ -61,6 +63,8 @@ pub fn run() {
             db::app_info,
             db::open_log_dir,
             db::client_log,
+            db::conn_event,
+            db::conn_report,
             db::list_profiles,
             db::save_profile,
             db::delete_profile,

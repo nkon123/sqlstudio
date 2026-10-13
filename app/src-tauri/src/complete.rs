@@ -119,6 +119,7 @@ impl MetaHub {
             match tokio::time::timeout(Duration::from_secs(45), Session::connect(self.spec.clone())).await {
                 Ok(Ok(s)) => {
                     tracing::info!("{}: 메타 세션 다시 접속", self.profile);
+                    sqls_core::connlog::record(sqls_core::connlog::Ev { kind: "meta_ok".into(), who: "사전 조회".into(), ..Default::default() });
                     self.install(s.clone());
                     if had_cache {
                         self.set_phase("ready", None);
@@ -132,6 +133,9 @@ impl MetaHub {
             }
         }
         tracing::warn!("{}: 메타 세션 다시 접속 실패: {last_err}", self.profile);
+        sqls_core::connlog::record(sqls_core::connlog::Ev {
+            kind: "meta_fail".into(), who: "사전 조회".into(), code: sqls_core::connlog::code_in(&last_err), msg: last_err.clone(), ..Default::default()
+        });
         self.set_phase("error", Some(format!("다시 접속하지 못했습니다: {last_err}")));
         None
     }

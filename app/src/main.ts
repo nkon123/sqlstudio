@@ -624,6 +624,7 @@ class App {
             : "다시 접속했습니다. 세션 설정(ALTER SESSION·패키지 변수)은 처음으로 돌아갔습니다. 필요하면 다시 실행하세요.", hadTxn ? "err" : "warn");
           toast(hadTxn ? "다시 접속함 — 커밋하지 않은 변경은 롤백됨" : "DB 에 다시 접속했습니다", hadTxn ? "error" : "info", hadTxn ? 8000 : 3000);
           api.log("info", `탭 다시 접속 #${old.id} → #${c.id} (${old.profile})`);
+          api.connEvent("recover_ok", `${why}${hadTxn ? " · 커밋 안 한 변경 롤백" : ""}`);
           this.status(`${old.profile} 다시 접속됨`);
           return;
         } catch (e) {
@@ -634,6 +635,7 @@ class App {
         }
       }
       this.status("접속 끊김");
+      api.connEvent("recover_fail", why);
       toast("DB 에 다시 접속하지 못했습니다 — 네트워크를 확인하고 접속하세요", "error", 8000);
     } finally {
       t.recovering = false;
@@ -1631,11 +1633,46 @@ class App {
     await this.ai.load();
   }
 
+  /** 접속 진단 — 기록을 요약해 보여 주고 복사한다 (로그를 보내지 않고 말로 전할 수 있게) */
+  private async connReport() {
+    const days = h("select", {}, ...[[1, "오늘"], [7, "최근 7일"], [30, "최근 30일"]].map(([v, l]) => h("option", { value: String(v), selected: v === 7 }, String(l))));
+    const mask = h("input", { type: "checkbox", checked: true }) as HTMLInputElement;
+    const pre = h("pre", { class: "modal-text conn-report" });
+    const tbody = h("tbody", {});
+    const KIND: Record<string, string> = {
+      connect_ok: "접속", connect_fail: "접속 실패", lost: "끊김", recover_ok: "다시 접속", recover_fail: "다시 접속 실패", meta_ok: "사전 조회 다시 접속", meta_fail: "사전 조회 다시 접속 실패",
+    };
+    const fill = async () => {
+      const r = await invoke<{ summary: string; events: { t: number; kind: string; who?: string; target?: string; sid?: number; via?: string; idle?: number; ms?: number; code?: string; msg?: string }[]; path: string }>(
+        "conn_report", { days: Number(days.value), mask: mask.checked });
+      pre.textContent = r.summary;
+      tbody.replaceChildren(...r.events.slice(0, 200).map((e) => h("tr", { class: e.kind.includes("fail") || e.kind === "lost" ? "warn" : "" },
+        h("td", {}, new Date(e.t * 1000).toLocaleString()),
+        h("td", {}, KIND[e.kind] ?? e.kind),
+        h("td", {}, e.who ?? ""), h("td", {}, e.target ?? ""),
+        h("td", {}, e.kind === "lost" ? `${e.via === "keepalive" ? "쉬는 동안" : "쓰다가"}${e.idle != null ? ` · ${e.idle >= 60 ? `${Math.round(e.idle / 60)}분` : `${e.idle}초`} 쉼` : ""}` : e.ms != null ? `${(e.ms / 1000).toFixed(1)}초` : ""),
+        h("td", { title: e.msg ?? "" }, e.code ?? ""))));
+    };
+    days.onchange = () => void fill();
+    mask.onchange = () => void fill();
+    await fill().catch((e) => { pre.textContent = errOf(e).message; });
+    const body = h("div", { class: "conn-report-box" },
+      h("div", { class: "row" }, days, h("label", { class: "check", title: "주소·계정을 '접속1' 처럼 가리고, 오류 원문을 뺀다" }, mask, "주소·계정 가리기"),
+        h("span", { class: "spacer" }),
+        h("button", { class: "primary", onclick: () => navigator.clipboard.writeText(pre.textContent ?? "").then(() => toast("요약을 복사했습니다", "info", 1500)) }, "요약 복사")),
+      pre,
+      h("details", {}, h("summary", {}, "기록 (최근 것부터)"),
+        h("div", { class: "conn-events" }, h("table", { class: "desc-table" },
+          h("thead", {}, h("tr", {}, ...["때", "무엇", "세션", "접속", "상황", "오류"].map((x) => h("th", {}, x)))), tbody))));
+    await modal("접속 진단", body, [{ label: "닫기", value: true }], { wide: true });
+  }
+
   private async aboutPage() {
     const info = await api.appInfo();
     return h("div", { class: "about" },
       h("p", {}, h("strong", {}, `SQLStudio ${info.version}`)),
       h("p", { class: "hint" }, `설정 파일: ${info.config_path}`),
+      h("p", {}, h("button", { title: "접속·끊김·다시 접속 기록을 몇 줄로 요약 — 원인(쉬는 동안·실행 중·서버·한도)을 가른다", onclick: () => void this.connReport() }, "접속 진단")),
       info.log_dir ? h("p", { class: "hint" }, `로그: ${info.log_dir} `,
         h("button", { class: "small", title: "접속·끊김·다시 접속 기록 — 문제가 생기면 이 폴더의 sqlstudio.log 를 보내 주세요", onclick: () => invoke("open_log_dir").catch((e) => toast(errOf(e).message, "error")) }, "로그 폴더 열기")) : "",
       h("h4", {}, "오픈소스 라이선스"),

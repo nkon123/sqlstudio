@@ -429,7 +429,11 @@ async fn keepalive_notices_killed_session() {
     exec(&admin, &format!("ALTER SYSTEM KILL SESSION '{sid},{serial}' IMMEDIATE")).await;
 
     let mut sig = victim.lost_signal();
-    tokio::time::timeout(Duration::from_secs(20), sig.wait_for(|v| *v)).await.expect("keepalive 가 끊김을 알아채야 한다").unwrap();
+    if tokio::time::timeout(Duration::from_secs(20), sig.wait_for(|v| *v)).await.is_err() {
+        let st = victim.keepalive_state();
+        let next = victim.execute("SELECT 1 FROM dual", ExecOptions::default()).await;
+        panic!("keepalive 가 끊김을 알아채야 한다: ping {st:?}, 다음 호출 {:?}", next.err());
+    }
     let e = victim.execute("SELECT 1 FROM dual", ExecOptions::default()).await.unwrap_err();
     assert!(e.is_connection_lost(), "{e:?}");
     // 같은 정보로 다시 접속

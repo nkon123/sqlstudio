@@ -228,6 +228,8 @@ pub struct Session {
     abandoned: Arc<watch::Sender<bool>>,
     /// 접속이 끊긴 것을 알았으면 참 (호출 결과 또는 keepalive ping)
     lost: Arc<watch::Sender<bool>>,
+    /// keepalive ping 횟수와 마지막 실패 (진단용)
+    pings: Arc<std::sync::Mutex<(u32, Option<String>)>>,
     /// 다시 접속할 때 쓴다 ([`Session::reopen`]). 비밀번호는 메모리에만
     spec: Arc<ConnectSpec>,
 }
@@ -248,6 +250,7 @@ impl Session {
                         let busy = Arc::new(AtomicBool::new(false));
                         let (abandoned, abandoned_rx) = watch::channel(false);
                         let lost = Arc::new(watch::channel(false).0);
+                        let pings = Arc::new(std::sync::Mutex::new((0, None)));
                         let session = Session {
                             tx: ctx,
                             conn: conn.clone(),
@@ -255,13 +258,14 @@ impl Session {
                             info: Arc::new(info),
                             abandoned: Arc::new(abandoned),
                             lost: lost.clone(),
+                            pings: pings.clone(),
                             spec: keep,
                         };
                         if tx.send(Ok(session)).is_err() {
                             let _ = conn.close();
                             return;
                         }
-                        Worker::new(conn, spec, busy, abandoned_rx, lost).run(crx);
+                        Worker::new(conn, spec, busy, abandoned_rx, lost, pings).run(crx);
                     }
                     Err(e) => {
                         let _ = tx.send(Err(e));
@@ -326,6 +330,11 @@ impl Session {
             Ok(r) => r,
             Err(_) => Err(Error::ConnectionLost(format!("다시 접속하지 못했습니다 ({}초 안에 응답 없음)", REOPEN_LIMIT.as_secs()))),
         }
+    }
+
+    /// keepalive ping 을 몇 번 했고 마지막으로 무엇 때문에 실패했는지
+    pub fn keepalive_state(&self) -> (u32, Option<String>) {
+        self.pings.lock().unwrap().clone()
     }
 
     fn mark_lost(&self) {
@@ -478,6 +487,7 @@ struct Worker {
     busy: Arc<AtomicBool>,
     abandoned: watch::Receiver<bool>,
     lost: Arc<watch::Sender<bool>>,
+    pings: Arc<std::sync::Mutex<(u32, Option<String>)>>,
     cursor: Option<OpenCursor>,
 }
 
@@ -488,8 +498,9 @@ impl Worker {
         busy: Arc<AtomicBool>,
         abandoned: watch::Receiver<bool>,
         lost: Arc<watch::Sender<bool>>,
+        pings: Arc<std::sync::Mutex<(u32, Option<String>)>>,
     ) -> Self {
-        Self { conn, spec, busy, abandoned, lost, cursor: None }
+        Self { conn, spec, busy, abandoned, lost, pings, cursor: None }
     }
 
     /// 쉬는 동안 ping — 작업 스레드 안에서 하므로 사용자의 호출과 겹치지 않는다.
@@ -502,6 +513,13 @@ impl Worker {
         let r = self.conn.ping().map_err(Error::from);
         if limited {
             let _ = self.conn.set_call_timeout(self.spec.call_timeout);
+        }
+        {
+            let mut p = self.pings.lock().unwrap();
+            p.0 += 1;
+            if let Err(e) = &r {
+                p.1 = Some(format!("{e:?}"));
+            }
         }
         match r {
             Ok(()) => {}

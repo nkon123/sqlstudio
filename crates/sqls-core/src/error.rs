@@ -53,6 +53,11 @@ const LOST_CODES: &[i32] = &[3113, 3114, 3135, 3156, 28, 1012, 2396, 12547, 1257
 
 impl From<oracle::Error> for Error {
     fn from(e: oracle::Error) -> Self {
+        // DPI-1080: 접속이 끊김, DPI-1010: 접속되어 있지 않음, DPI-1067: 호출 시간 초과 (접속을 버려야 함).
+        // 드라이버가 이것을 ORA 코드 0 인 DB 오류로 싸서 줄 때가 있다 (서버가 세션을 죽였을 때) — 코드보다 먼저 본다
+        if matches!(e.dpi_code(), Some(1080) | Some(1010) | Some(1067)) || is_lost_dpi(&e.to_string()) {
+            return Error::ConnectionLost(e.to_string());
+        }
         if let Some(db) = e.db_error() {
             let code = db.code();
             if code == 1013 {
@@ -67,12 +72,12 @@ impl From<oracle::Error> for Error {
                 message: db.message().to_string(),
             };
         }
-        // DPI-1080: 접속이 끊김, DPI-1010: 접속되어 있지 않음, DPI-1067: 호출 시간 초과 (접속을 버려야 함)
-        if matches!(e.dpi_code(), Some(1080) | Some(1010) | Some(1067)) {
-            return Error::ConnectionLost(e.to_string());
-        }
         Error::Driver(e.to_string())
     }
+}
+
+fn is_lost_dpi(msg: &str) -> bool {
+    ["DPI-1080", "DPI-1010", "DPI-1067"].iter().any(|c| msg.contains(c))
 }
 
 /// UI/MCP 로 보내는 직렬화 형태
@@ -121,5 +126,13 @@ mod tests {
         assert_eq!(e.to_string(), "ORA-00904: \"X\": invalid identifier");
         let e = Error::Db { code: 1, offset: 0, message: "unique constraint".into() };
         assert_eq!(e.to_string(), "ORA-00001: unique constraint");
+    }
+
+    #[test]
+    fn dpi_not_connected_is_lost() {
+        // 서버가 세션을 죽인 뒤 드라이버가 주는 모양 (ORA 코드 0 으로 싸여 온다)
+        assert!(is_lost_dpi("DPI-1010: not connected"));
+        assert!(is_lost_dpi("DPI-1080: connection was closed by ORA-3113"));
+        assert!(!is_lost_dpi("ORA-00904: invalid identifier"));
     }
 }

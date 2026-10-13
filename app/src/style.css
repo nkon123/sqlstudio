@@ -551,3 +551,9 @@ dialog.imp { width: min(1100px, 95vw); }
 .sc-add { background: color-mix(in srgb, var(--ok) 16%, transparent); }
 .sc-empty { background: color-mix(in srgb, var(--text) 4%, transparent); }
 .sc-fold td { color: var(--dim); text-align: center; font-style: italic; background: color-mix(in srgb, var(--text) 3%, transparent); }
+
+/* 커밋하지 않은 변경이 있는 탭 */
+.tab.txn { background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.tab.txn.active { background: color-mix(in srgb, var(--warn) 22%, var(--panel)); }
+.tab-txn { font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 8px; background: var(--warn); color: #fff; }
+.tab-body.txn .editor-host { box-shadow: inset 0 3px 0 var(--warn); }

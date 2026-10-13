@@ -196,7 +196,9 @@ class Tab {
     this.show("result");
     this.grid.clear("Ctrl+Enter: 커서 위치 문장 실행 · F5: 스크립트 실행 · Ctrl+E: 실행계획");
     this.tabEl = h("div", { class: "tab", onclick: () => app.activate(this) },
-      h("span", { class: "tab-title" }), h("button", { class: "tab-close", title: "닫기", onclick: (e: Event) => { e.stopPropagation(); app.closeTab(this); } }, "×"));
+      h("span", { class: "tab-title" }),
+      h("span", { class: "tab-txn", hidden: true, title: "커밋하지 않은 변경이 있습니다 (INSERT·UPDATE·DELETE·MERGE 등) — 커밋 또는 롤백하세요" }, "커밋 전"),
+      h("button", { class: "tab-close", title: "닫기", onclick: (e: Event) => { e.stopPropagation(); app.closeTab(this); } }, "×"));
     this.refreshTitle();
   }
 
@@ -213,6 +215,11 @@ class Tab {
   refreshTitle() {
     (this.tabEl.querySelector(".tab-title") as HTMLElement).textContent = this.title();
     this.tabEl.style.borderTopColor = this.conn?.color ?? "transparent";
+    // 커밋하지 않은 변경 — 다른 탭을 보고 있어도 알 수 있게 탭과 에디터 위에
+    const txn = !!this.conn && this.txnPending;
+    this.tabEl.classList.toggle("txn", txn);
+    (this.tabEl.querySelector(".tab-txn") as HTMLElement).hidden = !txn;
+    this.root.classList.toggle("txn", txn);
   }
 
   setDirty(d: boolean) {
@@ -1628,6 +1635,7 @@ class App {
     this.btn.commit.disabled = !c || busy || !t?.txnPending;
     this.btn.rollback.disabled = !c || busy || !t?.txnPending;
     this.txnBadge.hidden = !t?.txnPending;
+    for (const x of this.tabs) x.refreshTitle();
     this.connBadge.textContent = c ? `${c.production ? "운영 · " : ""}${c.user}@${c.connect_string}${c.read_only ? " · 읽기 전용" : ""}${c.sid ? ` · SID ${c.sid}` : ""}` : "접속 안 됨";
     this.connBadge.title = c ? `세션 SID ${c.sid ?? "?"} · ${c.at ? `${new Date(c.at).toLocaleTimeString()} 에 접속` : ""} — 화면을 오가도 SID 가 같으면 같은 접속입니다 (다시 접속하면 바뀝니다)` : "";
     this.connBadge.classList.toggle("prod", !!c?.production);

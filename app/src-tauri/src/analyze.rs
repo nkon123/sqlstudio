@@ -403,3 +403,78 @@ pub fn analysis_remove_set(name: String) -> R<()> {
     }
     std::fs::remove_dir_all(&d).map_err(|e| ErrView::msg("io", e.to_string()))
 }
+
+// ── 흐름도 보고서 (결과 폴더의 integrated/reports/<id>.json) ─────────────
+// 결과 폴더에 두므로 .sqla 내보내기에 함께 들어간다. 이름은 결과 폴더 이름(접속 프로필 또는 가져온 결과).
+
+fn reports_dir(profile: &str) -> R<std::path::PathBuf> {
+    let root = sqls_analyze::default_dir(profile);
+    if !root.join("units").is_dir() {
+        return Err(ErrView::msg("invalid", format!("'{profile}' 분석 결과가 이 PC 에 없습니다")));
+    }
+    Ok(root.join("integrated").join("reports"))
+}
+
+fn report_path(profile: &str, id: &str) -> R<std::path::PathBuf> {
+    if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err(ErrView::msg("invalid", format!("잘못된 보고서 id: {id}")));
+    }
+    Ok(reports_dir(profile)?.join(format!("{id}.json")))
+}
+
+#[derive(Serialize)]
+pub struct ReportInfo {
+    id: String,
+    name: String,
+    center: Option<String>,
+    updated_at: Option<u64>,
+}
+
+/// 보고서 목록 (이름순)
+#[tauri::command]
+pub fn dfd_reports(profile: String) -> R<Vec<ReportInfo>> {
+    let dir = reports_dir(&profile)?;
+    let mut out: Vec<ReportInfo> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .filter_map(|e| {
+                    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok()?;
+                    Some(ReportInfo {
+                        id: v["id"].as_str()?.to_string(),
+                        name: v["name"].as_str().unwrap_or("").to_string(),
+                        center: v["basis"]["center"].as_str().map(String::from),
+                        updated_at: v["updated_at"].as_u64(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn dfd_report_get(profile: String, id: String) -> R<serde_json::Value> {
+    let p = report_path(&profile, &id)?;
+    let text = std::fs::read_to_string(&p).map_err(|e| ErrView::msg("io", format!("보고서를 읽을 수 없습니다: {e}")))?;
+    serde_json::from_str(&text).map_err(|e| ErrView::msg("invalid", format!("보고서 파일이 깨졌습니다: {e}")))
+}
+
+/// 저장 — 임시 파일에 쓰고 바꿔 끼운다 (쓰다 꺼져도 앞의 것이 남는다)
+#[tauri::command]
+pub fn dfd_report_save(profile: String, report: serde_json::Value) -> R<()> {
+    let id = report["id"].as_str().unwrap_or("").to_string();
+    let p = report_path(&profile, &id)?;
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| ErrView::msg("io", e.to_string()))?;
+    }
+    let tmp = p.with_extension("tmp");
+    let bytes = serde_json::to_vec_pretty(&report).map_err(|e| ErrView::msg("invalid", e.to_string()))?;
+    std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &p)).map_err(|e| ErrView::msg("io", e.to_string()))
+}
+
+#[tauri::command]
+pub fn dfd_report_delete(profile: String, id: String) -> R<()> {
+    std::fs::remove_file(report_path(&profile, &id)?).map_err(|e| ErrView::msg("io", e.to_string()))
+}

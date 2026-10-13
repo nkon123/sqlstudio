@@ -8,16 +8,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { errOf } from "./api";
 import { type Base, type DfdSource, type EdgeKind, LANES, buildBase, buildView, busiest, edgesOf, packageOf } from "./dfd-model";
-import { h, toast } from "./ui";
+import { field, h, modal, toast } from "./ui";
+import { showMenu } from "./ctxmenu";
+import type { DfdReport, Report } from "./dfd-report";
 
-const COLORS = { read: "#2f6fdd", write: "#e07a1f", call: "#8a93a0", flow: "#7a4fd0", trig: "#c62f3c", use: "#a3abb5" };
-const KIND_KO: Record<EdgeKind, string> = { read: "읽기", write: "쓰기", call: "호출", trig: "트리거 발동", flow: "커서 흐름", use: "쓰임 (연산 모름)" };
+export const COLORS = { read: "#2f6fdd", write: "#e07a1f", call: "#8a93a0", flow: "#7a4fd0", trig: "#c62f3c", use: "#a3abb5" };
+export const KIND_KO: Record<EdgeKind, string> = { read: "읽기", write: "쓰기", call: "호출", trig: "트리거 발동", flow: "커서 흐름", use: "쓰임 (연산 모름)" };
 /** 이보다 크면 처음에는 가장 바쁜 노드를 가운데로 */
 const WHOLE_LIMIT = 80;
 
-type Libs = { cytoscape: typeof import("cytoscape"); ELK: typeof import("elkjs/lib/elk.bundled.js").default };
+export type Libs = { cytoscape: typeof import("cytoscape"); ELK: typeof import("elkjs/lib/elk.bundled.js").default };
 let libs: Promise<Libs> | null = null;
-function loadLibs(): Promise<Libs> {
+export function loadLibs(): Promise<Libs> {
   libs ??= Promise.all([import("cytoscape"), import("elkjs/lib/elk.bundled.js")]).then(([c, e]) => ({ cytoscape: c.default, ELK: e.default }));
   return libs;
 }
@@ -48,7 +50,12 @@ export class DfdView {
   private hidden = new Set<string>();
   private runId = 0;
 
-  constructor(private onOpenNode: ((id: string) => void) | null, opts: { popout?: (center: string | null, dir: string) => void } = {}) {
+  private report: DfdReport | null = null;
+  private main!: HTMLElement[];
+
+  /** profile: 보고서를 둘 결과 폴더 이름 (없으면 보고서 단추를 숨긴다) */
+  constructor(private onOpenNode: ((id: string) => void) | null,
+    private opts: { popout?: (center: string | null, dir: string) => void; profile?: () => Promise<string | null> } = {}) {
     this.centerIn.setAttribute("list", "dfd-names");
     const tb = h("div", { class: "dfd-toolbar" },
       this.centerIn, this.names, this.dirSel, this.depthSel,
@@ -60,6 +67,7 @@ export class DfdView {
       h("span", { class: "spacer" }), this.info,
       h("button", { class: "small", onclick: () => this.cy?.fit(undefined, 30) }, "맞추기"),
       h("button", { class: "small", title: "보고서에 넣을 그림으로 저장", onclick: () => this.savePng() }, "PNG"),
+      opts.profile ? h("button", { class: "small primary", title: "지금 그림을 사본으로 떼어 손보는 보고서 모드 (메모·선·정렬) — 저장한 보고서 열기", onclick: (e: MouseEvent) => void this.reportMenu(e) }, "보고서 ▾") : "",
       opts.popout ? h("button", { class: "small", title: "지금 보는 것을 별도 창으로", onclick: () => opts.popout!(this.center, this.dirSel.value) }, "새 창") : "");
     this.centerIn.addEventListener("change", () => {
       const v = this.centerIn.value.trim();
@@ -87,8 +95,63 @@ export class DfdView {
     this.callBox.onchange = () => this.draw();
     this.flowBox.onchange = () => this.draw();
     this.hiddenBtn.onclick = () => { this.hidden.clear(); this.draw(); };
-    this.el = h("div", { class: "dfd" }, tb, h("div", { class: "dfd-body" }, this.canvas, this.side));
+    const body = h("div", { class: "dfd-body" }, this.canvas, this.side);
+    this.main = [tb, body];
+    this.el = h("div", { class: "dfd" }, tb, body);
     this.sideHint();
+  }
+
+  // ── 보고서 모드 ─────────────────────────────
+
+  private async reportMenu(e: MouseEvent) {
+    const profile = await this.opts.profile?.();
+    if (!profile) return toast("분석 결과 폴더를 알 수 없습니다", "error");
+    let list: { id: string; name: string; center?: string | null; updated_at?: number | null }[] = [];
+    try {
+      list = await invoke("dfd_reports", { profile });
+    } catch (err) {
+      return toast(errOf(err).message, "error");
+    }
+    const r = (e.target as HTMLElement).getBoundingClientRect();
+    showMenu(r.left, r.bottom + 2, [
+      { label: "새 보고서 (지금 그림으로)", disabled: !this.cy?.nodes().length, run: () => void this.newReport(profile) },
+      ...(list.length ? [{ sep: true as const }, { title: `저장한 보고서 ${list.length}` }] : []),
+      ...list.map((x) => ({ label: x.name, hint: x.updated_at ? new Date(x.updated_at * 1000).toLocaleDateString() : "", run: () => void this.openReport(profile, x.id) })),
+    ]);
+  }
+
+  private async newReport(profile: string) {
+    const nameIn = h("input", { value: `${this.center ? this.center.split(".").pop() : "전체"} 흐름`, style: "width:100%" });
+    const ok = await modal("새 보고서", h("div", {}, field("보고서 이름", nameIn, "같은 프로시저로 여러 개 만들 수 있습니다 (예: 운영 보고용, 개발 검토용)")),
+      [{ label: "취소", value: false }, { label: "만들기", value: true, kind: "primary" }]);
+    if (!ok || !this.cy) return;
+    const { snapshot } = await import("./dfd-report");
+    const basis = { center: this.center, dir: this.dirSel.value, depth: Number(this.depthSel.value), unit: this.unitSel.value as "proc" | "pkg",
+      calls: this.callBox.checked, flows: this.flowBox.checked, hidden: [...this.hidden] };
+    await this.showReport(snapshot(this.cy, basis, profile, nameIn.value.trim() || "보고서"));
+  }
+
+  private async openReport(profile: string, id: string) {
+    try {
+      await this.showReport(await invoke<Report>("dfd_report_get", { profile, id }));
+    } catch (e) {
+      toast(errOf(e).message, "error");
+    }
+  }
+
+  private async showReport(r: Report) {
+    const { DfdReport } = await import("./dfd-report");
+    this.report ??= new DfdReport({ src: () => this.src, onClose: () => this.closeReport() });
+    for (const x of this.main) x.hidden = true;
+    if (!this.report.el.isConnected) this.el.append(this.report.el);
+    this.report.el.hidden = false;
+    await this.report.open(r);
+  }
+
+  private closeReport() {
+    if (this.report) this.report.el.hidden = true;
+    for (const x of this.main) x.hidden = false;
+    this.cy?.resize();
   }
 
   /** 분석 결과를 받는다. focus 가 있으면 그 노드를 가운데로 */
@@ -231,38 +294,13 @@ export class DfdView {
   private ensureCy(L: Libs): Core {
     if (this.cy) return this.cy;
     this.elk = new L.ELK();
-    const v = (n: string) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
     const cy = L.cytoscape({
       container: this.canvas,
       wheelSensitivity: 0.25,
       minZoom: 0.05,
       maxZoom: 3,
       boxSelectionEnabled: false,
-      style: [
-        { selector: "node", style: { label: "data(label)", "text-wrap": "wrap", "text-valign": "center", "text-halign": "center", "font-size": 11,
-          "font-family": "Malgun Gothic, sans-serif", color: "#1d232b", width: "data(w)", height: "data(h)", shape: "round-rectangle",
-          "border-width": 2, "z-index-compare": "manual", "z-index": 10 } },
-        { selector: "node[type='proc']", style: { "border-color": COLORS.read, "background-color": "#e8f0fd" } },
-        { selector: "node[type='table']", style: { shape: "rectangle", "border-color": COLORS.write, "border-style": "double", "border-width": 3, "background-color": "#fff4e6" } },
-        { selector: "node[type='trig']", style: { shape: "diamond", "border-color": COLORS.trig, "background-color": "#fdeaec" } },
-        { selector: "node[?copy]", style: { "border-style": "dashed", "border-width": 2 } },
-        { selector: "node[?center]", style: { "border-width": 4, "font-weight": "bold", "font-size": 13 } },
-        { selector: "node[?more]", style: { label: (n: NodeSingular) => `${n.data("label")}  ＋` } },
-        { selector: "node[type='lane']", style: { shape: "rectangle", "z-index": 0, events: "no", "background-color": v("--text"), "background-opacity": 0.04,
-          "border-width": 0, label: "data(label)", "text-valign": "top", "text-margin-y": 26, "font-size": 13, "font-weight": "bold", color: v("--dim") } },
-        { selector: "node:selected", style: { "overlay-color": v("--accent"), "overlay-opacity": 0.18 } },
-        { selector: "edge", style: { width: 2, "curve-style": "segments", "edge-distances": "endpoints" as never, // @types 에 아직 없는 값 (3.30 은 지원) "segment-radius": 6,
-          "target-arrow-shape": "triangle", "arrow-scale": 0.9, "z-index-compare": "manual", "z-index": 5,
-          "target-label": "data(tag)", "target-text-offset": 22, "target-text-margin-y": -8, "font-size": 10, color: v("--text"),
-          "text-background-color": v("--bg"), "text-background-opacity": 0.9, "text-background-padding": "1px" } },
-        { selector: "edge.straight", style: { "curve-style": "straight" } },
-        ...(Object.entries(COLORS) as [string, string][]).map(([k, c]) => ({ selector: `edge[kind='${k}']`, style: { "line-color": c, "target-arrow-color": c } })),
-        { selector: "edge[kind='call']", style: { "line-style": "dashed" } },
-        { selector: "edge[kind='flow']", style: { width: 3 } },
-        { selector: "edge[?guess]", style: { "line-style": "dotted" } },
-        { selector: "edge:selected", style: { width: 4 } },
-        { selector: ".dim", style: { opacity: 0.12 } },
-      ],
+      style: dfdStyle() as never,
     });
     const twinsOf = (n: NodeSingular) => cy.nodes().filter((x) => x.data("ref") === n.data("ref"));
     cy.on("mouseover", "node", (ev) => {
@@ -339,8 +377,38 @@ export class DfdView {
   }
 }
 
+/** 흐름도 그림 모양 — 보고서 편집기도 같은 것을 쓰고 덧붙인다 */
+export function dfdStyle(): unknown[] {
+  const v = (n: string) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  return [
+    { selector: "node", style: { label: "data(label)", "text-wrap": "wrap", "text-valign": "center", "text-halign": "center", "font-size": 11,
+      "font-family": "Malgun Gothic, sans-serif", color: "#1d232b", width: "data(w)", height: "data(h)", shape: "round-rectangle",
+      "border-width": 2, "z-index-compare": "manual", "z-index": 10 } },
+    { selector: "node[type='proc']", style: { "border-color": COLORS.read, "background-color": "#e8f0fd" } },
+    { selector: "node[type='table']", style: { shape: "rectangle", "border-color": COLORS.write, "border-style": "double", "border-width": 3, "background-color": "#fff4e6" } },
+    { selector: "node[type='trig']", style: { shape: "diamond", "border-color": COLORS.trig, "background-color": "#fdeaec" } },
+    { selector: "node[?copy]", style: { "border-style": "dashed", "border-width": 2 } },
+    { selector: "node[?center]", style: { "border-width": 4, "font-weight": "bold", "font-size": 13 } },
+    { selector: "node[?more]", style: { label: (n: NodeSingular) => `${n.data("label")}  ＋` } },
+    { selector: "node[type='lane']", style: { shape: "rectangle", "z-index": 0, events: "no", "background-color": v("--text"), "background-opacity": 0.04,
+      "border-width": 0, label: "data(label)", "text-valign": "top", "text-margin-y": 26, "font-size": 13, "font-weight": "bold", color: v("--dim") } },
+    { selector: "node:selected", style: { "overlay-color": v("--accent"), "overlay-opacity": 0.18 } },
+    { selector: "edge", style: { width: 2, "curve-style": "segments", "edge-distances": "endpoints" as never, // @types 에 아직 없는 값 (3.30 은 지원) "segment-radius": 6,
+      "target-arrow-shape": "triangle", "arrow-scale": 0.9, "z-index-compare": "manual", "z-index": 5,
+      "target-label": "data(tag)", "target-text-offset": 22, "target-text-margin-y": -8, "font-size": 10, color: v("--text"),
+      "text-background-color": v("--bg"), "text-background-opacity": 0.9, "text-background-padding": "1px" } },
+    { selector: "edge.straight", style: { "curve-style": "straight" } },
+    ...(Object.entries(COLORS) as [string, string][]).map(([k, c]) => ({ selector: `edge[kind='${k}']`, style: { "line-color": c, "target-arrow-color": c } })),
+    { selector: "edge[kind='call']", style: { "line-style": "dashed" } },
+    { selector: "edge[kind='flow']", style: { width: 3 } },
+    { selector: "edge[?guess]", style: { "line-style": "dotted" } },
+    { selector: "edge:selected", style: { width: 4 } },
+    { selector: ".dim", style: { opacity: 0.12 } },
+  ];
+}
+
 const measure = document.createElement("canvas").getContext("2d")!;
-function boxSize(label: string, type: string, center: boolean): [number, number] {
+export function boxSize(label: string, type: string, center: boolean): [number, number] {
   measure.font = `${center ? "bold 13px" : "11px"} "Malgun Gothic", sans-serif`;
   const lines = label.split("\n");
   const w = Math.max(...lines.map((l) => measure.measureText(l).width)) + 24 + 14; // ＋ 표시 자리

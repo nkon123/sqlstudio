@@ -722,6 +722,7 @@ export class AnalysisView {
       const { DfdView } = await import("./dfd");
       this.dfd ??= new DfdView((id) => { this.view = "calls"; this.focusNode = id; this.render(); }, {
         popout: (center, dir) => invoke("open_dfd_window", { ...this.src(), center, dir }).catch((e) => toast(errOf(e).message, "error")),
+        profile: async () => this.set ?? (await this.liveName()),
       });
       if (this.view !== "dfd") return;
     }

@@ -25,7 +25,7 @@ async function start() {
       h("p", { class: "hint" }, "메인 창의 '분석' 화면에서 패키지·프로시저를 분석하면 흐름도를 그릴 수 있습니다.")));
     return;
   }
-  const v = new DfdView(null);
+  const v = new DfdView(null, { profile: async () => profile });
   root.replaceChildren(v.el);
   const unit = q.get("unit");
   v.setData(g, q.get("center"), q.get("dir"), unit === "pkg" || unit === "proc" ? unit : null);

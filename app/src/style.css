@@ -519,3 +519,13 @@ dialog.imp { width: min(1100px, 95vw); }
 .guides-box { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; padding: 4px 0 8px; border-bottom: 1px solid var(--line); margin-bottom: 8px; }
 .guides-box .hint { color: var(--dim); flex: 1; min-width: 240px; }
 .modal-text.warn { color: var(--warn); }
+
+/* 흐름도 보고서 모드 */
+.rp { flex: 1; min-height: 0; outline: none; }
+.rp-toolbar button.small { min-width: 26px; }
+.rp-name { width: 180px; font-weight: 600; }
+.rp-lbl { display: block; font-size: 11px; color: var(--dim); margin: 8px 0 2px; }
+.rp-palette { display: flex; gap: 4px; flex-wrap: wrap; }
+.rp-sw { width: 22px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 4px; font-size: 11px; line-height: 1; }
+.rp-sw.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rp-diff { margin-top: 10px; padding: 8px; border: 1px solid var(--warn); border-radius: 6px; background: color-mix(in srgb, var(--warn) 10%, transparent); display: flex; flex-direction: column; gap: 4px; font-size: 12px; }

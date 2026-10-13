@@ -37,6 +37,8 @@ export interface TableDesc {
   owner: string; name: string; object_type: string; comment?: string | null; num_rows?: string | null;
   last_analyzed?: string | null; columns: ColumnDesc[]; primary_key: string[];
   indexes: { name: string; unique: boolean; columns: string[] }[];
+  /** 자동완성 캐시로 바로 만든 것 — 기본값·인덱스·통계 없음 */
+  partial?: boolean;
 }
 export type ScriptEvent =
   | { event: "started"; index: number; total: number; line: number; kind: StmtKind; preview: string }
@@ -102,6 +104,8 @@ export const api = {
   listObjects: (id: number, owner?: string, objectType?: string, nameLike?: string) =>
     invoke<ObjectEntry[]>("list_objects", { id, owner, objectType, nameLike }),
   describe: (id: number, name: string) => invoke<TableDesc>("describe", { id, name }),
+  /** DB 에 묻지 않는 구조 (기억해 둔 것 또는 자동완성 캐시, partial) — 없으면 null */
+  describeFast: (id: number, name: string) => invoke<TableDesc | null>("describe_fast", { id, name }),
   getDdl: (id: number, objectType: string, name: string) => invoke<string>("get_ddl", { id, objectType, name }),
   complete: (id: number, text: string, cursor: number) => invoke<CompletionResultView>("complete", { id, text, cursor }),
   completionStatus: (id: number) => invoke<CompletionStatus>("completion_status", { id }),

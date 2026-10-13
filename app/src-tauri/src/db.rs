@@ -516,14 +516,43 @@ pub async fn list_objects(
 
 #[tauri::command]
 pub async fn describe(st: State<'_, AppState>, id: u64, name: String) -> R<meta::TableDesc> {
-    // 사전 조회 세션(자동완성용, 읽기 전용)이 준비돼 있으면 그쪽으로 — 작업 세션에서 긴 쿼리가 돌고 있어도 기다리지 않는다
-    if let Ok(hub) = crate::complete::hub_for(&st, id) {
-        if let Some(s) = hub.session() {
-            return Ok(meta::describe(s, &name).await?);
+    let hub = crate::complete::hub_for(&st, id).ok();
+    if let Some(d) = hub.as_ref().and_then(|h| h.cached_describe(&name)) {
+        return Ok(d);
+    }
+    let s = lookup_session(&st, id)?;
+    let d = meta::describe(&s, &name).await?;
+    if let Some(h) = &hub {
+        h.remember_describe(&name, &d);
+    }
+    Ok(d)
+}
+
+/// 사전 조회에 쓸 세션: 사전 조회 세션(읽기 전용)이 우선 — 작업 세션에서 긴 쿼리가 돌고 있어도 기다리지 않는다.
+/// 그 세션이 자동완성 캐시를 읽느라 바쁘고 작업 세션이 쉬고 있으면 작업 세션으로.
+fn lookup_session(st: &AppState, id: u64) -> R<sqls_core::Session> {
+    let (work, _, _) = st.session(id)?;
+    if let Ok(hub) = crate::complete::hub_for(st, id) {
+        if let Some(meta) = hub.session() {
+            if meta.is_busy() && !work.is_busy() {
+                return Ok(work);
+            }
+            return Ok(meta.clone());
         }
     }
-    let (s, _, _) = st.session(id)?;
-    Ok(meta::describe(&s, &name).await?)
+    Ok(work)
+}
+
+/// 컬럼 팝업을 바로 띄울 구조 — DB 에 묻지 않는다. 기억해 둔 전체 구조, 없으면 자동완성 캐시(기본값·인덱스 없이, partial).
+/// 둘 다 없으면 None (화면이 describe 로 묻는다)
+#[tauri::command]
+pub fn describe_fast(st: State<'_, AppState>, id: u64, name: String) -> Option<meta::TableDesc> {
+    let hub = crate::complete::hub_for(&st, id).ok()?;
+    if let Some(d) = hub.cached_describe(&name) {
+        return Some(d);
+    }
+    let cache = hub.cache.read().unwrap();
+    cache.quick_describe(&name)
 }
 
 /// 스키마 브라우저: 객체 종류별 상세 탭 목록
@@ -535,12 +564,7 @@ pub fn object_sections(object_type: String) -> Vec<sqls_core::browse::Section> {
 /// 스키마 브라우저: 탭 하나의 내용. 사전 조회 세션으로 — 작업 세션에서 쿼리가 돌고 있어도 기다리지 않는다
 #[tauri::command]
 pub async fn object_section(st: State<'_, AppState>, id: u64, owner: String, name: String, section: String) -> R<sqls_core::session::RowPage> {
-    if let Ok(hub) = crate::complete::hub_for(&st, id) {
-        if let Some(s) = hub.session() {
-            return Ok(sqls_core::browse::section(s, &owner, &name, &section).await?);
-        }
-    }
-    let (s, _, _) = st.session(id)?;
+    let s = lookup_session(&st, id)?;
     Ok(sqls_core::browse::section(&s, &owner, &name, &section).await?)
 }
 

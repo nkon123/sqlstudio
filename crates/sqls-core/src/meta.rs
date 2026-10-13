@@ -113,45 +113,46 @@ pub struct TableDesc {
     pub columns: Vec<ColumnDesc>,
     pub primary_key: Vec<String>,
     pub indexes: Vec<IndexDesc>,
+    /// 자동완성 캐시로 바로 만든 것 (기본값·인덱스·통계가 없다 — 화면이 이어서 전체를 묻는다)
+    #[serde(default)]
+    pub partial: bool,
 }
 
 /// 테이블/뷰 구조. 동의어면 따라가서 원본을 보여 준다.
 pub async fn describe(s: &Session, qualified: &str) -> Result<TableDesc> {
     let (mut owner, mut name) = split_qualified(qualified, &s.info().user);
 
-    // 대상 확인 — 없으면 동의어(개인 → PUBLIC 순)를 따라간다
+    // 대상 확인과 동의어를 한 번에 — 객체가 있으면 그것, 없으면 동의어(개인 → PUBLIC)를 따라간다
     let found = s
         .query(
-            "SELECT object_type FROM all_objects WHERE owner = :o AND object_name = :n \
-             AND object_type IN ('TABLE','VIEW','MATERIALIZED VIEW','SYNONYM')",
+            "SELECT 1 ord, owner, object_name, object_type FROM all_objects \
+              WHERE owner = :o AND object_name = :n AND object_type IN ('TABLE','VIEW','MATERIALIZED VIEW') \
+             UNION ALL \
+             SELECT DECODE(owner, 'PUBLIC', 3, 2), table_owner, table_name, 'SYNONYM' FROM all_synonyms \
+              WHERE synonym_name = :n AND owner IN (:o, 'PUBLIC') AND db_link IS NULL \
+             ORDER BY 1",
             vec![("O".into(), Some(owner.clone())), ("N".into(), Some(name.clone()))],
-            1,
+            3,
         )
         .await?;
-    let mut otype = found.rows.first().map(|r| cell(r, 0));
-    if otype.is_none() || otype.as_deref() == Some("SYNONYM") {
-        let syn = s
+    let mut otype = None;
+    if let Some(r) = found.rows.first() {
+        owner = cell(r, 1);
+        name = cell(r, 2);
+        otype = Some(cell(r, 3));
+    }
+    if otype.as_deref() == Some("SYNONYM") {
+        // 동의어의 대상 종류 (all_tables/all_views 가 all_objects 보다 가볍다)
+        let t = s
             .query(
-                "SELECT table_owner, table_name FROM all_synonyms \
-                 WHERE synonym_name = :n AND owner IN (:o, 'PUBLIC') \
-                 ORDER BY DECODE(owner, 'PUBLIC', 2, 1)",
-                vec![("N".into(), Some(name.clone())), ("O".into(), Some(owner.clone()))],
+                "SELECT 'TABLE' FROM all_tables WHERE owner = :o AND table_name = :n \
+                 UNION ALL SELECT 'VIEW' FROM all_views WHERE owner = :o AND view_name = :n \
+                 UNION ALL SELECT 'MATERIALIZED VIEW' FROM all_mviews WHERE owner = :o AND mview_name = :n",
+                vec![("O".into(), Some(owner.clone())), ("N".into(), Some(name.clone()))],
                 1,
             )
             .await?;
-        if let Some(r) = syn.rows.first() {
-            owner = cell(r, 0);
-            name = cell(r, 1);
-            let t = s
-                .query(
-                    "SELECT object_type FROM all_objects WHERE owner = :o AND object_name = :n \
-                     AND object_type IN ('TABLE','VIEW','MATERIALIZED VIEW')",
-                    vec![("O".into(), Some(owner.clone())), ("N".into(), Some(name.clone()))],
-                    1,
-                )
-                .await?;
-            otype = t.rows.first().map(|r| cell(r, 0));
-        }
+        otype = t.rows.first().map(|r| cell(r, 0));
     }
     let object_type = otype.ok_or_else(|| {
         Error::Invalid(format!("{owner}.{name} 을(를) 찾을 수 없거나 조회 권한이 없습니다"))
@@ -184,54 +185,51 @@ pub async fn describe(s: &Session, qualified: &str) -> Result<TableDesc> {
         })
         .collect();
 
-    let info = s
+    // 주석·통계·기본 키·인덱스를 한 번에 (종류 글자로 나눈다)
+    let extra = s
         .query(
-            "SELECT (SELECT comments FROM all_tab_comments WHERE owner = :o AND table_name = :n), \
-                    (SELECT TO_CHAR(num_rows) FROM all_tables WHERE owner = :o AND table_name = :n), \
-                    (SELECT TO_CHAR(last_analyzed, 'YYYY-MM-DD HH24:MI') FROM all_tables WHERE owner = :o AND table_name = :n) \
-             FROM dual",
+            "SELECT 'C' k, comments a, NULL b, 0 p FROM all_tab_comments WHERE owner = :o AND table_name = :n \
+             UNION ALL \
+             SELECT 'S', TO_CHAR(num_rows), TO_CHAR(last_analyzed, 'YYYY-MM-DD HH24:MI'), 0 FROM all_tables WHERE owner = :o AND table_name = :n \
+             UNION ALL \
+             SELECT 'P', cc.column_name, NULL, cc.position FROM all_constraints c \
+               JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name \
+              WHERE c.owner = :o AND c.table_name = :n AND c.constraint_type = 'P' \
+             UNION ALL \
+             SELECT 'I', i.index_name, DECODE(i.uniqueness, 'UNIQUE', 'U', '') || '|' || ic.column_name, ic.column_position FROM all_indexes i \
+               JOIN all_ind_columns ic ON ic.index_owner = i.owner AND ic.index_name = i.index_name \
+              WHERE i.table_owner = :o AND i.table_name = :n",
             ob(),
-            1,
+            5_000,
         )
         .await?;
-    let (comment, num_rows, last_analyzed) = info
-        .rows
-        .first()
-        .map(|r| (r[0].clone(), r[1].clone(), r[2].clone()))
-        .unwrap_or_default();
-
-    let pk = s
-        .query(
-            "SELECT cc.column_name FROM all_constraints c \
-             JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name \
-             WHERE c.owner = :o AND c.table_name = :n AND c.constraint_type = 'P' \
-             ORDER BY cc.position",
-            ob(),
-            100,
-        )
-        .await?;
-
-    let idx = s
-        .query(
-            "SELECT i.index_name, i.uniqueness, ic.column_name \
-             FROM all_indexes i \
-             JOIN all_ind_columns ic ON ic.index_owner = i.owner AND ic.index_name = i.index_name \
-             WHERE i.table_owner = :o AND i.table_name = :n \
-             ORDER BY i.index_name, ic.column_position",
-            ob(),
-            2_000,
-        )
-        .await?;
+    let (mut comment, mut num_rows, mut last_analyzed) = (None, None, None);
+    let mut pk: Vec<(i64, String)> = Vec::new();
+    let mut idx: Vec<(String, i64, bool, String)> = Vec::new();
+    for r in &extra.rows {
+        let pos: i64 = cell(r, 3).parse().unwrap_or(0);
+        match cell(r, 0).as_str() {
+            "C" => comment = r[1].clone(),
+            "S" => {
+                num_rows = r[1].clone();
+                last_analyzed = r[2].clone();
+            }
+            "P" => pk.push((pos, cell(r, 1))),
+            "I" => {
+                let b = cell(r, 2);
+                let (u, col) = b.split_once('|').unwrap_or(("", b.as_str()));
+                idx.push((cell(r, 1), pos, u == "U", col.to_string()));
+            }
+            _ => {}
+        }
+    }
+    pk.sort();
+    idx.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     let mut indexes: Vec<IndexDesc> = Vec::new();
-    for r in &idx.rows {
-        let iname = cell(r, 0);
+    for (iname, _, unique, col) in idx {
         match indexes.last_mut() {
-            Some(last) if last.name == iname => last.columns.push(cell(r, 2)),
-            _ => indexes.push(IndexDesc {
-                name: iname,
-                unique: cell(r, 1) == "UNIQUE",
-                columns: vec![cell(r, 2)],
-            }),
+            Some(last) if last.name == iname => last.columns.push(col),
+            _ => indexes.push(IndexDesc { name: iname, unique, columns: vec![col] }),
         }
     }
 
@@ -243,8 +241,9 @@ pub async fn describe(s: &Session, qualified: &str) -> Result<TableDesc> {
         num_rows,
         last_analyzed,
         columns,
-        primary_key: pk.rows.iter().map(|r| cell(r, 0)).collect(),
+        primary_key: pk.into_iter().map(|p| p.1).collect(),
         indexes,
+        partial: false,
     })
 }
 
@@ -544,6 +543,7 @@ mod tests {
             }],
             primary_key: vec!["EMPNO".into()],
             indexes: vec![],
+            partial: false,
         };
         assert_eq!(schema_brief(&t), "TABLE SCOTT.EMP  -- 사원 rows≈14\n  EMPNO NUMBER(4) NOT NULL PK\n");
     }

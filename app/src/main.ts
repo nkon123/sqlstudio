@@ -1172,7 +1172,13 @@ class App {
   // ── 컬럼 팝업 ────────────────────────────────────
 
   private openColumns(d: TableDesc, at?: { x: number; y: number }, alias?: string) {
-    showColumns(d, {
+    const t = this.active;
+    // 캐시로 먼저 띄웠으면 기본값·인덱스·통계를 뒤에서 채운다
+    if (d.partial && t?.conn) {
+      const id = t.conn.id;
+      queueMicrotask(() => api.describe(id, `"${d.owner}"."${d.name}"`).then((full) => popup.update(full)).catch(() => popup.update({ ...d, partial: false })));
+    }
+    const popup = showColumns(d, {
       at, alias,
       insert: (s) => { const t = this.active; if (!t) return; t.editor.insert(s); t.editor.view.focus(); },
       ddl: async () => { const t = this.active; if (t?.conn) this.newTab(true, await api.getDdl(t.conn.id, d.object_type, `"${d.owner}"."${d.name}"`)); },
@@ -1207,8 +1213,12 @@ class App {
     return { raw, tries };
   }
 
-  /** 후보를 차례로 사전에서 찾는다 (사전 조회 세션) */
+  /** 후보를 찾는다 — 먼저 DB 없이(기억해 둔 구조·자동완성 캐시), 없으면 차례로 사전에서 (사전 조회 세션) */
   private async resolveTable(t: Tab, tries: { name: string; alias?: string }[]): Promise<{ d: TableDesc; alias?: string } | { error: unknown }> {
+    for (const x of tries) {
+      const d = await api.describeFast(t.conn!.id, x.name).catch(() => null);
+      if (d) return { d, alias: x.alias };
+    }
     let last: unknown = null;
     for (const x of tries) {
       try {
@@ -1243,7 +1253,10 @@ class App {
     const q = `"${o.owner}"."${o.name}"`;
     const shown = o.owner === t.conn!.user ? o.name : `${o.owner}.${o.name}`;
     const insert = (text: string) => { t.editor.insert(text); t.editor.view.focus(); };
-    const withDesc = (f: (d: TableDesc) => void) => () => { api.describe(id, q).then(f).catch((e) => toast(errOf(e).message, "error")); };
+    // 컬럼·기본 키만 있으면 되는 것(팝업·SQL 만들기)은 캐시로 바로
+    const withDesc = (f: (d: TableDesc) => void) => () => {
+      api.describeFast(id, q).then((d) => d ?? api.describe(id, q)).then(f).catch((e) => toast(errOf(e).message, "error"));
+    };
     const ddl = () => api.getDdl(id, type, q).then((x) => this.newTab(true, x)).catch((e) => toast(errOf(e).message, "error"));
     const copyName = { label: "이름 복사", hint: shown, run: () => navigator.clipboard.writeText(shown).then(() => toast(`복사: ${shown}`, "ok", 1500)).catch(() => {}) };
     if (["TABLE", "VIEW", "MATERIALIZED VIEW"].includes(type)) {

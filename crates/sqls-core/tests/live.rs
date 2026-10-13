@@ -82,6 +82,17 @@ async fn dml_binds_output_and_dictionary() {
     assert_eq!(ename.data_type, "VARCHAR2(10 CHAR)");
     assert!(!ename.nullable);
     assert_eq!(ename.comment.as_deref(), Some("이름"));
+    // 주석·통계·PK·인덱스를 한 번에 읽는 쿼리 — 인덱스 컬럼 순서, PK 인덱스
+    let ix = d.indexes.iter().find(|i| i.name == format!("{t}_IX1")).expect("인덱스");
+    assert_eq!(ix.columns, vec!["ENAME", "SAL"]);
+    assert!(!ix.unique);
+    assert!(d.indexes.iter().any(|i| i.unique && i.columns == vec!["EMPNO"]), "{:?}", d.indexes);
+    // 동의어로 물어도 원본
+    let _ = s.execute("drop synonym sqls_t_emp_syn", Default::default()).await;
+    exec(&s, &format!("create synonym sqls_t_emp_syn for {t}")).await;
+    let ds = meta::describe(&s, "SQLS_T_EMP_SYN").await.unwrap();
+    assert_eq!((ds.name.as_str(), ds.object_type.as_str(), ds.columns.len()), (t, "TABLE", d.columns.len()));
+    let _ = s.execute("drop synonym sqls_t_emp_syn", Default::default()).await;
     assert_eq!(d.columns.iter().find(|c| c.name == "SAL").unwrap().data_type, "NUMBER(7,2)");
     assert!(d.indexes.iter().any(|i| i.columns == ["ENAME", "SAL"]));
     println!("{}", meta::schema_brief(&d));

@@ -42,6 +42,8 @@ pub struct MetaHub {
     inflight: Mutex<HashSet<Missing>>,
     reload_pending: AtomicBool,
     app: AppHandle,
+    /// 테이블 구조 조회 결과 (이름 → 언제, 결과). DDL 뒤 다시 읽을 때 비운다. 컬럼 팝업·우클릭·상세를 다시 열 때 바로
+    pub describes: Mutex<std::collections::HashMap<String, (std::time::Instant, sqls_core::meta::TableDesc)>>,
 }
 
 impl MetaHub {
@@ -82,7 +84,24 @@ impl MetaHub {
     }
 
     /// DDL 뒤에 다시 읽는다. 몰아서 한 번만 (연속 DDL 스크립트).
+    /// 기억해 둔 구조 (10분 안의 것)
+    pub fn cached_describe(&self, name: &str) -> Option<sqls_core::meta::TableDesc> {
+        let m = self.describes.lock().unwrap();
+        m.get(&name.to_uppercase()).filter(|(t, _)| t.elapsed() < Duration::from_secs(600)).map(|(_, d)| d.clone())
+    }
+
+    pub fn remember_describe(&self, name: &str, d: &sqls_core::meta::TableDesc) {
+        let mut m = self.describes.lock().unwrap();
+        if m.len() > 500 {
+            m.clear();
+        }
+        m.insert(name.to_uppercase(), (std::time::Instant::now(), d.clone()));
+        // 찾은 실제 이름으로도 (동의어·별칭으로 열었어도 다음엔 바로)
+        m.insert(format!("{}.{}", d.owner, d.name), (std::time::Instant::now(), d.clone()));
+    }
+
     pub fn schedule_reload(self: &Arc<Self>) {
+        self.describes.lock().unwrap().clear();
         if self.reload_pending.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -118,6 +137,7 @@ pub fn ensure_hub(st: &AppState, app: &AppHandle, profile: &Profile, password: &
         inflight: Mutex::new(HashSet::new()),
         reload_pending: AtomicBool::new(false),
         app: app.clone(),
+        describes: Mutex::new(std::collections::HashMap::new()),
     });
     hubs.insert(key, hub.clone());
     let mut spec = profile.to_spec(password.to_string());

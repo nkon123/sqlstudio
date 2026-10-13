@@ -324,3 +324,24 @@ fn oracle_functions_everywhere() {
     let r = at("select regexp_c| from emp", &c);
     assert_eq!(r.items.iter().find(|i| i.label == "regexp_count").and_then(|i| i.apply.clone()).as_deref(), Some("regexp_count("));
 }
+
+#[test]
+fn quick_describe_from_cache() {
+    let mut c = cache();
+    c.set_kind("SCOTT", "EMP", ObjKind::Table);
+    let d = c.quick_describe("emp").expect("내 테이블");
+    assert_eq!((d.owner.as_str(), d.name.as_str(), d.object_type.as_str()), ("SCOTT", "EMP", "TABLE"));
+    assert!(d.partial && d.indexes.is_empty());
+    assert_eq!(d.columns.len(), 8);
+    assert_eq!(d.primary_key, vec!["EMPNO"]);
+    assert!(c.quick_describe("SCOTT.EMP").is_some());
+    assert!(c.quick_describe("\"SCOTT\".\"EMP\"").is_some());
+    // 컬럼을 아직 안 읽은 테이블·없는 이름·시퀀스는 None (화면이 DB 에 묻는다)
+    assert!(c.quick_describe("SALGRADE").is_none());
+    assert!(c.quick_describe("NO_SUCH").is_none());
+    assert!(c.quick_describe("EMP_SEQ").is_none());
+    // 동의어 → 대상
+    c.set_columns("ERP", "ORDERS", vec![col("ID", "NUMBER")]);
+    let d = c.quick_describe("erp_orders").expect("동의어");
+    assert_eq!((d.owner.as_str(), d.name.as_str()), ("ERP", "ORDERS"));
+}

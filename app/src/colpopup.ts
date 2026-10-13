@@ -19,17 +19,32 @@ export interface ColPopupOpts {
 type SortKey = "no" | "name" | "type" | "null" | "default" | "comment";
 const open: HTMLElement[] = [];
 let zTop = 60;
+/** 떠 있는 창 → 내용 바꾸기 (캐시로 먼저 띄운 뒤 전체 구조가 오면) */
+const updaters = new WeakMap<HTMLElement, (d: TableDesc) => void>();
 
-export function showColumns(d: TableDesc, o: ColPopupOpts) {
+export interface ColPopup { update: (d: TableDesc) => void }
+
+export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   // 같은 테이블이 이미 떠 있으면 그 창을 앞으로
   const key = `${d.owner}.${d.name}`;
   const same = open.find((w) => w.dataset.key === key);
-  if (same) { same.style.zIndex = String(++zTop); same.querySelector<HTMLInputElement>("input")?.focus(); return; }
+  if (same) {
+    same.style.zIndex = String(++zTop);
+    same.querySelector<HTMLInputElement>("input")?.focus();
+    return { update: (x) => updaters.get(same)?.(x) };
+  }
 
-  const pk = new Set(d.primary_key);
-  const idxCols = new Map<string, string[]>();
-  for (const i of d.indexes) for (const c of i.columns) idxCols.set(c, [...(idxCols.get(c) ?? []), i.name]);
-  const rows = d.columns.map((c, i) => ({ no: i + 1, ...c }));
+  let pk = new Set(d.primary_key);
+  let idxCols = new Map<string, string[]>();
+  let rows = d.columns.map((c, i) => ({ no: i + 1, ...c }));
+  const setData = (x: TableDesc) => {
+    d = x;
+    pk = new Set(x.primary_key);
+    idxCols = new Map();
+    for (const i of x.indexes) for (const c of i.columns) idxCols.set(c, [...(idxCols.get(c) ?? []), i.name]);
+    rows = x.columns.map((c, i) => ({ no: i + 1, ...c }));
+  };
+  setData(d);
   let sort: { k: SortKey; desc: boolean } = { k: "no", desc: false };
   const picked = new Set<string>();
   let anchor = -1;
@@ -39,7 +54,10 @@ export function showColumns(d: TableDesc, o: ColPopupOpts) {
   const body = h("div", { class: "cp-body" });
   const count = h("span", { class: "cp-count" });
   const tabCols = h("button", { class: "cp-tab on" }, `컬럼 ${d.columns.length}`);
-  const tabIdx = h("button", { class: "cp-tab" }, `인덱스 ${d.indexes.length}`);
+  const tabIdx = h("button", { class: "cp-tab" }, d.partial ? "인덱스 …" : `인덱스 ${d.indexes.length}`);
+  const sub = h("span", { class: "cp-dim" });
+  const subText = () => ` ${d.object_type}${d.comment ? ` — ${d.comment}` : ""}${d.num_rows ? ` · ${Number(d.num_rows).toLocaleString()}행` : ""}${d.partial ? " · 나머지 읽는 중…" : ""}`;
+  sub.textContent = subText();
   const prefix = o.alias ? `${o.alias}.` : "";
   const names = () => {
     const sel = shown().filter((r) => picked.has(r.name));
@@ -48,7 +66,7 @@ export function showColumns(d: TableDesc, o: ColPopupOpts) {
   const win = h("div", { class: "cp-win", tabindex: "-1", "data-key": key },
     h("div", { class: "cp-head", title: "끌어서 옮기기" },
       h("strong", {}, `${d.owner}.${d.name}`),
-      h("span", { class: "cp-dim" }, ` ${d.object_type}${d.comment ? ` — ${d.comment}` : ""}${d.num_rows ? ` · ${Number(d.num_rows).toLocaleString()}행` : ""}`),
+      sub,
       h("span", { class: "spacer" }),
       h("button", { class: "cp-x", title: "닫기 (Esc)", onclick: () => close() }, "×")),
     h("div", { class: "cp-tools" }, tabCols, tabIdx, filter, count, h("span", { class: "spacer" }),
@@ -167,6 +185,16 @@ export function showColumns(d: TableDesc, o: ColPopupOpts) {
   open.push(win);
   render();
   filter.focus();
+  const update = (x: TableDesc) => {
+    if (!win.isConnected) return;
+    setData(x);
+    sub.textContent = subText();
+    tabCols.textContent = `컬럼 ${x.columns.length}`;
+    tabIdx.textContent = x.partial ? "인덱스 …" : `인덱스 ${x.indexes.length}`;
+    render();
+  };
+  updaters.set(win, update);
+  return { update };
 }
 
 /** 문서에서 별칭 → 테이블 ("FROM orders o", "JOIN app.customers AS c", ", items i") */

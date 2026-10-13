@@ -191,6 +191,41 @@ impl SchemaCache {
         self.synonyms.get(name).cloned()
     }
 
+    /// 컬럼 팝업을 DB 없이 바로 — 캐시에 그 테이블의 컬럼이 있을 때만. 기본값·인덱스·통계는 없다 (partial).
+    pub fn quick_describe(&self, qualified: &str) -> Option<crate::meta::TableDesc> {
+        let (owner, name) = match qualified.split_once('.') {
+            Some((o, n)) => (Some(crate::meta::norm_ident(o)), crate::meta::norm_ident(n)),
+            None => (None, crate::meta::norm_ident(qualified)),
+        };
+        let key = self.resolve(owner.as_deref(), &name)?;
+        let cols = self.cols(&key)?;
+        let kind = self.kind_of(&key);
+        if matches!(kind, Some(k) if !matches!(k, ObjKind::Table | ObjKind::View)) {
+            return None;
+        }
+        let comment = self
+            .objects
+            .iter()
+            .chain(self.schema_objects.get(&key.0).map(|v| v.iter()).into_iter().flatten())
+            .find(|o| o.owner == key.0 && o.name == key.1)
+            .and_then(|o| o.comment.clone());
+        Some(crate::meta::TableDesc {
+            owner: key.0.clone(),
+            name: key.1.clone(),
+            object_type: if kind == Some(ObjKind::View) { "VIEW" } else { "TABLE" }.into(),
+            comment,
+            num_rows: None,
+            last_analyzed: None,
+            columns: cols
+                .iter()
+                .map(|c| crate::meta::ColumnDesc { name: c.name.clone(), data_type: c.data_type.clone(), nullable: c.nullable, default: None, comment: c.comment.clone() })
+                .collect(),
+            primary_key: self.pks.get(&key).cloned().unwrap_or_default(),
+            indexes: Vec::new(),
+            partial: true,
+        })
+    }
+
     fn kind_of(&self, key: &Key) -> Option<ObjKind> {
         self.known_kinds.get(key).copied()
     }

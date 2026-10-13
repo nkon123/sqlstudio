@@ -4,7 +4,7 @@
 //   Ctrl+Enter / F9  커서 위치 문장 실행
 //   F5               스크립트 전체 실행
 //   Ctrl+E           실행계획
-//   Ctrl+S           저장
+//   Ctrl+S           저장 · Ctrl+Shift+S 다른 이름으로 저장
 //   Ctrl+Shift+F     SQL 포맷 (선택 영역 또는 커서 문장)
 //
 // 여러 곳 편집 (열 편집):
@@ -31,6 +31,8 @@ export interface EditorActions {
   runScript: () => void;
   explain: () => void;
   save: () => void;
+  /** Ctrl+Shift+S — 다른 이름으로 저장 */
+  saveAs: () => void;
   format: () => void;
   /** F4 — 커서의 테이블 컬럼 팝업 */
   describe: () => void;
@@ -139,6 +141,7 @@ export class SqlEditor {
             { key: "F9", run: run(actions.runStatement), preventDefault: true },
             { key: "F5", run: run(actions.runScript), preventDefault: true },
             { key: "Ctrl-e", mac: "Cmd-e", run: run(actions.explain), preventDefault: true },
+            { key: "Ctrl-Shift-s", mac: "Cmd-Shift-s", run: run(actions.saveAs), preventDefault: true },
             { key: "Ctrl-s", mac: "Cmd-s", run: run(actions.save), preventDefault: true },
             { key: "Ctrl-/", mac: "Cmd-/", run: toggleComment },
             { key: "Ctrl-Shift-f", mac: "Cmd-Shift-f", run: run(actions.format), preventDefault: true },

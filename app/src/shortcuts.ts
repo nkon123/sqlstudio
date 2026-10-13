@@ -11,6 +11,7 @@ const GROUPS: [string, [string, string][]][] = [
   ]],
   ["편집", [
     ["Ctrl+S", "저장"],
+    ["Ctrl+Shift+S", "다른 이름으로 저장 (저장 단추 우클릭: 인코딩 바꿔 저장)"],
     ["Ctrl+Shift+F", "SQL 포맷 (선택 영역, 없으면 커서 위치 문장)"],
     ["Ctrl+/", "주석 넣기/빼기"],
     ["Ctrl+Space", "자동완성 띄우기"],

@@ -164,6 +164,7 @@ class Tab {
       runScript: () => app.runScript(),
       explain: () => app.explain(),
       save: () => app.save(),
+      saveAs: () => app.saveAs(),
       format: () => app.formatSql(),
       describe: () => app.describeAtCursor(),
       history: () => app.showHistory(),
@@ -343,7 +344,8 @@ class App {
       b("new", "새 탭", "새 에디터 (같은 접속으로)", () => this.newTab(true)),
       b("open", "열기", "SQL 파일 열기", () => this.openFile()),
       b("history", "이력", "SQL 실행 이력 (F8) — 실행한 문장을 찾아 다시 쓴다", () => this.showHistory()),
-      b("save", "저장", "Ctrl+S", () => this.save()),
+      b("save", "저장", "Ctrl+S · 우클릭: 다른 이름으로 저장·인코딩 바꿔 저장", () => this.save()),
+      b("saveAs", "다른 이름", "다른 이름으로 저장 (Ctrl+Shift+S)", () => this.saveAs()),
       b("format", "포맷", "SQL 정리 (Ctrl+Shift+F) — 선택 영역, 없으면 커서 위치 문장", () => this.formatSql()),
       h("span", { class: "sep" }),
       b("toggleBrowser", "왼쪽", "왼쪽 영역(테이블·프로젝트) 접기/펼치기 (Ctrl+Shift+1) · 경계선을 끌면 너비 조절", () => this.layout.toggle("left")),
@@ -352,6 +354,7 @@ class App {
       b("keys", "단축키", "단축키 목록 (F1)", () => showShortcuts()),
       b("settings", "설정", "접속·AI·MCP 설정", () => this.settings()),
     );
+    this.btn.save.addEventListener("contextmenu", (e) => this.saveMenu(e));
     const tablePane = h("div", { class: "side-pane" },
       h("div", { class: "browser-head" }, this.browserOwner, this.browserType),
       this.browserFilter,
@@ -1389,6 +1392,9 @@ class App {
       { label: "실행", hint: "Ctrl+Enter", run: () => this.runStatement() },
       { label: "SQL 포맷", hint: "Ctrl+Shift+F", run: () => this.formatSql() },
       { sep: true },
+      { label: "저장", hint: "Ctrl+S", run: () => this.save() },
+      { label: "다른 이름으로 저장", hint: "Ctrl+Shift+S", run: () => this.saveAs() },
+      { sep: true },
       { label: "잘라내기", hint: "Ctrl+X", disabled: view.state.selection.main.empty, run: () => { view.focus(); document.execCommand("cut"); } },
       { label: "복사", hint: "Ctrl+C", disabled: view.state.selection.main.empty, run: () => { view.focus(); document.execCommand("copy"); } },
       { label: "붙여넣기", hint: "Ctrl+V", run: () => navigator.clipboard.readText().then((x) => { t.editor.insert(x); view.focus(); }).catch(() => toast("Ctrl+V 로 붙여 넣으세요", "info")) },
@@ -1496,20 +1502,65 @@ class App {
   async save() {
     const t = this.active;
     if (!t) return;
-    let path = t.filePath;
-    if (!path) {
-      path = await saveDialog({ filters: [{ name: "SQL", extensions: ["sql"] }], defaultPath: "query.sql" });
-      if (!path) return;
-    }
+    if (!t.filePath) return this.saveAs();
+    await this.writeTab(t, t.filePath);
+  }
+
+  /** 다른 이름으로 저장 — 이 탭은 새 파일을 가리키게 된다 (원래 파일은 그대로) */
+  async saveAs() {
+    const t = this.active;
+    if (!t) return;
+    const cur = t.filePath;
+    const name = cur ? cur.split(/[\\/]/).pop()! : "query.sql";
+    const path = await saveDialog({
+      filters: [{ name: "SQL", extensions: ["sql", "pls", "pks", "pkb", "prc", "fnc", "trg", "vw", "txt"] }, { name: "모든 파일", extensions: ["*"] }],
+      defaultPath: cur ?? name,
+    });
+    if (!path) return;
+    // 다른 탭이 그 파일을 열고 있으면 — 저장하면 그 탭과 디스크가 달라진다
+    const other = this.tabs.find((x) => x !== t && x.filePath && normPath(x.filePath) === normPath(path));
+    if (other && !(await confirmBox("다른 탭에서 연 파일", `${path}\n\n이 파일은 다른 탭에서 열려 있습니다. 덮어쓰면 그 탭의 내용과 파일이 달라집니다. 그래도 저장할까요?`, "덮어쓰기"))) return;
+    await this.writeTab(t, path);
+  }
+
+  /** 저장 단추 우클릭 — 다른 이름, 인코딩 바꿔 저장 */
+  private saveMenu(e: MouseEvent) {
+    e.preventDefault();
+    const t = this.active;
+    if (!t) return;
+    const enc = (v: string, label: string) => ({
+      label: `${t.encoding === v ? "✓ " : ""}${label}`,
+      run: async () => {
+        const before = t.encoding;
+        t.encoding = v;
+        if (t.filePath) await this.writeTab(t, t.filePath, before);
+        else { await this.saveAs(); if (!t.filePath) t.encoding = before; }
+      },
+    });
+    showMenu(e.clientX, e.clientY, [
+      { label: "저장", hint: "Ctrl+S", run: () => this.save() },
+      { label: "다른 이름으로 저장", hint: "Ctrl+Shift+S", run: () => this.saveAs() },
+      { sep: true },
+      { title: `인코딩 바꿔 저장 (지금: ${t.encoding})` },
+      enc("utf-8", "UTF-8"),
+      enc("utf-8-bom", "UTF-8 (BOM)"),
+      enc("cp949", "CP949 (EUC-KR · 한글 Windows 메모장·Toad)"),
+    ]);
+  }
+
+  /** 탭 내용을 파일로. 실패하면 인코딩을 되돌린다 (CP949 로 못 쓰는 글자 등) */
+  private async writeTab(t: Tab, path: string, revertEncoding?: string) {
     try {
       const text = t.eol === "\r\n" ? t.editor.text().replace(/\r?\n/g, "\r\n") : t.editor.text();
       await api.writeFile(path, text, t.encoding);
+      const renamed = t.filePath !== path;
       t.filePath = path;
       t.setDirty(false);
       t.refreshTitle();
-      this.status(`저장했습니다 (${t.encoding})`);
+      this.status(`저장했습니다${renamed ? `: ${path}` : ""} (${t.encoding}${t.eol === "\r\n" ? " · CRLF" : ""})`);
       this.git?.refreshSoon();
     } catch (e) {
+      if (revertEncoding) t.encoding = revertEncoding;
       toast(errOf(e).message, "error");
     }
   }

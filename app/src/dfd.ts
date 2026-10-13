@@ -28,7 +28,11 @@ export class DfdView {
   private side = h("div", { class: "dfd-side an-pad" });
   private centerIn = h("input", { placeholder: "가운데 (비우면 전체)", style: "width:240px" });
   private names = h("datalist", { id: "dfd-names" });
-  private depthSel = h("select", { title: "가운데에서 몇 단계까지" },
+  private dirSel = h("select", { title: "가운데를 어느 쪽으로 볼지" },
+    h("option", { value: "up" }, "출력 기준 ← 어디서 오나"),
+    h("option", { value: "down" }, "입력 기준 → 어디로 가나"),
+    h("option", { value: "both" }, "주변 전체"));
+  private depthSel = h("select", { title: "가운데에서 몇 단계까지 (출력·입력 기준이면 테이블 단계)" },
     ...[1, 2, 3, 4].map((d) => h("option", { value: String(d), selected: d === 2 }, `${d}단계`)), h("option", { value: "0" }, "끝까지"));
   private unitSel = h("select", { title: "처리 상자 하나가 프로시저 하나인지, 패키지 하나인지" },
     h("option", { value: "proc" }, "처리: 프로시저"), h("option", { value: "pkg" }, "처리: 패키지"));
@@ -44,10 +48,10 @@ export class DfdView {
   private hidden = new Set<string>();
   private runId = 0;
 
-  constructor(private onOpenNode: (id: string) => void) {
+  constructor(private onOpenNode: ((id: string) => void) | null, opts: { popout?: (center: string | null, dir: string) => void } = {}) {
     this.centerIn.setAttribute("list", "dfd-names");
     const tb = h("div", { class: "dfd-toolbar" },
-      this.centerIn, this.names, this.depthSel,
+      this.centerIn, this.names, this.dirSel, this.depthSel,
       h("button", { class: "small", title: "가운데 없이 전체", onclick: () => this.setCenter(null) }, "전체"),
       h("span", { class: "sep" }), this.unitSel,
       h("label", { class: "check", title: "처리 → 처리 호출선" }, this.callBox, "처리간 호출"),
@@ -55,7 +59,8 @@ export class DfdView {
       this.hiddenBtn,
       h("span", { class: "spacer" }), this.info,
       h("button", { class: "small", onclick: () => this.cy?.fit(undefined, 30) }, "맞추기"),
-      h("button", { class: "small", title: "보고서에 넣을 그림으로 저장", onclick: () => this.savePng() }, "PNG"));
+      h("button", { class: "small", title: "보고서에 넣을 그림으로 저장", onclick: () => this.savePng() }, "PNG"),
+      opts.popout ? h("button", { class: "small", title: "지금 보는 것을 별도 창으로", onclick: () => opts.popout!(this.center, this.dirSel.value) }, "새 창") : "");
     this.centerIn.addEventListener("change", () => {
       const v = this.centerIn.value.trim();
       if (!v) return this.setCenter(null);
@@ -64,6 +69,7 @@ export class DfdView {
       this.setCenter(id);
     });
     this.depthSel.onchange = () => this.draw();
+    this.dirSel.onchange = () => this.draw();
     this.unitSel.onchange = () => {
       if (!this.src) return;
       const byPkg = this.unitSel.value === "pkg";
@@ -86,8 +92,9 @@ export class DfdView {
   }
 
   /** 분석 결과를 받는다. focus 가 있으면 그 노드를 가운데로 */
-  setData(g: DfdSource, focus?: string | null) {
+  setData(g: DfdSource, focus?: string | null, dir?: string | null) {
     this.src = g;
+    if (dir && ["up", "down", "both"].includes(dir)) this.dirSel.value = dir;
     // 프로시저에서 넘어오면 프로시저 단위로
     if (focus) this.unitSel.value = "proc";
     this.base = buildBase(g, this.unitSel.value === "pkg");
@@ -127,6 +134,7 @@ export class DfdView {
     if (!L || run !== this.runId) return;
     const view = buildView(b, {
       center: this.center, depth: Number(this.depthSel.value), showCalls: this.callBox.checked, showFlows: this.flowBox.checked, hidden: this.hidden,
+      direction: this.center ? (this.dirSel.value as "up" | "down" | "both") : "both",
     });
     this.hiddenBtn.hidden = !this.hidden.size;
     this.hiddenBtn.textContent = `숨김 ${this.hidden.size} 해제`;
@@ -294,7 +302,7 @@ export class DfdView {
       h("div", { class: "row" },
         h("button", { class: "small", onclick: () => this.setCenter(id) }, "가운데로"),
         h("button", { class: "small", onclick: () => { this.hidden.add(id); this.draw(); } }, "숨기기"),
-        n.type !== "table" && n.id.split(".").length >= 2 && this.unitSel.value === "proc" ? h("button", { class: "small", title: "호출 관계 탭에서 본다", onclick: () => this.onOpenNode(id) }, "상세") : ""),
+        this.onOpenNode && n.type !== "table" && n.id.split(".").length >= 2 && this.unitSel.value === "proc" ? h("button", { class: "small", title: "호출 관계 탭에서 본다", onclick: () => this.onOpenNode?.(id) }, "상세") : ""),
       h("h4", {}, `들어오는 것 ${ins.length}`), h("ul", { class: "an-ul" }, ...ins.map((e) => row(e, e.s))),
       h("h4", {}, `나가는 것 ${outs.length}`), h("ul", { class: "an-ul" }, ...outs.map((e) => row(e, e.t))));
   }

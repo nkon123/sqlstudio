@@ -27,6 +27,13 @@ export interface ViewOptions {
   showCalls: boolean;
   showFlows: boolean;
   hidden: Set<string>;
+  /**
+   * both: 가운데 주변 (방향 무시)
+   * up:   출력 기준 — 가운데로 데이터가 어디서 오나 (쓰는 처리 ← 그 처리가 읽는 테이블 ← …)
+   * down: 입력 기준 — 가운데의 데이터가 어디로 가나 (읽는 처리 → 그 처리가 쓰는 테이블 → …)
+   * up/down 의 depth 는 "테이블 단계" (처리 하나 + 테이블 하나 = 1단계)
+   */
+  direction?: "both" | "up" | "down";
 }
 export interface ViewNode { id: string; ref: string; type: NodeType; label: string; lane: number; copy: boolean; center: boolean; more: boolean }
 export interface ViewEdge { id: string; source: string; target: string; kind: EdgeKind; label: string }
@@ -128,9 +135,28 @@ export function buildView(b: Base, o: ViewOptions): View {
     if (e.kind === "call") return o.showCalls;
     return true;
   });
-  // 가운데에서 depth 단계 (방향 무시)
+  const dir = o.direction ?? "both";
+  // 방향을 따라 지나온 선만 남긴다 — 그 길에 없는 선(처리가 쓰는 다른 테이블 등)은 보이지 않게
+  let traversed: Set<BaseEdge> | null = null;
   let keep: Map<string, number>;
-  if (o.center && b.nodes.has(o.center)) {
+  if (o.center && b.nodes.has(o.center) && dir !== "both") {
+    keep = new Map([[o.center, 0]]);
+    traversed = new Set();
+    const hops = o.depth ? o.depth * 2 : Infinity;
+    const q = [o.center];
+    while (q.length) {
+      const x = q.shift()!;
+      const d = keep.get(x)!;
+      if (d >= hops) continue;
+      for (const e of edges) {
+        const next = dir === "up" ? (e.t === x ? e.s : null) : (e.s === x ? e.t : null);
+        if (!next) continue;
+        traversed.add(e);
+        if (!keep.has(next)) { keep.set(next, d + 1); q.push(next); }
+      }
+    }
+  } else if (o.center && b.nodes.has(o.center)) {
+    // 가운데에서 depth 단계 (방향 무시)
     keep = new Map([[o.center, 0]]);
     const adj = new Map<string, string[]>();
     for (const e of edges) {
@@ -148,13 +174,15 @@ export function buildView(b: Base, o: ViewOptions): View {
     keep = new Map();
     for (const e of edges) { keep.set(e.s, 1); keep.set(e.t, 1); }
   }
-  // 화면 밖으로 이어지는 선이 있으면 "더 있음" 표시
+  // 화면 밖으로 이어지는 선이 있으면 "더 있음" 표시 (방향 모드면 그 방향으로 더 있는 것만)
   const more = new Set<string>();
   for (const e of b.edges) {
     if (o.hidden.has(e.s) || o.hidden.has(e.t)) continue;
-    if (keep.has(e.s) !== keep.has(e.t)) more.add(keep.has(e.s) ? e.s : e.t);
+    if (dir === "up" && keep.has(e.t) && !keep.has(e.s) && e.kind !== "call") more.add(e.t);
+    else if (dir === "down" && keep.has(e.s) && !keep.has(e.t) && e.kind !== "call") more.add(e.s);
+    else if (dir === "both" && keep.has(e.s) !== keep.has(e.t)) more.add(keep.has(e.s) ? e.s : e.t);
   }
-  edges = edges.filter((e) => keep.has(e.s) && keep.has(e.t));
+  edges = traversed ? edges.filter((e) => traversed!.has(e)) : edges.filter((e) => keep.has(e.s) && keep.has(e.t));
 
   // 쓰이는 테이블 → 출력 칸. 그 테이블에서 나가는 선은 입력 칸의 사본에서 나가게 한다
   const written = new Set(edges.filter((e) => typeOf(e.t) === "table" && typeOf(e.s) !== "table").map((e) => e.t));

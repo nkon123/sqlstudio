@@ -105,6 +105,13 @@ pub struct Column {
     pub nullable: bool,
 }
 
+/// 여러 행 넣기 결과. errors 는 (묶음 안의 행 번호, 오류) — skip_errors 일 때만
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BatchResult {
+    pub inserted: u64,
+    pub errors: Vec<(usize, String)>,
+}
+
 /// 결과 한 페이지. 셀은 문자열로 보낸다 (NUMBER 정밀도를 잃지 않고, 화면에 바로 쓴다).
 #[derive(Debug, Clone, Serialize)]
 pub struct RowPage {
@@ -192,6 +199,8 @@ enum Cmd {
     Commit { reply: Reply<()> },
     Rollback { reply: Reply<()> },
     Ping { reply: Reply<()> },
+    /// 여러 행을 한 번에 (array DML) — 데이터 가져오기
+    Batch { sql: String, rows: Vec<Vec<Option<String>>>, skip_errors: bool, reply: Reply<BatchResult> },
     /// PL/SQL 호출 — OUT 바인드 값을 문자열로 돌려준다 (디버거·내부 도구용)
     Call { sql: String, ins: Vec<(String, Option<String>)>, outs: Vec<String>, reply: Reply<Vec<Option<String>>> },
     Shutdown,
@@ -291,6 +300,12 @@ impl Session {
             r = rx => r.map_err(|_| Error::SessionClosed)?,
             _ = gone.wait_for(|v| *v) => Err(Error::SessionClosed),
         }
+    }
+
+    /// 여러 행 넣기 (array DML). `rows` 는 바인드 순서(:1, :2 …)대로의 문자열 값. 커밋하지 않는다.
+    pub async fn batch(&self, sql: &str, rows: Vec<Vec<Option<String>>>, skip_errors: bool) -> Result<BatchResult> {
+        let sql = sql.to_string();
+        self.call(|reply| Cmd::Batch { sql, rows, skip_errors, reply }).await
     }
 
     /// 문장 하나를 실행한다. 쿼리면 첫 페이지를 돌려주고 커서를 열어 둔다.
@@ -471,7 +486,41 @@ impl Worker {
             Cmd::Call { sql, ins, outs, reply } => {
                 let _ = reply.send(self.call_plsql(&sql, &ins, &outs));
             }
+            Cmd::Batch { sql, rows, skip_errors, reply } => {
+                let _ = reply.send(self.batch(&sql, &rows, skip_errors));
+            }
             Cmd::Shutdown => {}
+        }
+    }
+
+    /// 같은 문장에 여러 행을 묶어 보낸다 (array DML). 값은 모두 문자열로 바인드한다 — 형 변환은 SQL 쪽(TO_DATE 등)에서.
+    /// skip_errors 면 실패한 행만 빼고 나머지를 넣는다 (batch errors). 커밋은 하지 않는다.
+    fn batch(&mut self, sql_text: &str, rows: &[Vec<Option<String>>], skip_errors: bool) -> Result<BatchResult> {
+        self.cursor = None;
+        if self.spec.read_only {
+            return Err(Error::ReadOnly(sql::classify(sql_text).label().to_string()));
+        }
+        if rows.is_empty() {
+            return Ok(BatchResult::default());
+        }
+        let mut b = self.conn.batch(sql_text, rows.len());
+        if skip_errors {
+            b.with_batch_errors();
+        }
+        let mut batch = b.build()?;
+        for r in rows {
+            let params: Vec<&dyn ToSql> = r.iter().map(|v| v as &dyn ToSql).collect();
+            batch.append_row(&params)?;
+        }
+        match batch.execute() {
+            Ok(()) => Ok(BatchResult { inserted: rows.len() as u64, errors: Vec::new() }),
+            Err(e) => match e.batch_errors() {
+                Some(errs) => {
+                    let errors: Vec<(usize, String)> = errs.iter().map(|d| (d.offset() as usize, d.message().to_string())).collect();
+                    Ok(BatchResult { inserted: (rows.len() - errors.len()) as u64, errors })
+                }
+                None => Err(e.into()),
+            },
         }
     }
 

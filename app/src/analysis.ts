@@ -415,7 +415,9 @@ export class AnalysisView {
     if (!this.dfd) {
       this.content.replaceChildren(h("div", { class: "hint an-pad" }, "흐름도를 불러오는 중…"));
       const { DfdView } = await import("./dfd");
-      this.dfd ??= new DfdView((id) => { this.view = "calls"; this.focusNode = id; this.render(); });
+      this.dfd ??= new DfdView((id) => { this.view = "calls"; this.focusNode = id; this.render(); }, {
+        popout: (center, dir) => invoke("open_dfd_window", { id: this.sessionId(), center, dir }).catch((e) => toast(errOf(e).message, "error")),
+      });
       if (this.view !== "dfd") return;
     }
     this.content.replaceChildren(this.dfd.el);

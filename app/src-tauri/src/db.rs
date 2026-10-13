@@ -282,7 +282,7 @@ fn opts(page: Option<usize>, binds: Vec<(String, Option<String>)>) -> ExecOption
 }
 
 /// 이 세션의 프로필이 운영 DB 인지 (모르면 운영으로 — 안전한 쪽)
-fn is_production(st: &AppState, id: u64) -> bool {
+pub(crate) fn is_production(st: &AppState, id: u64) -> bool {
     let profile = st.sessions.lock().unwrap().get(&id).map(|s| s.profile.clone());
     match profile {
         Some(p) => st.cfg.read().unwrap().profile(&p).map(|x| x.production).unwrap_or(true),

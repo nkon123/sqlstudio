@@ -21,6 +21,7 @@ import type { GitPanel } from "./git";
 import { ResultGrid } from "./grid";
 import { aliasMap, showColumns } from "./colpopup";
 import { openHistory } from "./history";
+import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
 import { DEFAULT_SNIPPETS, loadSnippets, parse as parseSnippets, saveSnippets, snippets, type Snip } from "./snippets";
 import { alertBox, bindBox, confirmBox, field, h, modal, passwordBox, toast } from "./ui";
@@ -284,6 +285,7 @@ class App {
       b("script", "스크립트", "전체 실행 (F5)", () => this.runScript()),
       b("explain", "실행계획", "Ctrl+E", () => this.explain()),
       b("debug", "디버그", "PL/SQL 디버거 — 커서 위치 블록을 디버그로 연다 (탐색기에서 프로시저·패키지를 골라도 된다)", () => this.debugActive()),
+      b("dfd", "흐름도", "데이터 흐름도를 별도 창으로 — 분석 결과에서 테이블 ← 처리 ← 테이블 흐름 (테이블 상세의 '흐름도'로 열면 그 테이블 기준)", () => this.openDfd()),
       b("analyze", "분석", "PL/SQL 분석 — 패키지·프로시저를 조각내어 (로컬) 모델로 분석하고 호출 관계·테이블 CRUD 를 통합한다", () => this.analyzeActive()),
       b("monitor", "세션", "세션·락 모니터 — 누가 무엇을 막고 있는지, 세션의 SQL·트랜잭션, 세션 종료(확인 후)", () => this.monitorActive()),
       b("cancel", "중지", "실행 중인 쿼리를 취소", () => this.cancel(), "danger"),
@@ -1019,6 +1021,13 @@ class App {
       btn("SELECT 넣기", () => t.editor.insert(`SELECT ${cols}\n  FROM ${o.owner}.${o.name}\n WHERE ROWNUM <= 100`)),
       btn("팝업", () => desc && this.openColumns(desc), "떠 있는 컬럼 창 (편집기에서 F4)"),
     );
+    if (type === "TABLE") actions.push(btn("가져오기", () => openImport({
+      id, owner: o.owner, table: o.name,
+      done: (r) => { t.txnPending = r.txn_pending; if (r.inserted) t.log(`${o.owner}.${o.name}: ${r.inserted}행 가져옴 — 커밋 전`, "warn"); this.refresh(); },
+    }), "엑셀·CSV 파일의 데이터를 이 테이블에 넣는다 (커밋은 따로)"));
+    if (type === "TABLE" || type === "VIEW" || type === "PROCEDURE" || type === "FUNCTION")
+      actions.push(btn("흐름도", () => this.openDfd(`${o.owner}.${o.name}`, type === "TABLE" || type === "VIEW" ? "up" : "both"),
+        tableLike ? "이 테이블로 데이터가 어디서 오는지 (쓰는 처리 ← 그 입력 테이블) — 별도 창, 분석 결과 필요" : "이 처리의 입력·출력 테이블 — 별도 창, 분석 결과 필요"));
     if (type === "SEQUENCE") actions.push(btn("NEXTVAL 넣기", () => t.editor.insert(`${o.owner}.${o.name}.NEXTVAL`)));
     actions.push(btn(code ? "새 탭에서 열기" : "DDL", async () => this.newTab(true, await api.getDdl(id, type, q).catch((e) => `-- ${errOf(e).message}`))));
     if (code) {
@@ -1069,6 +1078,13 @@ class App {
       return tr;
     }));
     return h("table", { class: "desc-table" }, h("thead", {}, h("tr", {}, ...names.map((n) => h("th", {}, n)))), tbody);
+  }
+
+  /** 데이터 흐름도 별도 창 */
+  private openDfd(center?: string, dir?: string) {
+    const t = this.active;
+    if (!t?.conn) return toast("먼저 접속하세요 — 그 접속의 분석 결과로 그립니다", "error");
+    invoke("open_dfd_window", { id: t.conn.id, center: center ?? null, dir: dir ?? null }).catch((e) => toast(errOf(e).message, "error"));
   }
 
   /** 앞 200행을 이 탭의 결과 그리드로 */

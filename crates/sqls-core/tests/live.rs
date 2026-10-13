@@ -355,3 +355,46 @@ async fn schema_browser_sections() {
         let _ = s.execute(&format!("drop table {x} purge"), Default::default()).await;
     }
 }
+
+/// 데이터 가져오기의 묶음 INSERT (array DML): 날짜 변환, 오류 행 건너뛰기, 멈춤 모드, 읽기 전용 거부
+#[tokio::test]
+#[ignore]
+async fn batch_insert() {
+    let s = Session::connect(spec(false)).await.unwrap();
+    let t = "SQLS_T_IMP";
+    let _ = s.execute(&format!("drop table {t} purge"), Default::default()).await;
+    exec(&s, &format!("create table {t} (id number(5) primary key, nm varchar2(20 char) not null, dt date)")).await;
+    let sql = format!("INSERT INTO {t} (ID, NM, DT) VALUES (:1, :2, TO_DATE(:3, 'YYYY-MM-DD HH24:MI:SS'))");
+    let row = |id: &str, nm: Option<&str>, dt: &str| vec![Some(id.to_string()), nm.map(String::from), Some(dt.to_string())];
+    // 건너뛰기: 2번째(NOT NULL 위반)·4번째(숫자 아님)만 빠진다
+    let r = s
+        .batch(
+            &sql,
+            vec![
+                row("1", Some("홍길동"), "2026-10-12 09:00:00"),
+                row("2", None, "2026-10-12 09:00:00"),
+                row("3", Some("B"), "2026-10-13 00:00:00"),
+                row("x", Some("C"), "2026-10-13 00:00:00"),
+            ],
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.inserted, 2, "{:?}", r.errors);
+    assert_eq!(r.errors.iter().map(|e| e.0).collect::<Vec<_>>(), vec![1, 3], "{:?}", r.errors);
+    let got = exec(&s, &format!("select id, nm, to_char(dt, 'YYYY-MM-DD HH24:MI') from {t} order by id")).await;
+    assert_eq!(
+        rows(&got.outcome).rows,
+        vec![
+            vec![Some("1".into()), Some("홍길동".into()), Some("2026-10-12 09:00".into())],
+            vec![Some("3".into()), Some("B".into()), Some("2026-10-13 00:00".into())],
+        ]
+    );
+    // 멈춤 모드: 하나라도 틀리면 오류
+    assert!(s.batch(&sql, vec![row("5", Some("D"), "2026-10-13 00:00:00"), row("1", Some("dup"), "2026-10-13 00:00:00")], false).await.is_err());
+    s.rollback().await.unwrap();
+    // 읽기 전용 세션은 거부
+    let ro = Session::connect(spec(true)).await.unwrap();
+    assert!(matches!(ro.batch(&sql, vec![row("9", Some("R"), "2026-10-13 00:00:00")], true).await, Err(Error::ReadOnly(_))));
+    let _ = s.execute(&format!("drop table {t} purge"), Default::default()).await;
+}

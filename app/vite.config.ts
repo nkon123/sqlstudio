@@ -9,5 +9,7 @@ export default defineConfig({
     // 폐쇄망: 모든 자원을 번들에 넣는다 (CDN 금지)
     assetsInlineLimit: 0,
     chunkSizeWarningLimit: 2000,
+    // 화면 둘: 메인, 데이터 흐름도 별도 창
+    rollupOptions: { input: { main: "index.html", dfd: "dfd.html" } },
   },
 });

@@ -206,6 +206,37 @@ pub fn analysis_result(st: State<'_, AppState>, id: u64, rebuild: bool) -> R<Opt
     Ok(store.read_integrated("integrated.json"))
 }
 
+/// 프로필의 통합 분석 결과 — 흐름도 창용 (메인 창의 접속이 끊겨도 저장된 결과는 읽는다)
+#[tauri::command]
+pub fn analysis_result_for(profile: String) -> R<Option<Integrated>> {
+    let store = Store::open(sqls_analyze::default_dir(&profile)).map_err(|e| ErrView::msg("io", e.to_string()))?;
+    Ok(store.read_integrated("integrated.json"))
+}
+
+static NEXT_DFD: AtomicU64 = AtomicU64::new(1);
+
+/// 데이터 흐름도를 별도 창으로. center 는 노드 id (OWNER.TABLE, OWNER.PKG.PROC), dir 은 up | down | both
+#[tauri::command]
+pub fn open_dfd_window(app: AppHandle, st: State<'_, AppState>, id: u64, center: Option<String>, dir: Option<String>) -> R<()> {
+    let profile = profile_of(&st, id)?;
+    let enc = |s: &str| s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>();
+    let mut url = format!("dfd.html?profile={}", enc(&profile));
+    if let Some(c) = center.filter(|c| !c.is_empty()) {
+        url.push_str(&format!("&center={}", enc(&c)));
+    }
+    if let Some(d) = dir.filter(|d| matches!(d.as_str(), "up" | "down" | "both")) {
+        url.push_str(&format!("&dir={d}"));
+    }
+    let label = format!("dfd-{}", NEXT_DFD.fetch_add(1, Ordering::Relaxed));
+    tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))
+        .title(format!("데이터 흐름도 — {profile}"))
+        .inner_size(1360.0, 860.0)
+        .min_inner_size(700.0, 450.0)
+        .build()
+        .map_err(|e| ErrView::msg("invalid", format!("창을 열 수 없습니다: {e}")))?;
+    Ok(())
+}
+
 #[derive(Serialize)]
 pub struct UnitDetail {
     unit: UnitResult,

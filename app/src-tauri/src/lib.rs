@@ -12,6 +12,7 @@ mod export;
 mod files;
 mod git;
 mod history;
+mod import;
 mod monitor;
 mod state;
 
@@ -78,6 +79,8 @@ pub fn run() {
             analyze::analysis_start,
             analyze::analysis_cancel,
             analyze::analysis_result,
+            analyze::analysis_result_for,
+            analyze::open_dfd_window,
             analyze::analysis_unit,
             analyze::analysis_dir,
             analyze::analysis_eval,
@@ -116,6 +119,8 @@ pub fn run() {
             git::git_push,
             files::mcp_snippet,
             export::export_xlsx,
+            import::import_read,
+            import::import_run,
         ])
         .on_window_event(|window, event| {
             // 창을 닫으면 열린 세션을 모두 닫는다 (커밋 안 한 변경은 롤백)

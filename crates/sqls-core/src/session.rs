@@ -177,6 +177,8 @@ static CLIENT_INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 /// 11g(11.2) 서버에는 Instant Client 가 반드시 있어야 한다. 19c 클라이언트를 권장한다
 /// (11.2 서버에 붙고, call_timeout 도 지원한다).
 pub fn init_client(lib_dir: Option<PathBuf>, tns_admin: Option<PathBuf>) -> Result<()> {
+    // 설정에 없으면 실행 파일 옆에 풀어 둔 Instant Client (포터블)
+    let lib_dir = lib_dir.or_else(crate::config::bundled_client_dir);
     let r = CLIENT_INIT.get_or_init(|| {
         let mut p = oracle::InitParams::new();
         if let Some(dir) = &lib_dir {

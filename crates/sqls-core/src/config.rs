@@ -112,10 +112,47 @@ pub fn config_path() -> PathBuf {
     if let Ok(p) = std::env::var("SQLSTUDIO_CONFIG") {
         return PathBuf::from(p);
     }
+    if let Some(d) = portable_data_dir() {
+        return d.join("config.toml");
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("sqlstudio")
         .join("config.toml")
+}
+
+/// 포터블 표시 파일 — 실행 파일 옆에 있으면 설정·이력·분석 결과를 그 옆 `data\` 에 둔다
+pub const PORTABLE_MARKER: &str = "portable.txt";
+
+fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
+}
+
+/// 포터블로 풀어 쓰는 중이면 데이터 폴더 (실행 파일 옆 `data`). 아니면 None
+pub fn portable_data_dir() -> Option<PathBuf> {
+    portable_data_dir_in(&exe_dir()?)
+}
+
+fn portable_data_dir_in(dir: &std::path::Path) -> Option<PathBuf> {
+    dir.join(PORTABLE_MARKER).is_file().then(|| dir.join("data"))
+}
+
+/// 실행 파일 옆에 풀어 둔 Instant Client (`instantclient_19_25` 처럼 oci.dll 이 든 폴더). 설정에 경로가 없을 때 쓴다
+pub fn bundled_client_dir() -> Option<PathBuf> {
+    client_dir_in(&exe_dir()?)
+}
+
+fn client_dir_in(dir: &std::path::Path) -> Option<PathBuf> {
+    let lib = if cfg!(windows) { "oci.dll" } else { "libclntsh.so" };
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().starts_with("instantclient")) && p.join(lib).is_file())
+        .collect();
+    // 여러 개면 이름이 큰 것 (새 버전)
+    found.sort();
+    found.pop()
 }
 
 impl Config {
@@ -195,6 +232,22 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_marker_and_bundled_client() {
+        let dir = std::env::temp_dir().join(format!("sqls-portable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("instantclient_19_25")).unwrap();
+        std::fs::create_dir_all(dir.join("instantclient_old")).unwrap(); // oci 라이브러리가 없으면 아니다
+        assert_eq!(portable_data_dir_in(&dir), None);
+        std::fs::write(dir.join(PORTABLE_MARKER), "").unwrap();
+        assert_eq!(portable_data_dir_in(&dir), Some(dir.join("data")));
+        assert_eq!(client_dir_in(&dir), None);
+        let lib = if cfg!(windows) { "oci.dll" } else { "libclntsh.so" };
+        std::fs::write(dir.join("instantclient_19_25").join(lib), "").unwrap();
+        assert_eq!(client_dir_in(&dir), Some(dir.join("instantclient_19_25")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     const SAMPLE: &str = r##"
 [oracle]

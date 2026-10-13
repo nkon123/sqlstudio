@@ -245,11 +245,14 @@ pub async fn open_dfd_window(app: AppHandle, st: State<'_, AppState>, id: u64, c
         url.push_str(&format!("&dir={d}"));
     }
     let label = format!("dfd-{}", NEXT_DFD.fetch_add(1, Ordering::Relaxed));
-    tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))
+    let mut b = tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))
         .title(format!("데이터 흐름도 — {profile}"))
         .inner_size(1360.0, 860.0)
-        .min_inner_size(700.0, 450.0)
-        .build()
+        .min_inner_size(700.0, 450.0);
+    if let Some(dir) = crate::webview_dir() {
+        b = b.data_directory(dir);
+    }
+    b.build()
         .map_err(|e| ErrView::msg("invalid", format!("창을 열 수 없습니다: {e}")))?;
     Ok(())
 }

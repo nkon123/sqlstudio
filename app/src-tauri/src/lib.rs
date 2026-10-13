@@ -18,6 +18,11 @@ mod state;
 
 use state::AppState;
 
+/// 포터블이면 WebView 데이터 폴더 (모든 창이 같은 곳을 써야 한다)
+pub(crate) fn webview_dir() -> Option<std::path::PathBuf> {
+    sqls_core::config::portable_data_dir().map(|d| d.join("webview"))
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -133,6 +138,16 @@ pub fn run() {
                     st.close_all();
                 }
             }
+        })
+        // 메인 창은 여기서 만든다 — 포터블이면 WebView 데이터(화면 설정·바인드 이력)도 실행 파일 옆 data 에 두도록
+        .setup(|app| {
+            let cfg = app.config().app.windows.iter().find(|w| w.label == "main").cloned().ok_or("main 창 설정이 없습니다")?;
+            let mut b = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?;
+            if let Some(dir) = webview_dir() {
+                b = b.data_directory(dir);
+            }
+            b.build()?;
+            Ok(())
         })
         .run(tauri::generate_context!())
         .expect("SQLStudio 를 시작할 수 없습니다");

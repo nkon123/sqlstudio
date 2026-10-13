@@ -298,9 +298,13 @@ pub async fn snapshot(s: &Session, owner: &str, kinds: &Kinds, name_like: Option
     if kinds.code {
         progress("소스 해시");
         let types = CODE_TYPES.iter().map(|t| format!("'{t}'")).collect::<Vec<_>>().join(",");
-        // 줄 끝 공백·CR 은 빼고 (개발 PC 마다 다르다). 줄 번호를 넣어 순서가 바뀐 것도 잡는다
+        // 줄 끝 공백·CR 은 빼고 (개발 PC 마다 다르다). 줄 번호를 넣어 순서가 바뀐 것도 잡는다.
+        // 첫 줄(머리)은 "PROCEDURE app.x" / "procedure X" / "PACKAGE  BODY \"X\"" 처럼 적은 대로 저장되므로
+        // 대문자로, 따옴표·스키마. 를 빼고, 공백을 하나로 맞춰 비교한다
         let sql = format!(
-            "SELECT type, name, COUNT(*), SUM(ORA_HASH(line || ':' || RTRIM(REPLACE(text, CHR(13)), ' ' || CHR(9) || CHR(10)))) \
+            "SELECT type, name, COUNT(*), SUM(ORA_HASH(line || ':' || \
+                    CASE WHEN line = 1 THEN REGEXP_REPLACE(REPLACE(REPLACE(UPPER(RTRIM(REPLACE(text, CHR(13)), ' ' || CHR(9) || CHR(10))), '\"'), :o || '.'), '[[:space:]]+', ' ') \
+                         ELSE RTRIM(REPLACE(text, CHR(13)), ' ' || CHR(9) || CHR(10)) END)) \
                FROM all_source WHERE owner = :o AND name LIKE :p AND type IN ({types}) GROUP BY type, name"
         );
         for r in q(s, &sql, &owner, &like_sql).await? {

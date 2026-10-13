@@ -1262,6 +1262,8 @@ struct Out<'a> {
     prefix: &'a str,
     /// 대문자로 바꾼 입력 (한 번만 만든다)
     upper: String,
+    /// 입력에 한글이 있다 — 이름이 아니라 설명(COMMENT)으로 찾는다 ("주문일" → ORD_DT)
+    by_comment: bool,
     lower: bool,
     items: Vec<Item>,
     seen: HashSet<u64>,
@@ -1279,8 +1281,35 @@ impl<'a> Out<'a> {
         if self.lower { s.to_lowercase() } else { s.to_string() }
     }
 
+    /// 설명으로 찾을 때의 점수 — 앞에서 맞으면 높게, 안에 있으면 그다음
+    fn comment_score(&self, comment: Option<&String>) -> Option<i32> {
+        let c = comment?;
+        let p = self.prefix.trim();
+        if c.starts_with(p) {
+            Some(800 - (c.chars().count() as i32 - p.chars().count() as i32).clamp(0, 100))
+        } else if c.contains(p) {
+            Some(650)
+        } else {
+            None
+        }
+    }
+
     /// 이미 만든 글자 (스니펫, 조인 조건 등 — 개수가 적다)
     fn push(&mut self, label: String, kind: &'static str, base: i32, detail: Option<String>, info: Option<String>, apply: Option<String>) {
+        if self.by_comment {
+            // 한글 입력: 설명이 맞는 컬럼만, 설명을 보이게
+            let Some(m) = self.comment_score(info.as_ref()) else { return };
+            if !self.seen.insert(hash_key(&label, kind)) {
+                return;
+            }
+            let detail = Some(match (&info, detail) {
+                (Some(c), Some(d)) => format!("{c} · {d}"),
+                (Some(c), None) => c.clone(),
+                (None, d) => d.unwrap_or_default(),
+            });
+            self.items.push(Item { label, kind, detail, info, apply, boost: 0, score: m + base });
+            return;
+        }
         let Some(m) = match_score(&label, self.prefix) else { return };
         if !self.seen.insert(hash_key(&label, kind)) {
             return;
@@ -1297,6 +1326,21 @@ impl<'a> Out<'a> {
         detail: impl FnOnce() -> Option<String>,
         info: Option<&String>,
     ) {
+        if self.by_comment {
+            let Some(m) = self.comment_score(info) else { return };
+            if m + base < self.floor || !self.seen.insert(hash_key(name, kind)) {
+                return;
+            }
+            let label = self.case(name);
+            let d = detail();
+            let detail = Some(match d {
+                Some(d) => format!("{} · {d}", info.map(String::as_str).unwrap_or("")),
+                None => info.cloned().unwrap_or_default(),
+            });
+            self.items.push(Item { label, kind, detail, info: info.cloned(), apply: None, boost: 0, score: m + base });
+            self.prune();
+            return;
+        }
         let Some(m) = fast_score(name, &self.upper) else { return };
         if m + base < self.floor || !self.seen.insert(hash_key(name, kind)) {
             return;
@@ -1322,6 +1366,7 @@ pub fn suggest(a: &Analysis, cache: &SchemaCache, limit: usize) -> Completion {
     let mut out = Out {
         prefix: &a.prefix,
         upper: a.prefix.to_uppercase(),
+        by_comment: a.prefix.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c) || ('\u{3131}'..='\u{318E}').contains(&c)),
         lower: a.lower,
         items: Vec::new(),
         seen: HashSet::new(),
@@ -1696,6 +1741,32 @@ fn ctx_name(c: &Ctx) -> String {
 /// 한 번에: 분석 + 후보
 pub fn complete(src: &str, cursor: usize, cache: &SchemaCache, limit: usize) -> Completion {
     suggest(&analyze(src, cursor), cache, limit)
+}
+
+/// 조회 결과 컬럼 이름 → 설명(COMMENT). FROM 의 테이블들을 캐시로만 풀어 찾는다 (DB 왕복 없음).
+/// 같은 이름이 여러 테이블에 있으면 먼저 나온 테이블의 설명. 캐시에 없는 테이블은 건너뛴다
+pub fn column_notes(sql: &str, cache: &SchemaCache) -> std::collections::BTreeMap<String, String> {
+    // 끝에 공백을 붙여 커서를 문장 끝 밖에 둔다 (숫자로 끝나면 분석을 쉬므로)
+    let text = format!("{} ", sql.trim_end().trim_end_matches(';'));
+    let a = analyze(&text, text.len());
+    let mut out = std::collections::BTreeMap::new();
+    let mut refs: Vec<&TableRef> = a.refs.iter().collect();
+    refs.sort_by_key(|r| r.level);
+    for r in refs {
+        if r.derived.is_some() {
+            continue;
+        }
+        let Some(name) = r.name.as_deref() else { continue };
+        let Some(key) = cache.resolve(r.owner.as_deref(), name) else { continue };
+        if let Some(cols) = cache.cols(&key) {
+            for c in cols.iter() {
+                if let Some(cm) = c.comment.as_ref().filter(|x| !x.trim().is_empty()) {
+                    out.entry(c.name.clone()).or_insert_with(|| cm.trim().to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 pub mod load;

@@ -15,6 +15,7 @@ const GROUPS: [string, [string, string][]][] = [
     ["Ctrl+Shift+F", "SQL 포맷 (선택 영역, 없으면 커서 위치 문장)"],
     ["Ctrl+/", "주석 넣기/빼기"],
     ["Ctrl+Space", "자동완성 띄우기"],
+    ["한글 입력", "테이블·컬럼을 설명(COMMENT)으로 찾기 — 예: '주문일' → ORD_DT"],
     ["Tab · Shift+Tab", "들여쓰기 · 코드 조각의 다음/앞 칸"],
     ["Ctrl+Z · Ctrl+Y", "되돌리기 · 다시 하기"],
     ["Ctrl+F", "찾기·바꾸기"],

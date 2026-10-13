@@ -95,6 +95,10 @@ export class ResultGrid {
   /** rows 인덱스 → (열 → 새 값) */
   private dirty = new Map<number, Map<number, string | null>>();
   private deleted = new Set<number>();
+  /** 컬럼 이름 → 설명(COMMENT) */
+  private notes: Record<string, string> = {};
+  /** 머리에 이름 대신 설명을 */
+  private showNotes = false;
 
   constructor(private opts: GridOptions = {}) {
     this.el = document.createElement("div");
@@ -191,6 +195,21 @@ export class ResultGrid {
     const out: (string | null)[][] = [];
     for (let r = Math.min(s.r0, s.r1); r <= Math.max(s.r0, s.r1); r++) out.push(this.rows[this.view[r]]);
     return out;
+  }
+
+  /** 컬럼 설명 — 머리 풍선에, '설명' 을 켜면 머리 글자로 */
+  setNotes(notes: Record<string, string>) {
+    this.notes = notes;
+    this.renderHeader();
+  }
+
+  setShowNotes(on: boolean) {
+    this.showNotes = on;
+    this.renderHeader();
+  }
+
+  hasNotes() {
+    return this.columns.some((c) => this.notes[c.name]);
   }
 
   append(page: RowPage) {
@@ -422,9 +441,11 @@ export class ResultGrid {
       cell.style.width = `${this.hiddenCol(i) ? 0 : this.widths[i]}px`;
       if (this.hiddenCol(i)) cell.style.display = "none";
       const arrow = this.sortCol === i ? (this.sortDir === 1 ? " ▲" : " ▼") : "";
-      cell.textContent = c.name + arrow;
+      const note = this.notes[c.name];
+      cell.textContent = (this.showNotes && note ? note : c.name) + arrow;
+      if (note) cell.classList.add("noted");
       if (this.edit && !this.edit.editable.has(i)) cell.classList.add("ro");
-      cell.title = `${c.name}  ${c.type_name}${c.nullable ? "" : " NOT NULL"} — 눌러서 정렬${this.edit ? (this.edit.editable.has(i) ? " · 더블클릭으로 고치기" : " · 고칠 수 없는 열") : ""}`;
+      cell.title = `${c.name}${note ? ` (${note})` : ""}  ${c.type_name}${c.nullable ? "" : " NOT NULL"} — 눌러서 정렬${this.edit ? (this.edit.editable.has(i) ? " · 더블클릭으로 고치기" : " · 고칠 수 없는 열") : ""}`;
       cell.addEventListener("click", (e) => {
         if ((e.target as HTMLElement).classList.contains("grid-grip")) return;
         this.toggleSort(i);

@@ -555,5 +555,7 @@ dialog.imp { width: min(1100px, 95vw); }
 /* 커밋하지 않은 변경이 있는 탭 */
 .tab.txn { background: color-mix(in srgb, var(--warn) 16%, transparent); }
 .tab.txn.active { background: color-mix(in srgb, var(--warn) 22%, var(--panel)); }
+.grid-head .grid-cell.noted { text-decoration: underline dotted color-mix(in srgb, var(--accent) 60%, transparent); text-underline-offset: 3px; }
 .tab-txn { font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 8px; background: var(--warn); color: #fff; }
 .tab-body.txn .editor-host { box-shadow: inset 0 3px 0 var(--warn); }
+button.small.on { background: var(--sel); border-color: var(--accent); }

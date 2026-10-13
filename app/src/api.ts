@@ -76,6 +76,8 @@ export interface CompletionStatus { profile: string; phase: string; objects: num
 export interface McpSettings { allowed_connections: string[]; call_timeout_secs: number; allow_explain: boolean }
 
 export const api = {
+  /** 조회 결과 컬럼 → 설명 (자동완성 캐시로만) */
+  columnNotes: (id: number, sql: string) => invoke<Record<string, string>>("column_notes", { id, sql }),
   appInfo: () => invoke<{ version: string; config_path: string; config_error?: string | null; log_dir?: string }>("app_info"),
   /** 화면에서 일어난 일을 앱 로그 파일에 (접속 끊김·다시 접속 등) */
   log: (level: "info" | "warn", message: string) => { invoke("client_log", { level, message }).catch(() => {}); },

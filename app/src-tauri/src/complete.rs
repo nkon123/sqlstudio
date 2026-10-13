@@ -326,6 +326,14 @@ pub async fn complete(st: State<'_, AppState>, id: u64, text: String, cursor: us
     Ok(last.unwrap())
 }
 
+/// 조회 결과 컬럼 → 설명(COMMENT). 자동완성 캐시로만 (DB 왕복 없음) — 결과 그리드 머리에
+#[tauri::command]
+pub fn column_notes(st: State<'_, AppState>, id: u64, sql: String) -> Result<std::collections::BTreeMap<String, String>, ErrView> {
+    let hub = hub_for(&st, id)?;
+    let cache = hub.cache.read().unwrap();
+    Ok(complete::column_notes(&sql, &cache))
+}
+
 #[tauri::command]
 pub fn completion_status(st: State<'_, AppState>, id: u64) -> Result<HubStatus, ErrView> {
     Ok(hub_for(&st, id)?.status())

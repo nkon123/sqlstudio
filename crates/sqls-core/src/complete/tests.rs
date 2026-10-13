@@ -345,3 +345,28 @@ fn quick_describe_from_cache() {
     let d = c.quick_describe("erp_orders").expect("동의어");
     assert_eq!((d.owner.as_str(), d.name.as_str()), ("ERP", "ORDERS"));
 }
+
+/// 한글로 치면 설명(COMMENT)으로 찾고, 넣는 것은 이름이다
+#[test]
+fn korean_finds_by_comment() {
+    let mut c = cache();
+    c.set_objects(vec![
+        ObjInfo { owner: "SCOTT".into(), name: "ORDERS".into(), kind: ObjKind::Table, comment: Some("주문".into()) },
+        ObjInfo { owner: "SCOTT".into(), name: "ORD_ITEM".into(), kind: ObjKind::Table, comment: Some("주문 상품".into()) },
+        ObjInfo { owner: "SCOTT".into(), name: "CUST".into(), kind: ObjKind::Table, comment: Some("고객".into()) },
+    ]);
+    let cm = |n: &str, t: &str, k: &str| ColInfo { name: n.into(), data_type: t.into(), nullable: true, comment: Some(k.into()) };
+    c.set_columns("SCOTT", "ORDERS", vec![cm("ORD_NO", "NUMBER", "주문번호"), cm("ORD_DT", "DATE", "주문일자"), cm("CUST_ID", "NUMBER", "고객 ID")]);
+    let r = at("select * from 주|", &c);
+    assert_eq!(labels(&r, 2), ["orders", "ord_item"], "설명이 '주' 로 시작하는 테이블, 짧은 것 먼저");
+    assert!(!has(&r, "cust"));
+    assert!(r.items[0].detail.as_deref().unwrap_or("").contains("주문"), "후보에 설명을 보인다");
+    let r = at("select 주문일| from orders", &c);
+    assert_eq!(labels(&r, 1), ["ord_dt"]);
+    let r = at("select o.고객| from orders o", &c);
+    assert_eq!(labels(&r, 1), ["cust_id"], "별칭 뒤에서도: {:?}", labels(&r, 5));
+    // 결과 컬럼 → 설명
+    let notes = column_notes("SELECT o.ord_no, o.ord_dt, x FROM orders o WHERE 1 = 1", &c);
+    assert_eq!(notes.get("ORD_DT").map(String::as_str), Some("주문일자"));
+    assert_eq!(notes.get("CUST_ID").map(String::as_str), Some("고객 ID"));
+}

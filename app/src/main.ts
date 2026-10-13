@@ -62,6 +62,7 @@ class Tab {
   /** 마지막으로 결과를 띄운 조회 (편집할 때 ROWID 를 붙여 다시 돈다) */
   lastQuery: { sql: string; binds: [string, string | null][] } | null = null;
   editTable: string | null = null;
+  readonly notesBtn = h("button", { class: "small", title: "결과 머리를 컬럼 설명(COMMENT)으로 — 다시 누르면 이름으로" }, "설명");
   readonly filterIn = h("input", { class: "grid-filter", placeholder: "거르기: 값 · 열=값 · 열~포함 · 열>값 (AND 로 여럿)" });
   readonly editBtn = h("button", { class: "small", title: "단일 테이블 조회 결과를 고친다 (ROWID 로 다시 조회)" }, "편집");
   readonly applyBtn = h("button", { class: "small primary", hidden: true }, "적용");
@@ -154,6 +155,18 @@ class Tab {
     });
     this.filterIn.addEventListener("keydown", (e) => { if (e.key === "Escape") { this.filterIn.value = ""; this.grid.setFilter(""); } });
     this.editBtn.onclick = () => app.toggleGridEdit(this);
+    // 머리를 설명으로 — 이 PC 에 기억한다
+    let notesOn = false;
+    try { notesOn = localStorage.getItem("grid.notes") === "1"; } catch { /* 기본은 이름 */ }
+    this.grid.setShowNotes(notesOn);
+    this.notesBtn.classList.toggle("on", notesOn);
+    this.notesBtn.disabled = true;
+    this.notesBtn.onclick = () => {
+      notesOn = !notesOn;
+      this.grid.setShowNotes(notesOn);
+      this.notesBtn.classList.toggle("on", notesOn);
+      try { localStorage.setItem("grid.notes", notesOn ? "1" : "0"); } catch { /* 기억 못 해도 된다 */ }
+    };
     this.applyBtn.onclick = () => app.applyGridEdit(this);
     this.discardBtn.onclick = () => this.grid.discardChanges();
     this.delRowBtn.onclick = () => this.grid.toggleDeleteSelected();
@@ -172,7 +185,7 @@ class Tab {
     };
     const bottom = h("section", { class: "bottom" },
       h("nav", { class: "pane-tabs" }, btn("result", "결과"), btn("output", "출력"), btn("plan", "실행계획"), btn("desc", "구조"),
-        this.filterIn, this.editBtn, this.delRowBtn, this.applyBtn, this.discardBtn,
+        this.filterIn, this.notesBtn, this.editBtn, this.delRowBtn, this.applyBtn, this.discardBtn,
         h("span", { class: "spacer" }), this.gridStatus,
         h("button", { class: "small", title: "가져온 행을 CSV 로 복사", onclick: () => this.copyCsv() }, "CSV 복사"),
         exportSel),
@@ -761,6 +774,7 @@ class App {
     switch (r.outcome.type) {
       case "rows":
         t.grid.setPage(r.outcome);
+        this.loadNotes(t);
         t.show("result");
         this.status(`${r.outcome.rows.length.toLocaleString()}행${r.outcome.has_more ? "+" : ""} · ${ms}`);
         break;
@@ -802,6 +816,16 @@ class App {
     t.show("output");
     this.status(err.ora_code ? `ORA-${String(err.ora_code).padStart(5, "0")}` : "오류");
     if (err.offset != null && err.offset > 0) t.editor.markError(stmtFrom + byteToUtf16(sqlText, err.offset));
+  }
+
+  /** 결과 컬럼의 설명 — 캐시로만 찾으니 기다리지 않고 붙인다 */
+  private loadNotes(t: Tab) {
+    const sql = t.lastQuery?.sql;
+    if (!t.conn || !sql) return;
+    api.columnNotes(t.conn.id, sql).then((n) => {
+      t.grid.setNotes(n);
+      t.notesBtn.disabled = !t.grid.hasNotes();
+    }).catch(() => {});
   }
 
   async runScript() {

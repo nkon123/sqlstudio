@@ -104,6 +104,7 @@ pub fn run() {
             db::get_mcp_settings,
             complete::complete,
             complete::completion_status,
+            complete::column_notes,
             complete::refresh_completion,
             debug::debug_prepare,
             debug::debug_compile,

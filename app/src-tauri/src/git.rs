@@ -425,16 +425,18 @@ pub async fn git_switch(root: String, name: String, create: bool) -> R<()> {
 /// 오류 종류 — 화면이 안내를 고른다
 fn classify(stderr: &str) -> &'static str {
     let e = stderr.to_ascii_lowercase();
-    if e.contains("authentication failed") || e.contains("could not read username") || e.contains("permission denied") || e.contains("403") || e.contains("401") {
+    // 숫자만 보면 커밋 해시(a1b401f…)에 걸린다 — HTTP 상태는 문구와 함께 본다
+    let http_auth = ["returned error: 401", "returned error: 403", "http 401", "http 403", "status 401", "status 403"].iter().any(|p| e.contains(p));
+    if e.contains("not possible to fast-forward") || e.contains("diverging branches") || e.contains("have diverged") {
+        "diverged"
+    } else if e.contains("[rejected]") || e.contains("non-fast-forward") || e.contains("fetch first") {
+        "rejected"
+    } else if e.contains("authentication failed") || e.contains("could not read username") || e.contains("permission denied") || http_auth {
         "auth"
     } else if e.contains("ssl certificate") || e.contains("certificate problem") || e.contains("unable to get local issuer") {
         "cert"
     } else if e.contains("could not resolve host") || e.contains("failed to connect") || e.contains("connection timed out") || e.contains("couldn't connect") {
         "network"
-    } else if e.contains("[rejected]") || e.contains("non-fast-forward") || e.contains("fetch first") {
-        "rejected"
-    } else if e.contains("not possible to fast-forward") || e.contains("diverging branches") || e.contains("have diverged") {
-        "diverged"
     } else if e.contains("no tracking information") || e.contains("has no upstream") {
         "no_upstream"
     } else if e.contains("would be overwritten") {
@@ -556,6 +558,11 @@ u UU N... 100644 100644 100644 100644 e1 e2 e3 conflict.sql\0\
         assert_eq!(classify("fatal: Not possible to fast-forward, aborting."), "diverged");
         assert_eq!(classify("fatal: Authentication failed for 'https://git.corp.local/'"), "auth");
         assert_eq!(classify("SSL certificate problem: unable to get local issuer certificate"), "cert");
+        // 커밋 해시에 401/403 이 들어 있어도 인증 오류가 아니다
+        assert_eq!(classify("From /tmp/r
+   9c3a401..e1f4030  main -> origin/main
+fatal: Not possible to fast-forward, aborting."), "diverged");
+        assert_eq!(classify("fatal: unable to access 'https://git.corp/x.git/': The requested URL returned error: 403"), "auth");
     }
 
     /// 실제 git 으로: 저장소를 만들고 → 커밋 → 원격(bare)에 푸시 → 다른 복제본에서 풀

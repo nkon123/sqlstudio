@@ -23,6 +23,8 @@ export interface ColPopupOpts {
   /** 별칭으로 열었으면 컬럼 앞에 붙인다 (o.ID) */
   alias?: string;
   ddl?: () => void;
+  /** 컬럼 영향도 (이 컬럼을 쓰는 곳) */
+  usage?: (column: string) => void;
 }
 
 const open: HTMLElement[] = [];
@@ -86,6 +88,7 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
         { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(grid.selectionText(true)).catch(() => {}) },
         { sep: true },
         { label: "컬럼 넣기", run: () => o.insert(names().join(", ")) },
+        ...(o.usage ? [{ sep: true as const }, { label: "이 컬럼을 쓰는 곳 (영향도)", hint: "뷰·소스의 줄", run: () => { const c = _r[NAME]; if (c) o.usage!(c); } }] : []),
       ]);
     },
   });

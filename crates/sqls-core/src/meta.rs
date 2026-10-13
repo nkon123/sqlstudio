@@ -548,3 +548,176 @@ mod tests {
         assert_eq!(schema_brief(&t), "TABLE SCOTT.EMP  -- 사원 rows≈14\n  EMPNO NUMBER(4) NOT NULL PK\n");
     }
 }
+
+// ── 컬럼 영향도: 이 컬럼을 바꾸면 어디가 깨지나 ─────────────
+
+/// 컬럼이 나오는 줄
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct UsageLine {
+    pub line: u32,
+    pub text: String,
+    /// 주석 안에서만 나온다
+    pub in_comment: bool,
+}
+
+/// 테이블을 쓰는 객체 하나
+#[derive(Debug, Clone, Serialize)]
+pub struct UsageObj {
+    pub owner: String,
+    pub name: String,
+    pub kind: String,
+    /// 동의어를 거쳐 쓰면 그 동의어
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    pub lines: Vec<UsageLine>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct Usage {
+    pub table: String,
+    pub column: String,
+    /// 소스·뷰 정의에 컬럼 이름이 나오는 객체
+    pub hits: Vec<UsageObj>,
+    /// 테이블은 쓰지만 컬럼 이름이 안 보이는 객체 — SELECT *, %ROWTYPE, 동적 SQL 이면 그래도 영향을 받는다
+    pub silent: Vec<UsageObj>,
+    /// 이 컬럼이 든 인덱스·제약조건, 이 컬럼을 가리키는 다른 테이블의 외래 키
+    pub indexes: Vec<String>,
+    pub constraints: Vec<String>,
+    pub referenced_by: Vec<String>,
+}
+
+/// 줄에 컬럼 이름이 낱말로 나오는지 — Some(주석 안에서만 나오는지), 안 나오면 None
+pub fn word_in_line(text: &str, col: &str) -> Option<bool> {
+    let up = text.to_uppercase();
+    let is_word = |c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '#');
+    let code_end = up.find("--").unwrap_or(up.len());
+    let mut found_code = false;
+    let mut found = false;
+    for (i, _) in up.match_indices(col) {
+        let before = up[..i].chars().next_back();
+        let after = up[i + col.len()..].chars().next();
+        if before.is_some_and(is_word) || after.is_some_and(is_word) {
+            continue;
+        }
+        found = true;
+        if i < code_end {
+            found_code = true;
+        }
+    }
+    found.then_some(!found_code)
+}
+
+const USAGE_CODE: &[&str] = &["PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY"];
+
+/// 컬럼을 쓰는 곳. 사전 의존성으로 이 테이블을 쓰는 객체를 찾고(동의어를 거친 것도), 그 소스·뷰 정의에서 컬럼 이름이 나오는 줄을 모은다.
+/// 묶어서 읽는다 — 객체마다 묻지 않는다. 소스는 컬럼 이름이 든 줄만 DB 에서 걸러 받는다
+pub async fn column_usage(s: &Session, qualified: &str, column: &str) -> Result<Usage> {
+    let (owner, table) = split_qualified(qualified, &s.info().user);
+    let col = column.trim().trim_matches('"').to_uppercase();
+    let ot = || vec![("O".to_string(), Some(owner.clone())), ("T".to_string(), Some(table.clone()))];
+    let otc = || vec![("O".to_string(), Some(owner.clone())), ("T".to_string(), Some(table.clone())), ("C".to_string(), Some(col.clone()))];
+    let mut u = Usage { table: format!("{owner}.{table}"), column: col.clone(), ..Default::default() };
+
+    // 이 테이블에 기대는 객체 (직접, 동의어를 거쳐)
+    let deps = s
+        .query(
+            "SELECT d.owner, d.name, d.type, NULL FROM all_dependencies d \
+              WHERE d.referenced_owner = :o AND d.referenced_name = :t AND d.referenced_type IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW') \
+             UNION \
+             SELECT d.owner, d.name, d.type, sy.owner || '.' || sy.synonym_name FROM all_synonyms sy \
+               JOIN all_dependencies d ON d.referenced_owner = sy.owner AND d.referenced_name = sy.synonym_name AND d.referenced_type = 'SYNONYM' \
+              WHERE sy.table_owner = :o AND sy.table_name = :t",
+            ot(),
+            100_000,
+        )
+        .await?;
+    let mut objs: Vec<UsageObj> = Vec::new();
+    for r in &deps.rows {
+        let (o, n, k, via) = (cell(r, 0), cell(r, 1), cell(r, 2), r.get(3).cloned().flatten());
+        if let Some(x) = objs.iter_mut().find(|x| x.owner == o && x.name == n && x.kind == k) {
+            if x.via.is_none() {
+                x.via = via;
+            }
+            continue;
+        }
+        objs.push(UsageObj { owner: o, name: n, kind: k, via, lines: vec![] });
+    }
+    let code: Vec<usize> = (0..objs.len()).filter(|&i| USAGE_CODE.contains(&objs[i].kind.as_str())).collect();
+    for chunk in code.chunks(100) {
+        let mut b = vec![("C".to_string(), Some(col.clone()))];
+        let mut ors = Vec::new();
+        for (j, &i) in chunk.iter().enumerate() {
+            ors.push(format!("(owner = :O{j} AND name = :N{j} AND type = :T{j})"));
+            b.push((format!("O{j}"), Some(objs[i].owner.clone())));
+            b.push((format!("N{j}"), Some(objs[i].name.clone())));
+            b.push((format!("T{j}"), Some(objs[i].kind.clone())));
+        }
+        let sql = format!("SELECT owner, name, type, line, text FROM all_source WHERE ({}) AND INSTR(UPPER(text), :c) > 0 ORDER BY owner, name, type, line", ors.join(" OR "));
+        for r in s.query(&sql, b, 1_000_000).await?.rows {
+            let text = cell(&r, 4);
+            let Some(in_comment) = word_in_line(&text, &col) else { continue };
+            if let Some(x) = objs.iter_mut().find(|x| x.owner == cell(&r, 0) && x.name == cell(&r, 1) && x.kind == cell(&r, 2)) {
+                x.lines.push(UsageLine { line: cell(&r, 3).parse().unwrap_or(0), text: text.trim_end().to_string(), in_comment });
+            }
+        }
+    }
+    // 뷰: 정의(LONG)는 DB 에서 거를 수 없어 받아서 본다
+    let views: Vec<usize> = (0..objs.len()).filter(|&i| objs[i].kind == "VIEW").collect();
+    for chunk in views.chunks(100) {
+        let mut b = Vec::new();
+        let mut ors = Vec::new();
+        for (j, &i) in chunk.iter().enumerate() {
+            ors.push(format!("(owner = :O{j} AND view_name = :N{j})"));
+            b.push((format!("O{j}"), Some(objs[i].owner.clone())));
+            b.push((format!("N{j}"), Some(objs[i].name.clone())));
+        }
+        for r in s.query(&format!("SELECT owner, view_name, text FROM all_views WHERE {}", ors.join(" OR ")), b, 100_000).await?.rows {
+            if let Some(x) = objs.iter_mut().find(|x| x.kind == "VIEW" && x.owner == cell(&r, 0) && x.name == cell(&r, 1)) {
+                for (n, l) in cell(&r, 2).lines().enumerate() {
+                    if let Some(in_comment) = word_in_line(l, &col) {
+                        x.lines.push(UsageLine { line: n as u32 + 1, text: l.trim_end().to_string(), in_comment });
+                    }
+                }
+            }
+        }
+    }
+    for x in objs {
+        if x.lines.is_empty() {
+            u.silent.push(x)
+        } else {
+            u.hits.push(x)
+        }
+    }
+    let key = |a: &UsageObj| (a.kind.clone(), a.owner.clone(), a.name.clone());
+    u.hits.sort_by_key(key);
+    u.silent.sort_by_key(key);
+    for r in s.query("SELECT index_owner || '.' || index_name FROM all_ind_columns WHERE table_owner = :o AND table_name = :t AND column_name = :c", otc(), 1000).await?.rows {
+        u.indexes.push(cell(&r, 0));
+    }
+    let cons = "SELECT c.constraint_name || ' (' || DECODE(c.constraint_type, 'P', 'PK', 'U', 'UNIQUE', 'R', 'FK', 'C', 'CHECK', c.constraint_type) || ')' \
+                  FROM all_cons_columns cc JOIN all_constraints c ON c.owner = cc.owner AND c.constraint_name = cc.constraint_name \
+                 WHERE cc.owner = :o AND cc.table_name = :t AND cc.column_name = :c";
+    for r in s.query(cons, otc(), 1000).await?.rows {
+        u.constraints.push(cell(&r, 0));
+    }
+    let refs = "SELECT c.owner || '.' || c.table_name || ' · ' || c.constraint_name FROM all_constraints c \
+                  JOIN all_cons_columns rc ON rc.owner = c.r_owner AND rc.constraint_name = c.r_constraint_name \
+                 WHERE c.constraint_type = 'R' AND rc.owner = :o AND rc.table_name = :t AND rc.column_name = :c";
+    for r in s.query(refs, otc(), 1000).await?.rows {
+        u.referenced_by.push(cell(&r, 0));
+    }
+    Ok(u)
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::word_in_line;
+
+    #[test]
+    fn column_word_in_line() {
+        assert_eq!(word_in_line("  UPDATE orders SET status = 'X'", "STATUS"), Some(false));
+        assert_eq!(word_in_line("  v_x := 1; -- status 바꿈", "STATUS"), Some(true), "주석에만");
+        assert_eq!(word_in_line("  x.order_status := 1;", "STATUS"), None, "다른 낱말의 일부");
+        assert_eq!(word_in_line("WHERE o.STATUS='A'", "STATUS"), Some(false));
+    }
+}

@@ -604,3 +604,28 @@ async fn sessions_survive_switching_between_views() {
     work.close();
     meta.close();
 }
+
+/// 컬럼 영향도: 뷰·프로시저에서 그 컬럼이 나오는 줄, 이름은 안 나와도 테이블을 쓰는 객체(%ROWTYPE), 인덱스
+#[tokio::test]
+#[ignore]
+async fn column_usage_finds_lines() {
+    let s = Session::connect(spec(false)).await.unwrap();
+    let _ = s.execute("DROP TABLE usage_t CASCADE CONSTRAINTS", ExecOptions::default()).await;
+    exec(&s, "CREATE TABLE usage_t (id NUMBER PRIMARY KEY, status VARCHAR2(10), order_status VARCHAR2(10))").await;
+    exec(&s, "CREATE INDEX usage_t_st_ix ON usage_t (status)").await;
+    exec(&s, "CREATE OR REPLACE VIEW usage_v AS\nSELECT id,\n       status\n  FROM usage_t").await;
+    exec(&s, "CREATE OR REPLACE PROCEDURE usage_p IS\nBEGIN\n  UPDATE usage_t SET status = 'X' WHERE id = 1;\n  UPDATE usage_t SET order_status = 'Y'; -- status 아님\nEND;").await;
+    exec(&s, "CREATE OR REPLACE PROCEDURE usage_q IS\n  r usage_t%ROWTYPE;\nBEGIN\n  NULL;\nEND;").await;
+    let me = s.info().user.clone();
+    let u = sqls_core::meta::column_usage(&s, &format!("{me}.USAGE_T"), "status").await.unwrap();
+    let hit = |n: &str| u.hits.iter().find(|x| x.name == n).unwrap_or_else(|| panic!("{n}: {u:#?}"));
+    let v = hit("USAGE_V");
+    assert_eq!(v.lines.iter().map(|l| l.line).collect::<Vec<_>>(), vec![2], "{v:?}");
+    let p = hit("USAGE_P");
+    assert_eq!(p.lines.len(), 2, "{p:?}");
+    assert_eq!((p.lines[0].line, p.lines[0].in_comment), (3, false));
+    assert_eq!((p.lines[1].line, p.lines[1].in_comment), (4, true), "order_status 는 다른 낱말, 주석의 status 만");
+    assert!(u.silent.iter().any(|x| x.name == "USAGE_Q"), "%ROWTYPE 만 쓰는 것은 '이름이 안 보임' 쪽: {u:#?}");
+    assert!(u.indexes.iter().any(|i| i.ends_with("USAGE_T_ST_IX")), "{:?}", u.indexes);
+    s.close();
+}

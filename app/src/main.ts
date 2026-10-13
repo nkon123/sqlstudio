@@ -23,6 +23,7 @@ import { guessTable, toCsv as toCsvText, toInserts as toInsertsText, unsupported
 import { aliasMap, showColumns } from "./colpopup";
 import { showMenu, type MenuItem } from "./ctxmenu";
 import { SchemaCompareView } from "./schemacmp";
+import { showUsage } from "./usage";
 import { openHistory } from "./history";
 import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
@@ -1309,6 +1310,13 @@ class App {
       at, alias,
       insert: (s) => { const t = this.active; if (!t) return; t.editor.insert(s); t.editor.view.focus(); },
       ddl: async () => { const t = this.active; if (t?.conn) this.newTab(true, await api.getDdl(t.conn.id, d.object_type, `"${d.owner}"."${d.name}"`)); },
+      usage: (column) => {
+        const t = this.active;
+        if (!t?.conn) return toast("먼저 접속하세요", "error");
+        const id = t.conn.id;
+        void showUsage(id, `"${d.owner}"."${d.name}"`, column, async (owner, name, kind) =>
+          this.newTab(true, await api.getDdl(id, kind, `"${owner}"."${name}"`).catch((e) => `-- ${errOf(e).message}`)));
+      },
     });
   }
 

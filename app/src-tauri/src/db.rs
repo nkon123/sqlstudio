@@ -617,6 +617,13 @@ pub async fn describe(st: State<'_, AppState>, id: u64, name: String) -> R<meta:
     Ok(d)
 }
 
+/// 컬럼 영향도 — 이 컬럼을 쓰는 뷰·소스의 줄, 테이블만 쓰는 객체, 인덱스·제약·외래 키
+#[tauri::command]
+pub async fn column_usage(st: State<'_, AppState>, id: u64, table: String, column: String) -> R<meta::Usage> {
+    let s = lookup_session(&st, id)?;
+    Ok(meta::column_usage(&s, &table, &column).await?)
+}
+
 /// 사전 조회에 쓸 세션: 사전 조회 세션(읽기 전용)이 우선 — 작업 세션에서 긴 쿼리가 돌고 있어도 기다리지 않는다.
 /// 그 세션이 자동완성 캐시를 읽느라 바쁘고 작업 세션이 쉬고 있으면 작업 세션으로.
 fn lookup_session(st: &AppState, id: u64) -> R<sqls_core::Session> {

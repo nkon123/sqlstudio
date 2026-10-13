@@ -70,6 +70,7 @@ pub fn run() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             db::app_info,
+            db::column_usage,
             db::open_log_dir,
             db::client_log,
             db::conn_event,

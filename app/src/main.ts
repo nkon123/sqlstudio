@@ -968,9 +968,9 @@ class App {
   }
 
   private analyzeActive(owner?: string, name?: string) {
-    const t = this.need();
+    const t = this.active;
     if (!t) return;
-    if (!t.conn) return toast("먼저 접속하세요", "error");
+    // 접속 없이도 연다 — 다른 곳에서 내보낸 결과(.sqla)를 가져와 본다
     t.analysis().open(owner, name);
   }
 
@@ -1537,7 +1537,9 @@ class App {
     const busy = !!t?.running;
     this.btn.connect.disabled = busy;
     this.btn.disconnect.disabled = !c || busy;
-    for (const k of ["run", "script", "explain", "debug", "analyze", "monitor"]) this.btn[k].disabled = !c || busy;
+    for (const k of ["run", "script", "explain", "debug", "monitor"]) this.btn[k].disabled = !c || busy;
+    // 분석은 접속 없이도 — 가져온 결과를 본다
+    this.btn.analyze.disabled = busy;
     this.btn.cancel.disabled = !busy;
     this.btn.commit.disabled = !c || busy || !t?.txnPending;
     this.btn.rollback.disabled = !c || busy || !t?.txnPending;

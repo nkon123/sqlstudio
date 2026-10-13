@@ -15,6 +15,9 @@
 //! # 모델 품질 평가 (저장된 결과만 읽는다). 두 모델 비교는 --compare 로
 //! sqlstudio-analyze run --connection ERP-DEV --name "ORD%" --limit 20 --llm "로컬 (Ollama)" --out D:\eval\qwen7b
 //! sqlstudio-analyze eval --out D:\eval\qwen7b [--compare D:\eval\gemma]
+//! # 결과를 파일 하나로 (분석할 수 없는 곳에서 보려고) → 그곳에서 가져오기
+//! sqlstudio-analyze export --connection ERP-DEV --file D:\erp.sqla
+//! sqlstudio-analyze import --file D:\erp.sqla [--as "ERP 운영"] [--force]
 //! ```
 //!
 //! 중간에 멈추거나(Ctrl+C) 죽어도 다시 돌리면 끝난 조각은 건너뛴다.
@@ -42,6 +45,8 @@ const USAGE: &str = "사용법:
   sqlstudio-analyze integrate (--out <폴더> | --connection <접속>) [--llm <공급자> --overview]
   sqlstudio-analyze show (--out <폴더> | --connection <접속>) [--table <테이블>] [--node <서브프로그램>]
   sqlstudio-analyze eval (--out <폴더> | --connection <접속>) [--compare <다른 결과 폴더>] [--lang ko|en]
+  sqlstudio-analyze export (--out <폴더> | --connection <접속>) --file <결과.sqla>
+  sqlstudio-analyze import --file <결과.sqla> [--as <이름> | --out <폴더>] [--force]   (앱의 분석 화면 '결과' 에서 고른다)
   run 의 --limit N: 앞의 N 개 단위만 (모델을 시험할 때)
   공통: --config <config.toml>";
 
@@ -69,6 +74,8 @@ struct Args {
     node: Option<String>,
     compare: Option<PathBuf>,
     limit: Option<usize>,
+    file: Option<PathBuf>,
+    as_name: Option<String>,
 }
 
 fn parse() -> Result<Args, String> {
@@ -112,6 +119,8 @@ fn parse() -> Result<Args, String> {
             "--table" => a.table = Some(need(&mut it, &x)?.to_uppercase()),
             "--node" => a.node = Some(need(&mut it, &x)?.to_uppercase()),
             "--compare" => a.compare = Some(PathBuf::from(need(&mut it, &x)?)),
+            "--file" | "-f" => a.file = Some(PathBuf::from(need(&mut it, &x)?)),
+            "--as" => a.as_name = Some(need(&mut it, &x)?),
             "--limit" => a.limit = Some(need(&mut it, &x)?.parse().map_err(|_| "--limit 는 숫자")?),
             other => return Err(format!("알 수 없는 인자: {other}")),
         }
@@ -155,6 +164,8 @@ async fn main() -> ExitCode {
         "integrate" => cmd_integrate(&a).await,
         "show" => cmd_show(&a),
         "eval" => cmd_eval(&a),
+        "export" => cmd_export(&a),
+        "import" => cmd_import(&a),
         other => Err(format!("알 수 없는 명령: {other}\n\n{USAGE}")),
     };
     match r {
@@ -164,6 +175,34 @@ async fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn cmd_export(a: &Args) -> Result<(), String> {
+    let dir = out_dir(a)?;
+    let file = a.file.clone().ok_or("--file <결과.sqla> 가 필요합니다")?;
+    let store = Store::open(&dir).map_err(|e| e.to_string())?;
+    let name = a.connection.clone().or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
+    let m = sqls_analyze::bundle::export(&store, &file, sqls_analyze::bundle::Manifest::new(&name, env!("CARGO_PKG_VERSION"))).map_err(|e| e.to_string())?;
+    let size = std::fs::metadata(&file).map(|x| x.len()).unwrap_or(0);
+    eprintln!("내보냄: {} — 단위 {}개, 파일 {}개, {:.1} MB", file.display(), m.units, m.files, size as f64 / 1048576.0);
+    eprintln!("PL/SQL 소스와 SQL 문이 들어 있습니다. 보내는 곳을 확인하세요.");
+    Ok(())
+}
+
+fn cmd_import(a: &Args) -> Result<(), String> {
+    let file = a.file.clone().ok_or("--file <결과.sqla> 가 필요합니다")?;
+    let m = sqls_analyze::bundle::peek(&file).map_err(|e| e.to_string())?;
+    let dest = match (&a.out, &a.as_name) {
+        (Some(o), _) => o.clone(),
+        (None, Some(n)) => sqls_analyze::analysis_root().join(sqls_analyze::safe_set_name(n)),
+        (None, None) => sqls_analyze::analysis_root().join(sqls_analyze::safe_set_name(&format!("{} (가져옴)", m.profile))),
+    };
+    let m = sqls_analyze::bundle::import(&file, &dest, a.force).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => format!("{e} — 덮어쓰려면 --force, 다른 이름은 --as"),
+        _ => e.to_string(),
+    })?;
+    eprintln!("가져옴: {} → {} (단위 {}개, {} 이 내보냄)", file.display(), dest.display(), m.units, m.profile);
+    Ok(())
 }
 
 fn pick_llm(cfg: &Config, a: &Args) -> Result<Option<ProviderConfig>, String> {

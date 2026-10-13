@@ -19,6 +19,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
 encoding_rs = "0.8"
+# 분석 결과 묶음(.sqla) — 엑셀 쓰기·읽기가 이미 쓰는 것과 같은 판
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

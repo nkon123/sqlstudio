@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde::Serialize;
+use sqls_analyze::bundle;
 use sqls_analyze::integrate::{self, Integrated};
 use sqls_analyze::run::{analyze_unit, Event, Llm, Options};
 use sqls_analyze::source::{self, UnitRef};
@@ -33,6 +34,27 @@ fn profile_of(st: &AppState, id: u64) -> R<String> {
 fn store_for(st: &AppState, id: u64) -> R<Store> {
     let p = profile_of(st, id)?;
     Store::open(sqls_analyze::default_dir(&p)).map_err(|e| ErrView::msg("io", e.to_string()))
+}
+
+/// 이 PC 의 결과 폴더 하나 (가져온 것 포함). 이름은 폴더 이름 그대로 — 경로를 벗어나지 못하게
+fn set_dir(name: &str) -> R<std::path::PathBuf> {
+    if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\', ':']) || name.contains("..") {
+        return Err(ErrView::msg("invalid", format!("잘못된 결과 이름: {name}")));
+    }
+    let d = sqls_analyze::analysis_root().join(name);
+    if !d.join("units").is_dir() {
+        return Err(ErrView::msg("invalid", format!("'{name}' 분석 결과가 이 PC 에 없습니다")));
+    }
+    Ok(d)
+}
+
+/// 결과를 읽을 곳: 고른 결과(set) — 접속 없이도 된다, 아니면 탭 접속의 프로필
+fn store_of(st: &AppState, id: Option<u64>, set: Option<&str>) -> R<Store> {
+    match (set.filter(|s| !s.is_empty()), id) {
+        (Some(name), _) => Store::open(set_dir(name)?).map_err(|e| ErrView::msg("io", e.to_string())),
+        (None, Some(id)) => store_for(st, id),
+        (None, None) => Err(ErrView::msg("invalid", "접속하거나 볼 분석 결과를 고르세요")),
+    }
 }
 
 /// 메타 세션 — 접속 직후·다시 접속 중이면 잠깐 기다린다
@@ -212,8 +234,8 @@ pub fn analysis_cancel(st: State<'_, AppState>, run: u64) {
 
 /// 통합 분석 결과 (없으면 None). `rebuild` 면 저장된 단위로 다시 만든다 (모델 없이).
 #[tauri::command]
-pub fn analysis_result(st: State<'_, AppState>, id: u64, rebuild: bool) -> R<Option<Integrated>> {
-    let store = store_for(&st, id)?;
+pub fn analysis_result(st: State<'_, AppState>, id: Option<u64>, set: Option<String>, rebuild: bool) -> R<Option<Integrated>> {
+    let store = store_of(&st, id, set.as_deref())?;
     if rebuild {
         let overview = store.read_integrated::<Integrated>("integrated.json").and_then(|g| g.overview);
         let (g, _) = integrate::write_all(&store, overview).map_err(|e| ErrView::msg("io", e.to_string()))?;
@@ -234,8 +256,24 @@ static NEXT_DFD: AtomicU64 = AtomicU64::new(1);
 /// 데이터 흐름도를 별도 창으로. center 는 노드 id (OWNER.TABLE, OWNER.PKG.PROC), dir 은 up | down | both
 /// async 여야 한다 — Windows 에서 동기 명령 안에서 창을 만들면 교착된다 (창이 멈춘다)
 #[tauri::command]
-pub async fn open_dfd_window(app: AppHandle, st: State<'_, AppState>, id: u64, center: Option<String>, dir: Option<String>, unit: Option<String>) -> R<()> {
-    let profile = profile_of(&st, id)?;
+pub async fn open_dfd_window(
+    app: AppHandle,
+    st: State<'_, AppState>,
+    id: Option<u64>,
+    set: Option<String>,
+    center: Option<String>,
+    dir: Option<String>,
+    unit: Option<String>,
+) -> R<()> {
+    // 흐름도 창은 결과 폴더 이름으로 읽는다 (가져온 결과면 그 이름)
+    let profile = match (set.filter(|s| !s.is_empty()), id) {
+        (Some(name), _) => {
+            set_dir(&name)?;
+            name
+        }
+        (None, Some(id)) => profile_of(&st, id)?,
+        (None, None) => return Err(ErrView::msg("invalid", "접속하거나 볼 분석 결과를 고르세요")),
+    };
     let enc = |s: &str| s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>();
     let mut url = format!("dfd.html?profile={}", enc(&profile));
     if let Some(c) = center.filter(|c| !c.is_empty()) {
@@ -267,8 +305,8 @@ pub struct UnitDetail {
 }
 
 #[tauri::command]
-pub fn analysis_unit(st: State<'_, AppState>, id: u64, key: String) -> R<UnitDetail> {
-    let store = store_for(&st, id)?;
+pub fn analysis_unit(st: State<'_, AppState>, id: Option<u64>, set: Option<String>, key: String) -> R<UnitDetail> {
+    let store = store_of(&st, id, set.as_deref())?;
     let unit = store.read_unit(&key).ok_or_else(|| ErrView::msg("invalid", format!("{key} 의 분석 결과가 없습니다")))?;
     let chunks = store.chunks_of(&unit);
     Ok(UnitDetail { unit, chunks })
@@ -276,16 +314,92 @@ pub fn analysis_unit(st: State<'_, AppState>, id: u64, key: String) -> R<UnitDet
 
 /// 결과 폴더 경로
 #[tauri::command]
-pub fn analysis_dir(st: State<'_, AppState>, id: u64) -> R<String> {
-    Ok(store_for(&st, id)?.root().display().to_string())
+pub fn analysis_dir(st: State<'_, AppState>, id: Option<u64>, set: Option<String>) -> R<String> {
+    Ok(store_of(&st, id, set.as_deref())?.root().display().to_string())
 }
 
 /// 품질 평가 (저장된 조각 결과만 읽는다 — 모델을 부르지 않는다). Markdown 과 숫자.
 #[tauri::command]
-pub fn analysis_eval(st: State<'_, AppState>, id: u64) -> R<serde_json::Value> {
-    let store = store_for(&st, id)?;
+pub fn analysis_eval(st: State<'_, AppState>, id: Option<u64>, set: Option<String>) -> R<serde_json::Value> {
+    let store = store_of(&st, id, set.as_deref())?;
     let r = sqls_analyze::eval::evaluate(&store, sqls_analyze::llm::Lang::Ko);
     let md = sqls_analyze::eval::markdown(&r, None);
     let _ = store.write_text("integrated/eval.md", &md);
     Ok(serde_json::json!({ "report": r, "markdown": md }))
+}
+
+// ── 결과 묶음: 내보내기·가져오기 ─────────────────────────────
+
+/// 이 PC 의 분석 결과들 (접속 프로필의 것 + 가져온 것)
+#[tauri::command]
+pub fn analysis_sets() -> Vec<bundle::SetInfo> {
+    bundle::list_sets(&sqls_analyze::analysis_root())
+}
+
+/// 결과 하나의 단위 목록 — 접속 없이 볼 때 (DB 목록 대신)
+#[tauri::command]
+pub fn analysis_set_units(set: String) -> R<Vec<UnitRow>> {
+    let store = Store::open(set_dir(&set)?).map_err(|e| ErrView::msg("io", e.to_string()))?;
+    let mut rows: Vec<UnitRow> = store
+        .units()
+        .into_iter()
+        .map(|x| UnitRow {
+            analyzed_at: Some(x.analyzed_at),
+            chunks: Some(x.stats.chunks),
+            failed: Some(x.stats.failed),
+            model: x.model.clone(),
+            summary: x.summary.as_ref().map(|i| i.summary.clone()),
+            warning: x.warning.clone(),
+            unit: UnitRef { owner: x.owner, name: x.name, unit_type: x.unit_type },
+        })
+        .collect();
+    rows.sort_by(|a, b| (&a.unit.owner, &a.unit.name).cmp(&(&b.unit.owner, &b.unit.name)));
+    Ok(rows)
+}
+
+/// 결과를 파일 하나(.sqla)로. 탭 접속의 결과면 DB 정보도 머리에 적는다
+#[tauri::command]
+pub fn analysis_export(st: State<'_, AppState>, id: Option<u64>, set: Option<String>, path: String) -> R<bundle::Manifest> {
+    let store = store_of(&st, id, set.as_deref())?;
+    let name = match (&set, id) {
+        (Some(n), _) if !n.is_empty() => n.clone(),
+        (_, Some(id)) => profile_of(&st, id)?,
+        _ => String::new(),
+    };
+    let mut m = bundle::Manifest::new(&name, env!("CARGO_PKG_VERSION"));
+    if set.as_deref().is_none_or(str::is_empty) {
+        if let Some(Ok((s, _, _))) = id.map(|i| st.session(i)) {
+            m.db_user = Some(format!("{}@{}", s.info().user, s.info().connect_string));
+            m.server = Some(s.info().server_version.clone());
+        }
+    }
+    bundle::export(&store, std::path::Path::new(&path), m).map_err(|e| ErrView::msg("io", e.to_string()))
+}
+
+/// 가져오기 전에 무엇인지 본다
+#[tauri::command]
+pub fn analysis_peek(path: String) -> R<bundle::Manifest> {
+    bundle::peek(std::path::Path::new(&path)).map_err(|e| ErrView::msg("invalid", e.to_string()))
+}
+
+/// 파일을 이 PC 의 결과로 가져온다. 같은 이름이 있으면 overwrite 일 때만 바꿔 끼운다. 돌려주는 것은 붙인 이름
+#[tauri::command]
+pub fn analysis_import(path: String, name: String, overwrite: bool) -> R<String> {
+    let name = sqls_analyze::safe_set_name(&name);
+    let dest = sqls_analyze::analysis_root().join(&name);
+    bundle::import(std::path::Path::new(&path), &dest, overwrite).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => ErrView::msg("exists", format!("'{name}' 결과가 이미 있습니다")),
+        _ => ErrView::msg("io", e.to_string()),
+    })?;
+    Ok(name)
+}
+
+/// 가져온 결과를 지운다 (접속 프로필의 결과는 지우지 않는다 — 폴더에서 직접)
+#[tauri::command]
+pub fn analysis_remove_set(name: String) -> R<()> {
+    let d = set_dir(&name)?;
+    if !d.join("imported.json").is_file() {
+        return Err(ErrView::msg("invalid", "가져온 결과만 여기서 지울 수 있습니다"));
+    }
+    std::fs::remove_dir_all(&d).map_err(|e| ErrView::msg("io", e.to_string()))
 }

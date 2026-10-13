@@ -9,6 +9,7 @@
 //!
 //! 모델은 소스를 읽기만 한다. 이 크레이트에는 DB 에 SQL 을 보내는 경로가 사전 조회(ALL_SOURCE 등) 말고는 없다.
 
+pub mod bundle;
 pub mod chunk;
 pub mod deps;
 pub mod eval;
@@ -23,8 +24,21 @@ pub mod store;
 
 /// 접속 프로필의 기본 결과 폴더 — 앱과 CLI 가 같은 곳을 쓴다 (설정 파일 옆 `analysis/<프로필>`)
 pub fn default_dir(profile: &str) -> std::path::PathBuf {
+    // 이전과 같은 규칙 (바꾸면 있던 결과 폴더를 못 찾는다)
+    analysis_root().join(profile.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_"))
+}
+
+/// 모든 결과 폴더가 있는 곳 (설정 파일 옆 `analysis`)
+pub fn analysis_root() -> std::path::PathBuf {
     let base = sqls_core::config::config_path().parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
-    base.join("analysis").join(profile.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_"))
+    base.join("analysis")
+}
+
+/// 가져온 결과의 폴더 이름 (경로 문자·앞뒤 점·공백 정리)
+pub fn safe_set_name(name: &str) -> String {
+    let s: String = name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    let s = s.trim().trim_matches('.').to_string();
+    if s.is_empty() { "_".into() } else { s }
 }
 
 #[cfg(test)]

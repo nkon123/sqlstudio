@@ -6,9 +6,10 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api, errOf, type Provider } from "./api";
 import type { DfdView } from "./dfd";
-import { confirmBox, h, toast } from "./ui";
+import { confirmBox, field, h, modal, toast } from "./ui";
 import { ResultGrid } from "./grid";
 import { showMenu, type MenuItem } from "./ctxmenu";
 
@@ -104,6 +105,13 @@ function colSplitter(grid: HTMLElement, key: string, min = 90): HTMLElement {
   return handle;
 }
 
+/** 이 PC 의 분석 결과 하나 (접속 프로필의 것, 또는 가져온 것) */
+interface SetInfo {
+  name: string; dir: string; units: number; generated_at?: number | null;
+  imported?: { profile: string; db_user?: string | null; server?: string | null; exported_at: number; exported_by: string; app_version: string; units: number; imported_at?: number | null } | null;
+}
+interface Manifest { profile: string; db_user?: string | null; server?: string | null; exported_at: number; exported_by: string; app_version: string; units: number; files: number }
+
 /** 흐름도 가운데: 무엇을, 처리 상자를 프로시저 단위로 볼지 패키지 단위로 볼지 */
 interface DfdTarget { focus: string; unit: "proc" | "pkg" }
 
@@ -134,6 +142,11 @@ export class AnalysisView {
   });
   /** 그리드에 마지막으로 넣은 목록 (같으면 행만 바꾸어 정렬·선택을 지킨다) */
   private gridOf: UnitRow[] | null = null;
+  /** 접속 없이 보는 결과 (가져온 것 등). null 이면 탭 접속의 결과 */
+  private set: string | null = null;
+  private sets: SetInfo[] = [];
+  private setSel = h("select", { title: "볼 분석 결과 — 접속한 DB 의 것, 또는 가져온 결과(접속 없이 본다)", style: "max-width:220px" });
+  private liveOnly: HTMLElement[] = [];
   private allBox = h("input", { type: "checkbox", title: "전체 선택" });
   private content = h("div", { class: "an-content" });
   private navBtns = new Map<View, HTMLButtonElement>();
@@ -162,8 +175,13 @@ export class AnalysisView {
       this.renderList();
     };
     const listBtn = h("button", { onclick: () => this.load() }, "목록");
+    this.setSel.onchange = () => this.useSet(this.setSel.value || null);
     for (const i of [this.ownerIn, this.nameIn]) i.addEventListener("keydown", (e) => { if (e.key === "Enter") this.load(); });
     const toolbar = h("div", { class: "dbg-toolbar an-toolbar" },
+      h("label", { class: "check", title: "볼 분석 결과" }, "결과", this.setSel), this.removeBtn,
+      h("button", { title: "보고 있는 분석 결과를 파일 하나(.sqla)로 — 분석할 수 없는 곳에서 '가져오기' 로 본다", onclick: () => this.exportSet() }, "내보내기"),
+      h("button", { title: "다른 곳에서 내보낸 분석 결과(.sqla)를 가져와 접속 없이 본다", onclick: () => this.importSet() }, "가져오기"),
+      h("span", { class: "sep" }),
       this.ownerIn, this.nameIn, listBtn, h("span", { class: "sep" }),
       this.provSel, this.badge,
       h("label", { class: "check", title: "조각 하나의 최대 줄 수" }, "조각", this.linesIn, "줄"),
@@ -193,6 +211,8 @@ export class AnalysisView {
       this.grid.el);
     this.main = h("div", { class: "an-main" }, left);
     this.main.append(colSplitter(this.main, "analysis.col.units"), h("div", { class: "an-right" }, nav, this.content));
+    // 가져온 결과를 볼 때는 DB 가 필요한 것을 끈다
+    this.liveOnly = [this.ownerIn, this.nameIn, listBtn, this.provSel, this.linesIn, this.jobsIn, this.forceBox, this.startBtn];
     this.el = h("div", { class: "debugger analysis", hidden: true }, toolbar,
       h("div", { class: "an-progress" }, this.bar), this.main);
   }
@@ -213,8 +233,134 @@ export class AnalysisView {
       if (local) this.provSel.value = local.name;
     }
     this.updateBadge();
+    await this.refreshSets();
+    // 접속이 없으면 이 PC 의 결과 중 하나를 연다
+    if (this.sessionId() == null && !this.set && this.sets.length) this.set = this.sets[0].name;
+    this.syncSetSel();
     await this.load();
     await this.reload(false);
+  }
+
+  /** 결과를 읽을 곳 — 명령 인자로 그대로 붙인다 */
+  private src(): { id: number | null; set: string | null } | null {
+    if (this.set) return { id: null, set: this.set };
+    const id = this.sessionId();
+    return id == null ? null : { id, set: null };
+  }
+
+  private async refreshSets() {
+    try {
+      this.sets = await invoke<SetInfo[]>("analysis_sets");
+    } catch { this.sets = []; }
+    this.syncSetSel();
+  }
+
+  private syncSetSel() {
+    const live = this.sessionId() != null;
+    const opts = [
+      ...(live ? [h("option", { value: "" }, "지금 접속한 DB")] : []),
+      ...this.sets.map((x) => h("option", { value: x.name, title: x.imported ? `${x.imported.profile} 에서 내보냄 · ${when(x.imported.exported_at)} · ${x.imported.exported_by}` : x.dir },
+        `${x.name}${x.imported ? " · 가져옴" : ""} (${x.units})`)),
+    ];
+    this.setSel.replaceChildren(...(opts.length ? opts : [h("option", { value: "" }, "결과 없음")]));
+    this.setSel.value = this.set ?? "";
+    for (const el of this.liveOnly) (el as HTMLInputElement).disabled = !!this.set;
+    this.updateRemoveBtn();
+  }
+
+  private removeBtn = h("button", { class: "small", title: "가져온 결과를 이 PC 에서 지운다", hidden: true, onclick: () => this.removeSet() }, "지우기");
+
+  private updateRemoveBtn() {
+    this.removeBtn.hidden = !this.sets.find((x) => x.name === this.set)?.imported;
+  }
+
+  private async useSet(name: string | null) {
+    this.set = name;
+    this.g = null;
+    this.dfdOf = null;
+    this.selectedUnit = null;
+    this.focusNode = null;
+    this.checked.clear();
+    this.syncSetSel();
+    await this.load();
+    await this.reload(false);
+  }
+
+  private async exportSet() {
+    const src = this.src();
+    if (!src) return toast("접속하거나 결과를 고르세요", "error");
+    const ok = await confirmBox("분석 결과 내보내기",
+      "파일에 PL/SQL 소스(조각 코드)와 SQL 문이 그대로 들어갑니다.\n사내 규정이 허용하는 곳으로만 옮기세요.\n\n" +
+      "받는 곳에서는 분석 화면의 '가져오기' 로 열면 접속 없이 요약·호출 관계·흐름도·테이블을 봅니다.", "파일로 저장", false);
+    if (!ok) return;
+    const stamp = new Date().toISOString().slice(0, 10);
+    const path = await saveDialog({ defaultPath: `${(this.set ?? (await this.liveName()) ?? "분석결과").replace(/[\\/:*?"<>|]/g, "_")}-${stamp}.sqla`, filters: [{ name: "SQLStudio 분석 결과", extensions: ["sqla"] }] });
+    if (!path) return;
+    this.statusEl.textContent = "내보내는 중…";
+    try {
+      const m = await invoke<Manifest>("analysis_export", { ...src, path });
+      this.statusEl.textContent = "";
+      toast(`내보냄: 단위 ${m.units}개 → ${path}`, "ok", 6000);
+    } catch (e) {
+      this.statusEl.textContent = "";
+      toast(errOf(e).message, "error");
+    }
+  }
+
+  /** 지금 접속한 탭의 결과 폴더 이름 (= 프로필) */
+  private async liveName(): Promise<string | null> {
+    const id = this.sessionId();
+    if (id == null) return null;
+    try {
+      const dir = await invoke<string>("analysis_dir", { id, set: null });
+      return dir.split(/[\\/]/).pop() ?? null;
+    } catch { return null; }
+  }
+
+  private async importSet() {
+    const path = await openDialog({ multiple: false, filters: [{ name: "SQLStudio 분석 결과", extensions: ["sqla"] }] });
+    if (!path || Array.isArray(path)) return;
+    let m: Manifest;
+    try {
+      m = await invoke<Manifest>("analysis_peek", { path });
+    } catch (e) {
+      return toast(errOf(e).message, "error");
+    }
+    const nameIn = h("input", { value: `${m.profile} (가져옴)`, style: "width:100%" });
+    const info = h("div", { class: "hint" },
+      `${m.profile}${m.db_user ? ` · ${m.db_user}` : ""}${m.server ? ` · ${m.server}` : ""}`, h("br"),
+      `단위 ${m.units}개 · ${when(m.exported_at)} 내보냄${m.exported_by ? ` (${m.exported_by})` : ""} · SQLStudio ${m.app_version}`);
+    const go = await modal("분석 결과 가져오기", h("div", {}, info, field("이 PC 에서 부를 이름", nameIn, "같은 이름이 있으면 바꿔 끼울지 묻습니다")),
+      [{ label: "취소", value: false }, { label: "가져오기", value: true, kind: "primary" }]);
+    if (!go) return;
+    const run = async (overwrite: boolean): Promise<string | null> => {
+      try {
+        return await invoke<string>("analysis_import", { path, name: nameIn.value.trim() || m.profile, overwrite });
+      } catch (e) {
+        const err = errOf(e);
+        if (err.kind === "exists" && !overwrite && await confirmBox("같은 이름이 있습니다", `${err.message}. 새 파일로 바꿔 끼울까요?`, "바꿔 끼우기")) return run(true);
+        if (err.kind !== "exists") toast(err.message, "error");
+        return null;
+      }
+    };
+    const name = await run(false);
+    if (!name) return;
+    toast(`가져옴: ${name} — 접속 없이 볼 수 있습니다`, "ok");
+    await this.refreshSets();
+    await this.useSet(name);
+  }
+
+  private async removeSet() {
+    const x = this.sets.find((s) => s.name === this.set);
+    if (!x?.imported) return;
+    if (!await confirmBox("가져온 결과 지우기", `'${x.name}' (단위 ${x.units}개) 을 이 PC 에서 지웁니다. 원래 파일(.sqla)은 그대로입니다.`, "지우기")) return;
+    try {
+      await invoke("analysis_remove_set", { name: x.name });
+    } catch (e) {
+      return toast(errOf(e).message, "error");
+    }
+    await this.refreshSets();
+    await this.useSet(this.sessionId() != null ? null : this.sets[0]?.name ?? null);
   }
 
   close() {
@@ -234,8 +380,25 @@ export class AnalysisView {
   }
 
   private async load() {
+    if (this.set) {
+      try {
+        this.rows = await invoke<UnitRow[]>("analysis_set_units", { set: this.set });
+        const x = this.sets.find((s) => s.name === this.set);
+        this.statusEl.textContent = x?.imported ? `가져온 결과 · ${x.imported.profile} · 단위 ${this.rows.length}개` : `단위 ${this.rows.length}개 (저장된 결과)`;
+      } catch (e) {
+        this.rows = [];
+        toast(errOf(e).message, "error");
+      }
+      this.renderList();
+      return;
+    }
     const id = this.sessionId();
-    if (id == null) return toast("먼저 접속하세요", "error");
+    if (id == null) {
+      this.rows = [];
+      this.renderList();
+      this.statusEl.textContent = "";
+      return toast("접속하거나, '가져오기' 로 다른 곳에서 내보낸 결과를 여세요", "info", 5000);
+    }
     this.statusEl.textContent = "목록을 읽는 중…";
     try {
       this.rows = await invoke<UnitRow[]>("analysis_list", { id, owner: this.ownerIn.value.trim() || null, nameLike: this.nameIn.value.trim() || null });
@@ -294,7 +457,7 @@ export class AnalysisView {
   }
 
   private popDfd(t: DfdTarget) {
-    invoke("open_dfd_window", { id: this.sessionId(), center: t.focus, dir: "both", unit: t.unit }).catch((e) => toast(errOf(e).message, "error"));
+    invoke("open_dfd_window", { ...this.src(), center: t.focus, dir: "both", unit: t.unit }).catch((e) => toast(errOf(e).message, "error"));
   }
 
   private unitMenu(key: string, e: MouseEvent) {
@@ -335,6 +498,7 @@ export class AnalysisView {
 
 
   private async start() {
+    if (this.set) return toast("가져온 결과를 보는 중입니다 — 분석하려면 '결과' 에서 '지금 접속한 DB' 를 고르세요", "error");
     const id = this.sessionId();
     if (id == null) return toast("먼저 접속하세요", "error");
     const units = this.rows.filter((r) => this.checked.has(keyOf(r))).map(({ owner, name, unit_type }) => ({ owner, name, unit_type }));
@@ -387,6 +551,7 @@ export class AnalysisView {
         if (r) { r.analyzed_at = Date.now() / 1000; this.checked.delete(k); this.renderList(); }
       }
     } else if (p.type === "finished") {
+      void this.refreshSets();
       this.run = null;
       this.startBtn.disabled = false;
       this.stopBtn.disabled = true;
@@ -404,18 +569,18 @@ export class AnalysisView {
   }
 
   private async copyDir() {
-    const id = this.sessionId();
-    if (id == null) return;
-    const dir = await invoke<string>("analysis_dir", { id });
+    const src = this.src();
+    if (!src) return;
+    const dir = await invoke<string>("analysis_dir", src);
     await navigator.clipboard.writeText(dir).catch(() => {});
     toast(`결과 폴더: ${dir} (복사함) — integrated/report.md, 단위·조각별 JSON`, "info", 6000);
   }
 
   private async reload(rebuild: boolean) {
-    const id = this.sessionId();
-    if (id == null) return;
+    const src = this.src();
+    if (!src) { this.g = null; this.render(); return; }
     try {
-      this.g = await invoke<Integrated | null>("analysis_result", { id, rebuild });
+      this.g = await invoke<Integrated | null>("analysis_result", { ...src, rebuild });
     } catch (e) {
       toast(errOf(e).message, "error");
     }
@@ -472,15 +637,15 @@ export class AnalysisView {
   }
 
   private async showUnit(key: string) {
-    const id = this.sessionId();
-    if (id == null) return;
+    const src = this.src();
+    if (!src) return;
     this.selectedUnit = key;
     this.renderList();
     this.view = "summary";
     for (const [v, b] of this.navBtns) b.classList.toggle("active", v === this.view);
     let d: { unit: UnitResult; chunks: ChunkResult[] };
     try {
-      d = await invoke("analysis_unit", { id, key });
+      d = await invoke("analysis_unit", { ...src, key });
     } catch (e) {
       return toast(errOf(e).message, "error");
     }
@@ -556,7 +721,7 @@ export class AnalysisView {
       this.content.replaceChildren(h("div", { class: "hint an-pad" }, "흐름도를 불러오는 중…"));
       const { DfdView } = await import("./dfd");
       this.dfd ??= new DfdView((id) => { this.view = "calls"; this.focusNode = id; this.render(); }, {
-        popout: (center, dir) => invoke("open_dfd_window", { id: this.sessionId(), center, dir }).catch((e) => toast(errOf(e).message, "error")),
+        popout: (center, dir) => invoke("open_dfd_window", { ...this.src(), center, dir }).catch((e) => toast(errOf(e).message, "error")),
       });
       if (this.view !== "dfd") return;
     }
@@ -661,11 +826,11 @@ export class AnalysisView {
 
   /** 모델 답의 품질 — 저장된 결과만 읽는다 */
   private async renderQuality() {
-    const id = this.sessionId();
-    if (id == null) return;
+    const src = this.src();
+    if (!src) return;
     this.content.replaceChildren(h("div", { class: "hint" }, "평가 중…"));
     try {
-      const r = await invoke<{ report: { advice: string[]; chunks: number }; markdown: string }>("analysis_eval", { id });
+      const r = await invoke<{ report: { advice: string[]; chunks: number }; markdown: string }>("analysis_eval", src);
       this.content.replaceChildren(h("div", { class: "an-pad" },
         h("h3", {}, "조언"), h("ul", { class: "an-ul" }, ...r.report.advice.map((a) => h("li", {}, a))),
         h("p", { class: "hint" }, "아래 표는 integrated/eval.md 로도 저장된다. 두 모델 비교: sqlstudio-analyze eval --out A --compare B"),

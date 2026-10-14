@@ -147,6 +147,44 @@ pub fn from_files(paths: &[PathBuf], default_owner: &str) -> std::io::Result<Vec
         .collect())
 }
 
+/// 폴더·파일에서 Pro*C(.pc) 를 찾아 분석 단위로 (파일 하나 = 단위 하나, `PC_<파일이름>`).
+/// `owner` 는 그 프로그램이 접속하는 계정 — 스키마 없는 테이블 이름이 이 스키마로 풀린다.
+/// 같은 파일 이름이 다른 폴더에 또 있으면 뒤에 번호를 붙인다. EXEC SQL 이 없는 파일은 건너뛴다.
+pub fn from_proc(paths: &[PathBuf], owner: &str) -> std::io::Result<Vec<(UnitSource, Option<String>)>> {
+    let mut files = Vec::new();
+    for p in paths {
+        collect_with(p, &mut files, &|f| crate::proc::is_proc_file(f))?;
+    }
+    files.sort();
+    let mut used: std::collections::HashSet<String> = Default::default();
+    let mut out = Vec::new();
+    for f in files {
+        let text = decode(&std::fs::read(&f)?);
+        let mut name = crate::proc::unit_name(&f);
+        let mut n = 1;
+        while used.contains(&name) {
+            n += 1;
+            name = format!("{}_{n}", crate::proc::unit_name(&f));
+        }
+        if let Some(t) = crate::proc::translate(&text, owner, &name) {
+            used.insert(name);
+            out.push((t.unit, None));
+        }
+    }
+    Ok(out)
+}
+
+fn collect_with(p: &Path, out: &mut Vec<PathBuf>, keep: &dyn Fn(&Path) -> bool) -> std::io::Result<()> {
+    if p.is_dir() {
+        for e in std::fs::read_dir(p)? {
+            collect_with(&e?.path(), out, keep)?;
+        }
+    } else if keep(p) {
+        out.push(p.to_path_buf());
+    }
+    Ok(())
+}
+
 fn collect(p: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     if p.is_dir() {
         for e in std::fs::read_dir(p)? {

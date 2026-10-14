@@ -18,6 +18,7 @@ pub mod flow;
 pub mod integrate;
 pub mod llm;
 pub mod plsql;
+pub mod proc;
 pub mod run;
 pub mod source;
 pub mod store;

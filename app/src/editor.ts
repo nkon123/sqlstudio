@@ -27,6 +27,20 @@ import {
   crosshairCursor, keymap, lineNumbers, rectangularSelection,
 } from "@codemirror/view";
 
+/** Enter — 줄을 나누고, 새 줄을 지금 줄의 들여쓰기(첫 글자 자리)와 같게. 커서가 들여쓰기 안에 있으면 커서 앞까지만 */
+export function newlineSameIndent(view: EditorView): boolean {
+  if (view.state.readOnly) return false;
+  const tr = view.state.changeByRange((range) => {
+    const line = view.state.doc.lineAt(range.from);
+    const lead = /^[ \t]*/.exec(line.text)![0];
+    const indent = lead.slice(0, Math.min(lead.length, range.from - line.from));
+    const ins = "\n" + indent;
+    return { changes: { from: range.from, to: range.to, insert: ins }, range: EditorSelection.cursor(range.from + ins.length) };
+  });
+  view.dispatch(view.state.update(tr, { scrollIntoView: true, userEvent: "input" }));
+  return true;
+}
+
 /** 선택한 곳(없으면 커서의 낱말)의 구문을 대·소문자로. 문자열·따옴표 이름·주석·바인드·숫자는 건드리지 않는다 */
 export function changeCase(mode: CaseMode): (view: EditorView) => boolean {
   return (view) => {
@@ -163,6 +177,8 @@ export class SqlEditor {
           marks,
           keymap.of([
             { key: "Ctrl-Enter", mac: "Cmd-Enter", run: run(actions.runStatement), preventDefault: true },
+            // 줄바꿈: 새 줄은 지금 줄의 첫 글자와 같은 자리에서 시작 (언어 규칙으로 들여쓰기를 따로 정하지 않는다)
+            { key: "Enter", run: newlineSameIndent },
             { key: "F9", run: run(actions.runStatement), preventDefault: true },
             { key: "F5", run: run(actions.runScript), preventDefault: true },
             { key: "Ctrl-e", mac: "Cmd-e", run: run(actions.explain), preventDefault: true },

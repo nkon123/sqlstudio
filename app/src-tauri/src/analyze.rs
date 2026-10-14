@@ -233,6 +233,81 @@ pub async fn analysis_start(
     Ok(run)
 }
 
+/// Pro*C 폴더 분석 — 폴더의 .pc 파일을 읽어 파일 하나 = 단위 하나로. 접속 계정이 스키마 없는 테이블의 기본 스키마.
+/// 진행·끝은 analysis_start 와 같은 "analysis-progress" 이벤트
+#[tauri::command]
+pub async fn analysis_proc_start(
+    app: AppHandle,
+    st: State<'_, AppState>,
+    id: u64,
+    folder: String,
+    provider: Option<String>,
+    allow_remote: bool,
+    options: Options,
+) -> R<u64> {
+    let owner = {
+        let g = st.sessions.lock().unwrap();
+        g.get(&id).map(|s| s.session.info().user.clone()).ok_or_else(|| ErrView::msg("session_closed", "세션이 닫혀 있습니다"))?
+    };
+    let units = source::from_proc(&[std::path::PathBuf::from(&folder)], &owner).map_err(|e| ErrView::msg("io", format!("{folder}: {e}")))?;
+    if units.is_empty() {
+        return Err(ErrView::msg("invalid", "이 폴더에서 EXEC SQL 이 있는 Pro*C 파일(.pc, .pcc)을 찾지 못했습니다"));
+    }
+    let cfg = match &provider {
+        Some(n) => {
+            let p = crate::ai::provider(&st, n)?;
+            if p.is_remote() && !allow_remote {
+                return Err(ErrView::msg("invalid", format!("'{}' 는 외부 서버입니다. 소스 코드가 밖으로 나갑니다.", p.name)));
+            }
+            Some(p)
+        }
+        None => None,
+    };
+    let store = store_for(&st, id)?;
+    let client = st.llm.clone();
+    let run = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+    let cancel = Arc::new(AtomicBool::new(false));
+    st.analyses.lock().unwrap().insert(run, cancel.clone());
+    tauri::async_runtime::spawn(async move {
+        let emit = {
+            let app = app.clone();
+            move |p: Progress| {
+                let _ = app.emit("analysis-progress", p);
+            }
+        };
+        let on: sqls_analyze::run::OnEvent = {
+            let emit = emit.clone();
+            Arc::new(move |e: Event| emit(Progress::Event { run, event: e }))
+        };
+        let total = units.len();
+        let mut stop: Option<String> = None;
+        for (i, (src, spec)) in units.iter().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                stop = Some("중지했습니다".into());
+                break;
+            }
+            emit(Progress::Fetch { run, index: i, total, key: sqls_analyze::chunk::unit_key(&src.owner, &src.name, &src.unit_type), error: None });
+            let llm = cfg.as_ref().map(|c| Llm { client: &client, cfg: c });
+            if let Err(e) = analyze_unit(&store, src, spec.as_deref(), llm, &options, on.clone(), cancel.clone()).await {
+                if e.contains("모델 서버") || cancel.load(Ordering::Relaxed) {
+                    stop = Some(e);
+                    break;
+                }
+            }
+        }
+        let overview = store.read_integrated::<Integrated>("integrated.json").and_then(|g| g.overview);
+        let fin = match integrate::write_all(&store, overview) {
+            Ok((g, _)) => Progress::Finished { run, error: stop, units: g.units, nodes: g.nodes.len(), tables: g.tables.len(), findings: g.findings.len(), dir: store.root().display().to_string() },
+            Err(e) => Progress::Finished { run, error: Some(e.to_string()), units: 0, nodes: 0, tables: 0, findings: 0, dir: store.root().display().to_string() },
+        };
+        emit(fin);
+        if let Some(st) = tauri::Manager::try_state::<AppState>(&app) {
+            st.analyses.lock().unwrap().remove(&run);
+        }
+    });
+    Ok(run)
+}
+
 /// 멈춤 — 진행 중인 조각까지 저장하고 멈춘다
 #[tauri::command]
 pub fn analysis_cancel(st: State<'_, AppState>, run: u64) {

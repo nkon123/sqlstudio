@@ -131,6 +131,7 @@ export class AnalysisView {
   private jobsIn = h("input", { type: "number", value: "1", min: "1", max: "16", style: "width:48px", title: "동시에 물을 조각 수 (로컬 모델은 보통 1)" });
   private forceBox = h("input", { type: "checkbox" });
   private startBtn = h("button", { class: "primary" }, "분석 시작");
+  private procBtn = h("button", { title: "Pro*C(.pc) 소스가 있는 폴더를 분석 — EXEC SQL 의 테이블·프로시저 호출을 읽어 흐름도에 넣는다. 접속 계정이 테이블의 기본 스키마" }, "Pro*C 폴더…");
   private stopBtn = h("button", { class: "danger", disabled: true }, "중지");
   private statusEl = h("span", { class: "dbg-status" }, "");
   private bar = h("div", { class: "an-bar-fill" });
@@ -168,6 +169,7 @@ export class AnalysisView {
 
   constructor(private sessionId: () => number | undefined, private onClose: () => void) {
     this.startBtn.onclick = () => this.start();
+    this.procBtn.onclick = () => this.startProc();
     this.stopBtn.onclick = () => this.cancel();
     this.provSel.onchange = () => this.updateBadge();
     this.allBox.onchange = () => {
@@ -187,7 +189,7 @@ export class AnalysisView {
       h("label", { class: "check", title: "조각 하나의 최대 줄 수" }, "조각", this.linesIn, "줄"),
       h("label", { class: "check", title: "동시에 물을 조각 수" }, "동시", this.jobsIn),
       h("label", { class: "check", title: "저장된 결과가 있어도 다시 묻는다" }, this.forceBox, "다시"),
-      this.startBtn, this.stopBtn,
+      this.startBtn, this.procBtn, this.stopBtn,
       h("span", { class: "spacer" }), this.statusEl,
       h("button", { title: "결과 폴더 경로 복사", onclick: () => this.copyDir() }, "폴더"),
       h("button", { title: "에디터로 돌아간다", onclick: () => this.close() }, "닫기"));
@@ -212,7 +214,7 @@ export class AnalysisView {
     this.main = h("div", { class: "an-main" }, left);
     this.main.append(colSplitter(this.main, "analysis.col.units"), h("div", { class: "an-right" }, nav, this.content));
     // 가져온 결과를 볼 때는 DB 가 필요한 것을 끈다
-    this.liveOnly = [this.ownerIn, this.nameIn, listBtn, this.provSel, this.linesIn, this.jobsIn, this.forceBox, this.startBtn];
+    this.liveOnly = [this.ownerIn, this.nameIn, listBtn, this.provSel, this.linesIn, this.jobsIn, this.forceBox, this.startBtn, this.procBtn];
     this.el = h("div", { class: "debugger analysis", hidden: true }, toolbar,
       h("div", { class: "an-progress" }, this.bar), this.main);
   }
@@ -526,6 +528,37 @@ export class AnalysisView {
     this.total = units.length;
   }
 
+  /** Pro*C 폴더 분석 — .pc 파일마다 단위 하나. 접속(계정)이 있어야 한다 (테이블의 기본 스키마) */
+  private async startProc() {
+    if (this.set) return toast("가져온 결과를 보는 중입니다 — 분석하려면 '결과' 에서 '지금 접속한 DB' 를 고르세요", "error");
+    const id = this.sessionId();
+    if (id == null) return toast("먼저 접속하세요 — 접속 계정이 스키마 없는 테이블 이름의 스키마가 됩니다", "error");
+    const folder = await openDialog({ directory: true, multiple: false, title: "Pro*C 소스 폴더 (하위 폴더 포함)" });
+    if (!folder || Array.isArray(folder)) return;
+    const p = this.provider();
+    if (p?.remote) {
+      const ok = await confirmBox("외부로 소스 전송", `'${p.name}' 은 외부 서버입니다. 폴더의 Pro*C 소스가 이 PC 밖으로 나갑니다.
+
+사내 규정상 허용된 경우에만 진행하세요.`, "보내고 분석");
+      if (!ok) return;
+    }
+    const options = {
+      limits: { max_lines: Math.max(20, Number(this.linesIn.value) || 120), max_chars: Math.max(1000, (Number(this.linesIn.value) || 120) * 50) },
+      lang: "ko", jobs: Math.max(1, Number(this.jobsIn.value) || 1), force: this.forceBox.checked, rollup: true,
+    };
+    try {
+      this.run = await invoke<number>("analysis_proc_start", { id, folder, provider: p?.name ?? null, allowRemote: !!p?.remote, options });
+    } catch (e) {
+      return toast(errOf(e).message, "error");
+    }
+    this.startBtn.disabled = true;
+    this.procBtn.disabled = true;
+    this.stopBtn.disabled = false;
+    this.bar.style.width = "0";
+    this.statusEl.textContent = `시작 — Pro*C ${folder}`;
+    this.total = 1;
+  }
+
   private total = 0;
   private unitIndex = 0;
 
@@ -533,6 +566,7 @@ export class AnalysisView {
     if (p.run !== this.run) return;
     if (p.type === "fetch") {
       this.unitIndex = p.index;
+      this.total = p.total;
       if (p.error) toast(`${p.key}: ${p.error}`, "error");
       this.statusEl.textContent = `[${p.index + 1}/${p.total}] ${short(p.key)}`;
     } else if (p.type === "event") {
@@ -554,6 +588,7 @@ export class AnalysisView {
       void this.refreshSets();
       this.run = null;
       this.startBtn.disabled = false;
+      this.procBtn.disabled = false;
       this.stopBtn.disabled = true;
       this.bar.style.width = "100%";
       this.statusEl.textContent = `${p.error ? `${p.error} · ` : "끝 · "}단위 ${p.units} · 서브프로그램 ${p.nodes} · 테이블 ${p.tables} · 확인할 것 ${p.findings}`;

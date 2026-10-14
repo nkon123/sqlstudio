@@ -149,6 +149,7 @@ class Tab {
       onNeedMore: async () => (this.conn ? api.fetchMore(this.conn.id, 1000) : null),
       // 한 줄로 — 길면 줄임표, 전체는 풍선으로 (여러 줄로 늘어나 탭 줄이 높아지던 것)
       onStatus: (t) => { this.gridStatus.textContent = t; this.gridStatus.title = t; },
+      onContextMenu: (_r, _c, e) => app.gridMenu(this, e),
       onDirty: (n) => {
         this.applyBtn.textContent = n ? `적용 (${n})` : "적용";
         this.applyBtn.disabled = !n;
@@ -1555,6 +1556,34 @@ class App {
     const t = this.active;
     if (!t?.conn) return;
     showMenu(e.clientX, e.clientY, this.objectMenuItems(t, o, { x: e.clientX, y: e.clientY }));
+  }
+
+  /** 결과 그리드 우클릭: 건수 확인, 복사 */
+  gridMenu(t: Tab, e: MouseEvent) {
+    const q = t.lastQuery;
+    const n = t.grid.selectedRows().length;
+    showMenu(e.clientX, e.clientY, [
+      { label: "건수 확인", hint: "전체 행 수", disabled: !q || !t.conn || t.grid.isEditing(), run: () => void this.countResult(t) },
+      { sep: true },
+      { label: n > 1 ? `고른 셀 복사 (${n}행)` : "고른 셀 복사", hint: "Ctrl+C", run: () => navigator.clipboard.writeText(t.grid.selectionText()).catch(() => {}) },
+      { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(t.grid.selectionText(true)).catch(() => {}) },
+    ]);
+  }
+
+  /** 지금 결과를 만든 조회의 전체 건수 — 읽고 있는 결과(커서)를 건드리지 않고 사전 조회 세션으로 센다 */
+  private async countResult(t: Tab) {
+    const q = t.lastQuery;
+    if (!t.conn || !q) return;
+    const started = performance.now();
+    this.status("건수 세는 중…");
+    try {
+      const r = await api.countRows(t.conn.id, q.sql, q.binds);
+      const n = Number(r.rows).toLocaleString();
+      toast(`전체 ${n}행 (${(r.elapsed_ms / 1000).toFixed(1)}초)`, "ok", 6000);
+      this.status(`전체 ${n}행 · 세는 데 ${((performance.now() - started) / 1000).toFixed(1)}초`);
+    } catch (err) {
+      toast(`건수를 세지 못했습니다: ${errOf(err).message}`, "error");
+    }
   }
 
   /** 편집기에서 우클릭: 그 자리의 테이블 메뉴 + 편집 메뉴 */

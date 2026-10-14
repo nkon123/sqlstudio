@@ -629,6 +629,30 @@ pub async fn describe(st: State<'_, AppState>, id: u64, name: String) -> R<meta:
     Ok(d)
 }
 
+#[derive(Serialize)]
+pub struct CountView {
+    pub rows: String,
+    pub elapsed_ms: u64,
+}
+
+/// 결과 그리드의 전체 건수 — 실행한 조회를 `SELECT COUNT(*) FROM (…)` 로 센다.
+/// 사전 조회 세션(읽기 전용)으로 — 지금 결과를 읽고 있는 작업 세션의 커서를 건드리지 않는다
+#[tauri::command]
+pub async fn count_rows(st: State<'_, AppState>, id: u64, sql: String, binds: Vec<(String, Option<String>)>) -> R<CountView> {
+    let body = sql.trim().trim_end_matches(['/', ';']).trim_end();
+    let head = body.trim_start().split(|c: char| c.is_whitespace() || c == '(').find(|w| !w.is_empty()).unwrap_or("").to_uppercase();
+    if body.is_empty() || !matches!(head.as_str(), "SELECT" | "WITH") {
+        return Err(ErrView::msg("invalid", "조회(SELECT)의 결과만 셀 수 있습니다"));
+    }
+    let s = lookup_session(&st, id)?;
+    let started = std::time::Instant::now();
+    let page = s.query(&format!("SELECT COUNT(*) FROM (
+{body}
+)"), binds, 1).await?;
+    let rows = page.rows.first().and_then(|r| r.first().cloned().flatten()).unwrap_or_else(|| "0".into());
+    Ok(CountView { rows, elapsed_ms: started.elapsed().as_millis() as u64 })
+}
+
 /// 컬럼 영향도 — 이 컬럼을 쓰는 뷰·소스의 줄, 테이블만 쓰는 객체, 인덱스·제약·외래 키
 #[tauri::command]
 pub async fn column_usage(st: State<'_, AppState>, id: u64, table: String, column: String) -> R<meta::Usage> {

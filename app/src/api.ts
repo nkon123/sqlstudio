@@ -115,6 +115,8 @@ export const api = {
   listSchemas: (id: number) => invoke<string[]>("list_schemas", { id }),
   listObjects: (id: number, owner?: string, objectType?: string, nameLike?: string) =>
     invoke<ObjectEntry[]>("list_objects", { id, owner, objectType, nameLike }),
+  /** 결과의 전체 건수 (SELECT COUNT(*) FROM (…)) — 읽기 전용 사전 조회 세션으로 */
+  countRows: (id: number, sql: string, binds: [string, string | null][]) => invoke<{ rows: string; elapsed_ms: number }>("count_rows", { id, sql, binds }),
   describe: (id: number, name: string) => invoke<TableDesc>("describe", { id, name }),
   /** DB 에 묻지 않는 구조 (기억해 둔 것 또는 자동완성 캐시, partial) — 없으면 null */
   describeFast: (id: number, name: string) => invoke<TableDesc | null>("describe_fast", { id, name }),

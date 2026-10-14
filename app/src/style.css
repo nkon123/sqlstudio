@@ -197,7 +197,7 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .snippet { width: 100%; font: 12px var(--mono); }
 .cell-viewer textarea { width: min(900px, 80vw); height: 50vh; font: 12px var(--mono); }
 
-#toasts { position: fixed; right: 16px; bottom: 40px; display: flex; flex-direction: column; gap: 6px; z-index: 10; }
+#toasts { position: fixed; right: 16px; bottom: 40px; display: flex; flex-direction: column; gap: 6px; z-index: 2100; }
 .toast { padding: 8px 12px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 4px 16px rgba(0,0,0,.18); max-width: 420px; white-space: pre-wrap; }
 .toast.error { border-color: var(--danger); color: var(--danger); }
 .toast.ok { border-color: var(--ok); }
@@ -519,7 +519,7 @@ dialog.imp { width: min(1100px, 95vw); }
 .export-sel { font-size: 12px; padding: 1px 4px; }
 
 /* ── 우클릭 메뉴 ── */
-.ctx-menu { position: fixed; z-index: 200; min-width: 200px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+.ctx-menu { position: fixed; z-index: 2000; /* CodeMirror 찾기 패널(300)·자동완성 위로 */  min-width: 200px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
   box-shadow: 0 6px 22px rgba(0,0,0,.2); padding: 4px 0; font-size: 12px; user-select: none; }
 .ctx-item { display: flex; align-items: center; gap: 16px; padding: 4px 12px; cursor: default; white-space: nowrap; }
 .ctx-item.on { background: var(--sel); }

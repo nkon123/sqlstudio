@@ -484,6 +484,12 @@ class App {
     this.browserFilter.addEventListener("input", () => { clearTimeout(ft); ft = window.setTimeout(() => this.loadObjects(), 250); });
     // Ctrl+K: AI 입력칸으로 (오른쪽 영역이 접혀 있으면 펼친다). AI 입력칸에서 Esc: 편집기로
     window.addEventListener("keydown", (e) => {
+      // 웹뷰의 기본 새로고침(Ctrl+R · Ctrl+Shift+R)은 화면을 통째로 다시 불러와 쓰던 글이 날아간다 — 막는다
+      if ((e.ctrlKey || e.metaKey) && e.code === "KeyR") {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       // F1: 단축키 목록 (대화상자가 떠 있으면 무시)
       if (e.key === "F1" && !e.ctrlKey && !e.altKey && !document.querySelector("dialog[open]")) {
         e.preventDefault();

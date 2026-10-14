@@ -449,7 +449,7 @@ fn func_name(header: &str) -> Option<String> {
 }
 
 /// 주석을 걷고 공백을 한 칸으로 (문자열은 그대로)
-fn clean_sql(raw: &str) -> String {
+pub(crate) fn clean_sql(raw: &str) -> String {
     let c: Vec<char> = raw.chars().collect();
     let mut o = String::new();
     let mut i = 0;
@@ -496,7 +496,7 @@ fn clean_sql(raw: &str) -> String {
 }
 
 /// 호스트 변수를 바인드로: `:a:ind` `:a INDICATOR :ind` → `:a`, `:rec.f` → `:rec_f`, `:arr[i]` → `:arr`
-fn hostvars(s: &str) -> String {
+pub(crate) fn hostvars(s: &str) -> String {
     let c: Vec<char> = s.chars().collect();
     let mut o = String::new();
     let mut i = 0;

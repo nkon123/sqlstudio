@@ -22,6 +22,7 @@ pub mod proc;
 pub mod run;
 pub mod source;
 pub mod store;
+pub mod xmlquery;
 
 /// 접속 프로필의 기본 결과 폴더 — 앱과 CLI 가 같은 곳을 쓴다 (설정 파일 옆 `analysis/<프로필>`)
 pub fn default_dir(profile: &str) -> std::path::PathBuf {

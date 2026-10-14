@@ -174,8 +174,40 @@ pub fn from_proc(paths: &[PathBuf], owner: &str) -> std::io::Result<Vec<(UnitSou
     Ok(out)
 }
 
+/// 폴더·파일에서 XML 쿼리 파일(Anyframe `<query id><statement>`)을 찾아 단위로 (`XQ_<파일이름>`). `<query>` 가 없는 XML 은 건너뛴다.
+pub fn from_xml(paths: &[PathBuf], owner: &str) -> std::io::Result<Vec<(UnitSource, Option<String>)>> {
+    let mut files = Vec::new();
+    for p in paths {
+        collect_with(p, &mut files, &|f| crate::xmlquery::is_xml_file(f))?;
+    }
+    files.sort();
+    let mut used: std::collections::HashSet<String> = Default::default();
+    let mut out = Vec::new();
+    for f in files {
+        let text = decode(&std::fs::read(&f)?);
+        if !text.contains("<query") {
+            continue;
+        }
+        let mut name = crate::xmlquery::unit_name(&f);
+        let mut n = 1;
+        while used.contains(&name) {
+            n += 1;
+            name = format!("{}_{n}", crate::xmlquery::unit_name(&f));
+        }
+        if let Some(t) = crate::xmlquery::translate(&text, owner, &name) {
+            used.insert(name);
+            out.push((t.unit, None));
+        }
+    }
+    Ok(out)
+}
+
 fn collect_with(p: &Path, out: &mut Vec<PathBuf>, keep: &dyn Fn(&Path) -> bool) -> std::io::Result<()> {
     if p.is_dir() {
+        // 받아 둔 패키지·빌드 결과 폴더는 건너뛴다 (수만 개 파일을 읽지 않게)
+        if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| matches!(n, "node_modules" | ".git" | ".svn" | "target")) {
+            return Ok(());
+        }
         for e in std::fs::read_dir(p)? {
             collect_with(&e?.path(), out, keep)?;
         }

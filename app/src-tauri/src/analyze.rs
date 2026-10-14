@@ -233,7 +233,7 @@ pub async fn analysis_start(
     Ok(run)
 }
 
-/// Pro*C 폴더 분석 — 폴더의 .pc 파일을 읽어 파일 하나 = 단위 하나로. 접속 계정이 스키마 없는 테이블의 기본 스키마.
+/// 코드 폴더 분석 — Pro*C(.pc) 와 XML 쿼리 파일(Anyframe)을 읽어 파일 하나 = 단위 하나로. 접속 계정이 스키마 없는 테이블의 기본 스키마.
 /// 진행·끝은 analysis_start 와 같은 "analysis-progress" 이벤트
 #[tauri::command]
 pub async fn analysis_proc_start(
@@ -249,9 +249,11 @@ pub async fn analysis_proc_start(
         let g = st.sessions.lock().unwrap();
         g.get(&id).map(|s| s.session.info().user.clone()).ok_or_else(|| ErrView::msg("session_closed", "세션이 닫혀 있습니다"))?
     };
-    let units = source::from_proc(&[std::path::PathBuf::from(&folder)], &owner).map_err(|e| ErrView::msg("io", format!("{folder}: {e}")))?;
+    let root = [std::path::PathBuf::from(&folder)];
+    let mut units = source::from_proc(&root, &owner).map_err(|e| ErrView::msg("io", format!("{folder}: {e}")))?;
+    units.extend(source::from_xml(&root, &owner).map_err(|e| ErrView::msg("io", format!("{folder}: {e}")))?);
     if units.is_empty() {
-        return Err(ErrView::msg("invalid", "이 폴더에서 EXEC SQL 이 있는 Pro*C 파일(.pc, .pcc)을 찾지 못했습니다"));
+        return Err(ErrView::msg("invalid", "이 폴더에서 EXEC SQL 이 있는 Pro*C 파일(.pc, .pcc)이나 <query> 가 있는 XML 쿼리 파일을 찾지 못했습니다"));
     }
     let cfg = match &provider {
         Some(n) => {

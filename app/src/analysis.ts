@@ -131,7 +131,7 @@ export class AnalysisView {
   private jobsIn = h("input", { type: "number", value: "1", min: "1", max: "16", style: "width:48px", title: "동시에 물을 조각 수 (로컬 모델은 보통 1)" });
   private forceBox = h("input", { type: "checkbox" });
   private startBtn = h("button", { class: "primary" }, "분석 시작");
-  private procBtn = h("button", { title: "Pro*C(.pc) 소스가 있는 폴더를 분석 — EXEC SQL 의 테이블·프로시저 호출을 읽어 흐름도에 넣는다. 접속 계정이 테이블의 기본 스키마" }, "Pro*C 폴더…");
+  private procBtn = h("button", { title: "Pro*C(.pc)와 XML 쿼리 파일(Anyframe <query><statement>)이 있는 폴더를 분석 — 쿼리의 테이블·프로시저 호출을 읽어 흐름도에 넣는다. 접속 계정이 테이블의 기본 스키마" }, "코드 폴더…");
   private stopBtn = h("button", { class: "danger", disabled: true }, "중지");
   private statusEl = h("span", { class: "dbg-status" }, "");
   private bar = h("div", { class: "an-bar-fill" });
@@ -533,11 +533,11 @@ export class AnalysisView {
     if (this.set) return toast("가져온 결과를 보는 중입니다 — 분석하려면 '결과' 에서 '지금 접속한 DB' 를 고르세요", "error");
     const id = this.sessionId();
     if (id == null) return toast("먼저 접속하세요 — 접속 계정이 스키마 없는 테이블 이름의 스키마가 됩니다", "error");
-    const folder = await openDialog({ directory: true, multiple: false, title: "Pro*C 소스 폴더 (하위 폴더 포함)" });
+    const folder = await openDialog({ directory: true, multiple: false, title: "Pro*C·XML 쿼리 소스 폴더 (하위 폴더 포함)" });
     if (!folder || Array.isArray(folder)) return;
     const p = this.provider();
     if (p?.remote) {
-      const ok = await confirmBox("외부로 소스 전송", `'${p.name}' 은 외부 서버입니다. 폴더의 Pro*C 소스가 이 PC 밖으로 나갑니다.
+      const ok = await confirmBox("외부로 소스 전송", `'${p.name}' 은 외부 서버입니다. 폴더의 소스가 이 PC 밖으로 나갑니다.
 
 사내 규정상 허용된 경우에만 진행하세요.`, "보내고 분석");
       if (!ok) return;
@@ -555,7 +555,7 @@ export class AnalysisView {
     this.procBtn.disabled = true;
     this.stopBtn.disabled = false;
     this.bar.style.width = "0";
-    this.statusEl.textContent = `시작 — Pro*C ${folder}`;
+    this.statusEl.textContent = `시작 — ${folder}`;
     this.total = 1;
   }
 

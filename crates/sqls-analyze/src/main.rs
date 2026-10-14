@@ -252,6 +252,7 @@ async fn cmd_run(a: &Args) -> Result<(), String> {
         units = source::from_files(&a.files, &owner).map_err(|e| e.to_string())?;
         // Pro*C(.pc) 도 함께 — 그 프로그램이 접속하는 계정이 --owner
         units.extend(source::from_proc(&a.files, &owner).map_err(|e| e.to_string())?);
+        units.extend(source::from_xml(&a.files, &owner).map_err(|e| e.to_string())?);
     } else if let Some(c) = &a.connection {
         let p = cfg.profile(c).ok_or(format!("접속 '{c}' 이 설정에 없습니다"))?;
         let pw = p.stored_password().ok_or(format!("비밀번호가 없습니다 — 환경변수 {} 를 두거나, 앱에서 '비밀번호 저장' 으로 접속해 두세요", password_env_name(&p.name)))?;

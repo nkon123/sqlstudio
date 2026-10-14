@@ -293,3 +293,35 @@ END;".into() },
     let sig = &p.chunks[0].signature;
     assert_eq!(trigger_target("A", sig).map(|x| x.0), Some("A.EMP".into()), "{sig}");
 }
+
+#[test]
+fn renamed_profile_adopts_the_only_orphan_result() {
+    use std::fs;
+    let root = std::env::temp_dir().join(format!("sqls-adopt-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let make = |name: &str, imported: bool| {
+        let d = root.join(name);
+        fs::create_dir_all(d.join("units").join("A")).unwrap();
+        if imported { fs::write(d.join("imported.json"), "{}").unwrap(); }
+    };
+    make("OLD_NAME", false);
+    make("받은것", true);
+    make("QA", false);
+    let profiles = vec!["QA".to_string(), "NEW_NAME".to_string()];
+    // 이미 결과가 있으면 건드리지 않는다
+    assert_eq!(crate::adopt_renamed_in(&root, "QA", &profiles), None);
+    // 새 이름: 어느 접속의 것도 아니고 가져온 것도 아닌 OLD_NAME 하나뿐 → 이어 붙인다 (빈 폴더가 먼저 만들어져 있어도)
+    fs::create_dir_all(root.join("NEW_NAME").join("units")).unwrap();
+    assert_eq!(crate::adopt_renamed_in(&root, "NEW_NAME", &profiles).as_deref(), Some("OLD_NAME"));
+    assert!(root.join("NEW_NAME").join("units").join("A").is_dir());
+    assert!(!root.join("OLD_NAME").exists());
+    assert!(root.join("받은것").exists());
+    // 더는 고아가 없다
+    let _ = fs::remove_dir_all(root.join("NEW_NAME"));
+    assert_eq!(crate::adopt_renamed_in(&root, "NEW_NAME", &profiles), None);
+    // 고아가 둘이면 고르지 않는다
+    make("X1", false);
+    make("X2", false);
+    assert_eq!(crate::adopt_renamed_in(&root, "NEW_NAME", &profiles), None);
+    let _ = fs::remove_dir_all(&root);
+}

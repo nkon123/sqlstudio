@@ -131,6 +131,18 @@ pub fn save_profile(st: State<'_, AppState>, profile: Profile, original_name: Op
         if !key.eq_ignore_ascii_case(&profile.name) && cfg.profile(&profile.name).is_some() {
             return Err(ErrView::msg("invalid", format!("같은 이름의 접속이 있습니다: {}", profile.name)));
         }
+        // 이름을 바꾸면 그 이름으로 저장된 분석 결과 폴더도 따라 옮긴다 (안 그러면 '분석한 게 없다'로 보인다)
+        if key != profile.name {
+            let from = sqls_analyze::default_dir(&key);
+            let to = sqls_analyze::default_dir(&profile.name);
+            if from != to && from.is_dir() && !to.join("integrated").exists() {
+                let _ = std::fs::remove_dir(to.join("units"));
+                let _ = std::fs::remove_dir(&to);
+                if let Err(e) = std::fs::rename(&from, &to) {
+                    tracing::warn!("분석 결과 폴더를 옮기지 못했습니다: {e}");
+                }
+            }
+        }
         match cfg.connections.iter_mut().find(|p| p.name.eq_ignore_ascii_case(&key)) {
             Some(p) => *p = profile,
             None => cfg.connections.push(profile),

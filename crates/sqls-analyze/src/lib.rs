@@ -41,5 +41,41 @@ pub fn safe_set_name(name: &str) -> String {
     if s.is_empty() { "_".into() } else { s }
 }
 
+fn has_results(dir: &std::path::Path) -> bool {
+    dir.join("integrated").is_dir() || std::fs::read_dir(dir.join("units")).map(|mut d| d.next().is_some()).unwrap_or(false)
+}
+
+/// 접속 이름을 바꾸면 그 이름의 결과 폴더가 없어 '분석한 게 없다'로 보인다 — 옛 이름으로 남은 결과를 이어 붙인다.
+/// 이 접속의 결과가 없고, 어느 접속의 것도 아닌(가져온 것이 아닌) 결과 폴더가 **딱 하나**일 때만 (여럿이면 어느 것인지 몰라 건드리지 않는다).
+/// 이어 붙였으면 옛 폴더 이름
+pub fn adopt_renamed(profile: &str, profiles: &[String]) -> Option<String> {
+    adopt_renamed_in(&analysis_root(), profile, profiles)
+}
+
+pub fn adopt_renamed_in(root: &std::path::Path, profile: &str, profiles: &[String]) -> Option<String> {
+    let target = root.join(profile.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_"));
+    if has_results(&target) {
+        return None;
+    }
+    let owned: Vec<std::ffi::OsString> = profiles
+        .iter()
+        .map(|p| std::ffi::OsString::from(p.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")))
+        .collect();
+    let orphans: Vec<std::path::PathBuf> = std::fs::read_dir(root)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir() && p != &target && !owned.iter().any(|o| p.file_name() == Some(o.as_os_str())))
+        .filter(|p| !p.join("imported.json").exists() && has_results(p))
+        .collect();
+    let [from] = orphans.as_slice() else { return None };
+    // Store::open 이 만들어 둔 빈 폴더가 있으면 치운다 (결과가 없는 것만)
+    if target.exists() {
+        let _ = std::fs::remove_dir(target.join("units"));
+        let _ = std::fs::remove_dir(&target);
+    }
+    std::fs::rename(from, &target).ok()?;
+    Some(from.file_name()?.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests;

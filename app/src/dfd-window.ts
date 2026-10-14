@@ -5,13 +5,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { errOf } from "./api";
 import { DfdView } from "./dfd";
 import type { DfdSource } from "./dfd-model";
-import { h } from "./ui";
+import { applyTheme, h } from "./ui";
 
 const q = new URLSearchParams(location.search);
 const profile = q.get("profile") ?? "";
 const root = document.getElementById("app")!;
 
 async function start() {
+  applyTheme();
   let g: DfdSource | null;
   try {
     g = await invoke<DfdSource | null>("analysis_result_for", { profile });

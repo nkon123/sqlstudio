@@ -5,6 +5,7 @@
   "windows": ["dfd-*"],
   "permissions": [
     "core:default",
+    "core:window:allow-set-theme",
     "dialog:allow-save",
     "dialog:allow-message"
   ]

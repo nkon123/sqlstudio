@@ -47,4 +47,11 @@ export const ORACLE = SQLDialect.define({
 /** 내장 함수(builtin) 색 — 기본 강조에는 없다 */
 export const oracleHighlight = HighlightStyle.define([
   { tag: t.standard(t.name), color: "var(--hl-fn)" },
+  // 화면 테마(밝게·어둡게)에 따라 바뀌도록 색은 변수로
+  { tag: [t.keyword, t.operatorKeyword, t.controlKeyword, t.definitionKeyword, t.modifier], color: "var(--hl-kw)" },
+  { tag: [t.string, t.special(t.string)], color: "var(--hl-str)" },
+  { tag: [t.number, t.bool, t.null], color: "var(--hl-num)" },
+  { tag: [t.comment, t.lineComment, t.blockComment], color: "var(--hl-cm)", fontStyle: "italic" },
+  { tag: [t.typeName, t.className], color: "var(--hl-type)" },
+  { tag: [t.operator, t.compareOperator, t.arithmeticOperator], color: "var(--hl-op)" },
 ]);

@@ -28,7 +28,7 @@ import { openHistory } from "./history";
 import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
 import { DEFAULT_SNIPPETS, loadSnippets, parse as parseSnippets, saveSnippets, snippets, type Snip } from "./snippets";
-import { alertBox, bindBox, confirmBox, field, h, modal, passwordBox, toast } from "./ui";
+import { alertBox, applyTheme, bindBox, confirmBox, field, h, modal, passwordBox, themePref, toast, type ThemePref } from "./ui";
 
 type Conn = Connected & { profile: string; /** 접속한 때 (ms) */ at?: number };
 type Pane = "result" | "output" | "plan" | "desc";
@@ -485,6 +485,7 @@ class App {
   }
 
   async start() {
+    applyTheme();
     // 자동완성 캐시 적재 진행 (프로필마다 백그라운드)
     listen<{ profile: string; phase: string; objects: number; columns: number; error?: string | null }>("completion-status", (e) => {
       if (this.active?.conn?.profile.toUpperCase() !== e.payload.profile.toUpperCase()) return;
@@ -1788,7 +1789,11 @@ class App {
       histDir.textContent = `위치: ${s.dir} · 최근 ${s.keep_months}달만 남김`;
     }).catch(() => {});
     histOn.onchange = () => invoke("set_history_enabled", { enabled: histOn.checked }).catch((err) => toast(errOf(err).message, "error"));
+    const theme = sel(themePref(), [["system", "시스템 따름 (Windows 설정)"], ["light", "밝게"], ["dark", "어둡게"]]);
+    theme.onchange = () => applyTheme(theme.value as ThemePref);
     return h("div", { class: "form" },
+      h("h3", {}, "화면"),
+      field("화면 테마", theme, "바꾸면 바로 적용되고 이 PC 에 기억합니다. 흐름도 창도 따라갑니다"),
       h("h3", {}, "SQL 포맷 (Ctrl+Shift+F)"),
       field("키워드", kw), field("들여쓰기", ind), field("AND / OR 위치", logic),
       field("괄호 식 한 줄 최대 길이", width, "이보다 길면 여러 줄로 나눕니다"),

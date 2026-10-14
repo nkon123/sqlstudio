@@ -131,6 +131,39 @@ export async function bindBox(names: string[]): Promise<[string, string | null][
   return out;
 }
 
+export type ThemePref = "system" | "light" | "dark";
+
+/** 화면 테마 — 이 PC 에 기억한다. 시스템 따름이면 Windows 설정이 바뀔 때 따라간다 */
+export function themePref(): ThemePref {
+  try {
+    const v = localStorage.getItem("ui.theme");
+    if (v === "light" || v === "dark" || v === "system") return v;
+  } catch { /* 기본 */ }
+  return "system";
+}
+
+let themeWatch: MediaQueryList | null = null;
+
+export function applyTheme(pref: ThemePref = themePref()) {
+  try { localStorage.setItem("ui.theme", pref); } catch { /* 기억 못 해도 된다 */ }
+  const mq = window.matchMedia("(prefers-color-scheme: dark)");
+  const resolve = () => {
+    const dark = pref === "dark" || (pref === "system" && mq.matches);
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    // 창 머리(제목 표시줄)도 맞춘다 — 못 해도 화면은 바뀐다
+    import("@tauri-apps/api/window").then(({ getCurrentWindow }) => getCurrentWindow().setTheme(pref === "system" ? null : pref)).catch(() => {});
+  };
+  if (themeWatch) themeWatch.onchange = null;
+  themeWatch = mq;
+  mq.onchange = () => { if (themePref() === "system") resolve(); };
+  resolve();
+  // 다른 창(흐름도)에도 알린다 — 같은 저장소를 본다
+  window.dispatchEvent(new CustomEvent("sqls-theme"));
+}
+
+// 다른 창에서 테마를 바꾸면 따라간다
+window.addEventListener("storage", (e) => { if (e.key === "ui.theme") applyTheme(themePref()); });
+
 export function toast(text: string, kind: "info" | "error" | "ok" = "info", ms = 3500) {
   let host = document.getElementById("toasts");
   if (!host) {

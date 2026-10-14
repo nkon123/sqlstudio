@@ -15,6 +15,8 @@ import { showMenu, type MenuItem } from "./ctxmenu";
 
 interface UnitRef { owner: string; name: string; unit_type: string }
 interface UnitRow extends UnitRef {
+  /** 코드 폴더 목록일 때: 폴더 기준 경로 · 파일 경로 · 종류 · 함수/쿼리 수 */
+  rel?: string; path?: string; kind?: string; count?: number;
   analyzed_at?: number | null; chunks?: number | null; failed?: number | null;
   model?: string | null; summary?: string | null; warning?: string | null;
 }
@@ -131,7 +133,12 @@ export class AnalysisView {
   private jobsIn = h("input", { type: "number", value: "1", min: "1", max: "16", style: "width:48px", title: "동시에 물을 조각 수 (로컬 모델은 보통 1)" });
   private forceBox = h("input", { type: "checkbox" });
   private startBtn = h("button", { class: "primary" }, "분석 시작");
-  private procBtn = h("button", { title: "Pro*C(.pc)와 XML 쿼리 파일(Anyframe <query><statement>)이 있는 폴더를 분석 — 쿼리의 테이블·프로시저 호출을 읽어 흐름도에 넣는다. 접속 계정이 테이블의 기본 스키마" }, "코드 폴더…");
+  /** 분석 대상: DB 의 PL/SQL 단위, 또는 폴더의 Pro*C·XML 쿼리 파일 */
+  private mode: "db" | "code" = "db";
+  private modeSel = h("select", { title: "분석할 대상" }, h("option", { value: "db" }, "DB 프로시저"), h("option", { value: "code" }, "코드 폴더 (Pro*C·XML)"));
+  private folder = "";
+  private folderIn = h("input", { placeholder: "Pro*C(.pc)·XML 쿼리 파일이 있는 폴더 (하위 폴더 포함)", readonly: true, style: "width:300px", hidden: true });
+  private folderBtn = h("button", { hidden: true, title: "폴더를 고르면 파일 목록만 읽습니다 — 분석은 목록에서 고른 뒤 '분석 시작'" }, "폴더 고르기…");
   private stopBtn = h("button", { class: "danger", disabled: true }, "중지");
   private statusEl = h("span", { class: "dbg-status" }, "");
   private bar = h("div", { class: "an-bar-fill" });
@@ -169,7 +176,10 @@ export class AnalysisView {
 
   constructor(private sessionId: () => number | undefined, private onClose: () => void) {
     this.startBtn.onclick = () => this.start();
-    this.procBtn.onclick = () => this.startProc();
+    try { this.folder = localStorage.getItem("analysis.codeFolder") ?? ""; } catch { /* 기억 못 해도 된다 */ }
+    this.folderIn.value = this.folder;
+    this.modeSel.onchange = () => this.setMode(this.modeSel.value === "code" ? "code" : "db");
+    this.folderBtn.onclick = () => this.pickFolder();
     this.stopBtn.onclick = () => this.cancel();
     this.provSel.onchange = () => this.updateBadge();
     this.allBox.onchange = () => {
@@ -184,12 +194,12 @@ export class AnalysisView {
       h("button", { title: "보고 있는 분석 결과를 파일 하나(.sqla)로 — 분석할 수 없는 곳에서 '가져오기' 로 본다", onclick: () => this.exportSet() }, "내보내기"),
       h("button", { title: "다른 곳에서 내보낸 분석 결과(.sqla)를 가져와 접속 없이 본다", onclick: () => this.importSet() }, "가져오기"),
       h("span", { class: "sep" }),
-      this.ownerIn, this.nameIn, listBtn, h("span", { class: "sep" }),
+      this.modeSel, this.ownerIn, this.nameIn, this.folderIn, this.folderBtn, listBtn, h("span", { class: "sep" }),
       this.provSel, this.badge,
       h("label", { class: "check", title: "조각 하나의 최대 줄 수" }, "조각", this.linesIn, "줄"),
       h("label", { class: "check", title: "동시에 물을 조각 수" }, "동시", this.jobsIn),
       h("label", { class: "check", title: "저장된 결과가 있어도 다시 묻는다" }, this.forceBox, "다시"),
-      this.startBtn, this.procBtn, this.stopBtn,
+      this.startBtn, this.stopBtn,
       h("span", { class: "spacer" }), this.statusEl,
       h("button", { title: "결과 폴더 경로 복사", onclick: () => this.copyDir() }, "폴더"),
       h("button", { title: "에디터로 돌아간다", onclick: () => this.close() }, "닫기"));
@@ -214,7 +224,7 @@ export class AnalysisView {
     this.main = h("div", { class: "an-main" }, left);
     this.main.append(colSplitter(this.main, "analysis.col.units"), h("div", { class: "an-right" }, nav, this.content));
     // 가져온 결과를 볼 때는 DB 가 필요한 것을 끈다
-    this.liveOnly = [this.ownerIn, this.nameIn, listBtn, this.provSel, this.linesIn, this.jobsIn, this.forceBox, this.startBtn, this.procBtn];
+    this.liveOnly = [this.ownerIn, this.nameIn, listBtn, this.provSel, this.linesIn, this.jobsIn, this.forceBox, this.startBtn, this.modeSel, this.folderBtn];
     this.el = h("div", { class: "debugger analysis", hidden: true }, toolbar,
       h("div", { class: "an-progress" }, this.bar), this.main);
   }
@@ -401,6 +411,22 @@ export class AnalysisView {
       this.statusEl.textContent = "";
       return toast("접속하거나, '가져오기' 로 다른 곳에서 내보낸 결과를 여세요", "info", 5000);
     }
+    if (this.mode === "code") {
+      if (!this.folder) { this.rows = []; this.renderList(); this.statusEl.textContent = "'폴더 고르기…' 로 소스 폴더를 고르세요"; return; }
+      this.statusEl.textContent = "파일을 읽는 중…";
+      try {
+        this.rows = await invoke<UnitRow[]>("analysis_code_list", { id, folder: this.folder });
+        this.statusEl.textContent = `분석할 수 있는 파일 ${this.rows.length}개 (Pro*C·XML 쿼리) — 체크해서 '분석 시작'`;
+      } catch (e) {
+        this.rows = [];
+        this.statusEl.textContent = "";
+        this.renderList();
+        return toast(errOf(e).message, "error");
+      }
+      if (!this.checked.size) for (const r of this.rows) if (!r.analyzed_at && !r.warning) this.checked.add(keyOf(r));
+      this.renderList();
+      return;
+    }
     this.statusEl.textContent = "목록을 읽는 중…";
     try {
       this.rows = await invoke<UnitRow[]>("analysis_list", { id, owner: this.ownerIn.value.trim() || null, nameLike: this.nameIn.value.trim() || null });
@@ -418,6 +444,11 @@ export class AnalysisView {
     const rows = this.rows.map((r) => {
       const k = keyOf(r);
       const state = r.warning ? "읽을 수 없음" : r.analyzed_at ? `${r.chunks ?? 0}조각${r.failed ? ` · 실패 ${r.failed}` : ""}` : "—";
+      if (r.path) {
+        const what = r.kind === "XML 쿼리" ? `쿼리 ${r.count ?? 0}개` : `함수 ${r.count ?? 0}개`;
+        return [this.checked.has(k) ? "✓" : "", r.kind ?? "", r.rel ?? r.name, r.analyzed_at ? `${state} · ${what}` : what,
+          r.analyzed_at ? when(r.analyzed_at) : "", r.analyzed_at ? (r.model ?? "정적") : "", k];
+      }
       return [this.checked.has(k) ? "✓" : "", TYPE_LABEL[r.unit_type] ?? r.unit_type, r.name, state,
         r.analyzed_at ? when(r.analyzed_at) : "", r.analyzed_at ? (r.model ?? "정적") : "", k];
     });
@@ -503,8 +534,9 @@ export class AnalysisView {
     if (this.set) return toast("가져온 결과를 보는 중입니다 — 분석하려면 '결과' 에서 '지금 접속한 DB' 를 고르세요", "error");
     const id = this.sessionId();
     if (id == null) return toast("먼저 접속하세요", "error");
-    const units = this.rows.filter((r) => this.checked.has(keyOf(r))).map(({ owner, name, unit_type }) => ({ owner, name, unit_type }));
-    if (!units.length) return toast("분석할 단위를 체크하세요", "error");
+    const picked = this.rows.filter((r) => this.checked.has(keyOf(r)));
+    const units = picked.map(({ owner, name, unit_type }) => ({ owner, name, unit_type }));
+    if (!units.length) return toast(this.mode === "code" ? "분석할 파일을 체크하세요" : "분석할 단위를 체크하세요", "error");
     const p = this.provider();
     if (p?.remote) {
       const ok = await confirmBox("외부로 소스 전송",
@@ -517,7 +549,9 @@ export class AnalysisView {
       lang: "ko", jobs: Math.max(1, Number(this.jobsIn.value) || 1), force: this.forceBox.checked, rollup: true,
     };
     try {
-      this.run = await invoke<number>("analysis_start", { id, units, provider: p?.name ?? null, allowRemote: !!p?.remote, options });
+      this.run = this.mode === "code"
+        ? await invoke<number>("analysis_code_start", { id, folder: this.folder, paths: picked.map((r) => r.path), provider: p?.name ?? null, allowRemote: !!p?.remote, options })
+        : await invoke<number>("analysis_start", { id, units, provider: p?.name ?? null, allowRemote: !!p?.remote, options });
     } catch (e) {
       return toast(errOf(e).message, "error");
     }
@@ -528,35 +562,29 @@ export class AnalysisView {
     this.total = units.length;
   }
 
-  /** Pro*C 폴더 분석 — .pc 파일마다 단위 하나. 접속(계정)이 있어야 한다 (테이블의 기본 스키마) */
-  private async startProc() {
-    if (this.set) return toast("가져온 결과를 보는 중입니다 — 분석하려면 '결과' 에서 '지금 접속한 DB' 를 고르세요", "error");
-    const id = this.sessionId();
-    if (id == null) return toast("먼저 접속하세요 — 접속 계정이 스키마 없는 테이블 이름의 스키마가 됩니다", "error");
-    const folder = await openDialog({ directory: true, multiple: false, title: "Pro*C·XML 쿼리 소스 폴더 (하위 폴더 포함)" });
-    if (!folder || Array.isArray(folder)) return;
-    const p = this.provider();
-    if (p?.remote) {
-      const ok = await confirmBox("외부로 소스 전송", `'${p.name}' 은 외부 서버입니다. 폴더의 소스가 이 PC 밖으로 나갑니다.
+  private setMode(m: "db" | "code") {
+    this.mode = m;
+    this.modeSel.value = m;
+    const code = m === "code";
+    this.ownerIn.hidden = code;
+    this.nameIn.hidden = code;
+    this.folderIn.hidden = !code;
+    this.folderBtn.hidden = !code;
+    this.checked.clear();
+    this.rows = [];
+    this.gridOf = null;
+    void this.load();
+  }
 
-사내 규정상 허용된 경우에만 진행하세요.`, "보내고 분석");
-      if (!ok) return;
-    }
-    const options = {
-      limits: { max_lines: Math.max(20, Number(this.linesIn.value) || 120), max_chars: Math.max(1000, (Number(this.linesIn.value) || 120) * 50) },
-      lang: "ko", jobs: Math.max(1, Number(this.jobsIn.value) || 1), force: this.forceBox.checked, rollup: true,
-    };
-    try {
-      this.run = await invoke<number>("analysis_proc_start", { id, folder, provider: p?.name ?? null, allowRemote: !!p?.remote, options });
-    } catch (e) {
-      return toast(errOf(e).message, "error");
-    }
-    this.startBtn.disabled = true;
-    this.procBtn.disabled = true;
-    this.stopBtn.disabled = false;
-    this.bar.style.width = "0";
-    this.statusEl.textContent = `시작 — ${folder}`;
-    this.total = 1;
+  /** 폴더 고르기 — 목록만 읽는다 (분석은 고른 뒤 '분석 시작') */
+  private async pickFolder() {
+    const f = await openDialog({ directory: true, multiple: false, title: "Pro*C·XML 쿼리 소스 폴더 (하위 폴더 포함)", defaultPath: this.folder || undefined });
+    if (!f || Array.isArray(f)) return;
+    this.folder = f;
+    this.folderIn.value = f;
+    try { localStorage.setItem("analysis.codeFolder", f); } catch { /* 기억 못 해도 된다 */ }
+    this.checked.clear();
+    await this.load();
   }
 
   private total = 0;
@@ -588,7 +616,6 @@ export class AnalysisView {
       void this.refreshSets();
       this.run = null;
       this.startBtn.disabled = false;
-      this.procBtn.disabled = false;
       this.stopBtn.disabled = true;
       this.bar.style.width = "100%";
       this.statusEl.textContent = `${p.error ? `${p.error} · ` : "끝 · "}단위 ${p.units} · 서브프로그램 ${p.nodes} · 테이블 ${p.tables} · 확인할 것 ${p.findings}`;

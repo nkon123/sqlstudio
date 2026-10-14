@@ -233,27 +233,91 @@ pub async fn analysis_start(
     Ok(run)
 }
 
-/// 코드 폴더 분석 — Pro*C(.pc) 와 XML 쿼리 파일(Anyframe)을 읽어 파일 하나 = 단위 하나로. 접속 계정이 스키마 없는 테이블의 기본 스키마.
-/// 진행·끝은 analysis_start 와 같은 "analysis-progress" 이벤트
+#[derive(Serialize)]
+pub struct CodeRow {
+    /// 폴더 기준 상대 경로 (화면에 보이는 이름)
+    rel: String,
+    /// 파일 전체 경로 — 분석할 파일을 고를 때의 키
+    path: String,
+    kind: &'static str,
+    /// 함수(Pro*C)·쿼리(XML) 수
+    count: usize,
+    #[serde(flatten)]
+    row: UnitRow,
+}
+
+fn session_user(st: &AppState, id: u64) -> R<String> {
+    let g = st.sessions.lock().unwrap();
+    g.get(&id).map(|s| s.session.info().user.clone()).ok_or_else(|| ErrView::msg("session_closed", "세션이 닫혀 있습니다"))
+}
+
+/// 코드 폴더의 분석 대상 목록 — Pro*C(.pc) 와 XML 쿼리 파일(Anyframe). 파일을 읽기만 하고 분석은 하지 않는다 (저장된 결과 상태를 함께)
 #[tauri::command]
-pub async fn analysis_proc_start(
+pub async fn analysis_code_list(st: State<'_, AppState>, id: u64, folder: String) -> R<Vec<CodeRow>> {
+    let owner = session_user(&st, id)?;
+    let root = std::path::PathBuf::from(&folder);
+    if !root.is_dir() {
+        return Err(ErrView::msg("invalid", format!("폴더를 찾을 수 없습니다: {folder}")));
+    }
+    let store = store_for(&st, id)?;
+    // 큰 폴더를 읽는 동안 화면이 멈추지 않게 별도 스레드에서
+    let units = tauri::async_runtime::spawn_blocking(move || source::scan_code(&[root], &owner))
+        .await
+        .map_err(|e| ErrView::msg("io", e.to_string()))?
+        .map_err(|e| ErrView::msg("io", format!("{folder}: {e}")))?;
+    let base = std::path::PathBuf::from(&folder);
+    Ok(units
+        .into_iter()
+        .map(|c| {
+            let saved = store.read_unit(&sqls_analyze::chunk::unit_key(&c.unit.owner, &c.unit.name, &c.unit.unit_type));
+            let rel = c.path.strip_prefix(&base).unwrap_or(&c.path).display().to_string();
+            CodeRow {
+                rel,
+                path: c.path.display().to_string(),
+                kind: c.kind,
+                count: c.count,
+                row: UnitRow {
+                    analyzed_at: saved.as_ref().map(|x| x.analyzed_at),
+                    chunks: saved.as_ref().map(|x| x.stats.chunks),
+                    failed: saved.as_ref().map(|x| x.stats.failed),
+                    model: saved.as_ref().and_then(|x| x.model.clone()),
+                    summary: saved.as_ref().and_then(|x| x.summary.as_ref().map(|i| i.summary.clone())),
+                    warning: saved.as_ref().and_then(|x| x.warning.clone()),
+                    unit: UnitRef { owner: c.unit.owner, name: c.unit.name, unit_type: c.unit.unit_type },
+                },
+            }
+        })
+        .collect())
+}
+
+/// 코드 폴더 분석 — 고른 파일(paths)만. 진행·끝은 analysis_start 와 같은 "analysis-progress" 이벤트
+#[tauri::command]
+pub async fn analysis_code_start(
     app: AppHandle,
     st: State<'_, AppState>,
     id: u64,
     folder: String,
+    paths: Vec<String>,
     provider: Option<String>,
     allow_remote: bool,
     options: Options,
 ) -> R<u64> {
-    let owner = {
-        let g = st.sessions.lock().unwrap();
-        g.get(&id).map(|s| s.session.info().user.clone()).ok_or_else(|| ErrView::msg("session_closed", "세션이 닫혀 있습니다"))?
-    };
-    let root = [std::path::PathBuf::from(&folder)];
-    let mut units = source::from_proc(&root, &owner).map_err(|e| ErrView::msg("io", format!("{folder}: {e}")))?;
-    units.extend(source::from_xml(&root, &owner).map_err(|e| ErrView::msg("io", format!("{folder}: {e}")))?);
+    let owner = session_user(&st, id)?;
+    let want: std::collections::HashSet<String> = paths.into_iter().collect();
+    if want.is_empty() {
+        return Err(ErrView::msg("invalid", "분석할 파일을 고르세요"));
+    }
+    let root = std::path::PathBuf::from(&folder);
+    let units: Vec<_> = tauri::async_runtime::spawn_blocking(move || source::scan_code(&[root], &owner))
+        .await
+        .map_err(|e| ErrView::msg("io", e.to_string()))?
+        .map_err(|e| ErrView::msg("io", format!("{folder}: {e}")))?
+        .into_iter()
+        .filter(|c| want.contains(&c.path.display().to_string()))
+        .map(|c| c.unit)
+        .collect();
     if units.is_empty() {
-        return Err(ErrView::msg("invalid", "이 폴더에서 EXEC SQL 이 있는 Pro*C 파일(.pc, .pcc)이나 <query> 가 있는 XML 쿼리 파일을 찾지 못했습니다"));
+        return Err(ErrView::msg("invalid", "고른 파일에서 분석할 쿼리를 찾지 못했습니다 (파일이 바뀌었는지 목록을 다시 읽어 보세요)"));
     }
     let cfg = match &provider {
         Some(n) => {
@@ -283,14 +347,14 @@ pub async fn analysis_proc_start(
         };
         let total = units.len();
         let mut stop: Option<String> = None;
-        for (i, (src, spec)) in units.iter().enumerate() {
+        for (i, src) in units.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 stop = Some("중지했습니다".into());
                 break;
             }
             emit(Progress::Fetch { run, index: i, total, key: sqls_analyze::chunk::unit_key(&src.owner, &src.name, &src.unit_type), error: None });
             let llm = cfg.as_ref().map(|c| Llm { client: &client, cfg: c });
-            if let Err(e) = analyze_unit(&store, src, spec.as_deref(), llm, &options, on.clone(), cancel.clone()).await {
+            if let Err(e) = analyze_unit(&store, src, None, llm, &options, on.clone(), cancel.clone()).await {
                 if e.contains("모델 서버") || cancel.load(Ordering::Relaxed) {
                     stop = Some(e);
                     break;

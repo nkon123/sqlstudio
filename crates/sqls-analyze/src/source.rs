@@ -147,59 +147,60 @@ pub fn from_files(paths: &[PathBuf], default_owner: &str) -> std::io::Result<Vec
         .collect())
 }
 
-/// 폴더·파일에서 Pro*C(.pc) 를 찾아 분석 단위로 (파일 하나 = 단위 하나, `PC_<파일이름>`).
+/// 코드 파일 하나에서 만든 분석 단위 (Pro*C · XML 쿼리)
+pub struct CodeUnit {
+    pub path: PathBuf,
+    /// "Pro*C" | "XML 쿼리"
+    pub kind: &'static str,
+    /// 함수·쿼리 수
+    pub count: usize,
+    pub unit: UnitSource,
+}
+
+fn unique_name(used: &std::collections::HashSet<String>, base: &str) -> String {
+    let mut name = base.to_string();
+    let mut n = 1;
+    while used.contains(&name) {
+        n += 1;
+        name = format!("{base}_{n}");
+    }
+    name
+}
+
+/// 폴더·파일에서 Pro*C(.pc) 와 XML 쿼리 파일(Anyframe `<query id><statement>`)을 찾아 단위로.
+/// Pro*C 는 `PC_<파일이름>`, XML 은 `XQ_<파일이름>` — 파일 하나 = 단위 하나. EXEC SQL·`<query>` 가 없는 파일은 건너뛴다.
 /// `owner` 는 그 프로그램이 접속하는 계정 — 스키마 없는 테이블 이름이 이 스키마로 풀린다.
-/// 같은 파일 이름이 다른 폴더에 또 있으면 뒤에 번호를 붙인다. EXEC SQL 이 없는 파일은 건너뛴다.
-pub fn from_proc(paths: &[PathBuf], owner: &str) -> std::io::Result<Vec<(UnitSource, Option<String>)>> {
+/// 같은 파일 이름이 다른 폴더에 또 있으면 뒤에 번호를 붙인다 (순서는 경로 정렬 — 같은 폴더면 늘 같은 이름).
+pub fn scan_code(paths: &[PathBuf], owner: &str) -> std::io::Result<Vec<CodeUnit>> {
     let mut files = Vec::new();
     for p in paths {
-        collect_with(p, &mut files, &|f| crate::proc::is_proc_file(f))?;
+        collect_with(p, &mut files, &|f| crate::proc::is_proc_file(f) || crate::xmlquery::is_xml_file(f))?;
     }
     files.sort();
     let mut used: std::collections::HashSet<String> = Default::default();
     let mut out = Vec::new();
     for f in files {
+        let xml = crate::xmlquery::is_xml_file(&f);
         let text = decode(&std::fs::read(&f)?);
-        let mut name = crate::proc::unit_name(&f);
-        let mut n = 1;
-        while used.contains(&name) {
-            n += 1;
-            name = format!("{}_{n}", crate::proc::unit_name(&f));
+        if xml && !text.contains("<query") {
+            continue;
         }
-        if let Some(t) = crate::proc::translate(&text, owner, &name) {
-            used.insert(name);
-            out.push((t.unit, None));
-        }
+        let base = if xml { crate::xmlquery::unit_name(&f) } else { crate::proc::unit_name(&f) };
+        let name = unique_name(&used, &base);
+        let t = if xml { crate::xmlquery::translate(&text, owner, &name) } else { crate::proc::translate(&text, owner, &name) };
+        let Some(t) = t else { continue };
+        used.insert(name);
+        out.push(CodeUnit { path: f, kind: if xml { "XML 쿼리" } else { "Pro*C" }, count: t.functions, unit: t.unit });
     }
     Ok(out)
 }
 
-/// 폴더·파일에서 XML 쿼리 파일(Anyframe `<query id><statement>`)을 찾아 단위로 (`XQ_<파일이름>`). `<query>` 가 없는 XML 은 건너뛴다.
+pub fn from_proc(paths: &[PathBuf], owner: &str) -> std::io::Result<Vec<(UnitSource, Option<String>)>> {
+    Ok(scan_code(paths, owner)?.into_iter().filter(|c| c.kind == "Pro*C").map(|c| (c.unit, None)).collect())
+}
+
 pub fn from_xml(paths: &[PathBuf], owner: &str) -> std::io::Result<Vec<(UnitSource, Option<String>)>> {
-    let mut files = Vec::new();
-    for p in paths {
-        collect_with(p, &mut files, &|f| crate::xmlquery::is_xml_file(f))?;
-    }
-    files.sort();
-    let mut used: std::collections::HashSet<String> = Default::default();
-    let mut out = Vec::new();
-    for f in files {
-        let text = decode(&std::fs::read(&f)?);
-        if !text.contains("<query") {
-            continue;
-        }
-        let mut name = crate::xmlquery::unit_name(&f);
-        let mut n = 1;
-        while used.contains(&name) {
-            n += 1;
-            name = format!("{}_{n}", crate::xmlquery::unit_name(&f));
-        }
-        if let Some(t) = crate::xmlquery::translate(&text, owner, &name) {
-            used.insert(name);
-            out.push((t.unit, None));
-        }
-    }
-    Ok(out)
+    Ok(scan_code(paths, owner)?.into_iter().filter(|c| c.kind == "XML 쿼리").map(|c| (c.unit, None)).collect())
 }
 
 fn collect_with(p: &Path, out: &mut Vec<PathBuf>, keep: &dyn Fn(&Path) -> bool) -> std::io::Result<()> {

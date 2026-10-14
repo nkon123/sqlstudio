@@ -135,7 +135,7 @@ pub fn run() {
             debug::debug_source,
             debug::debug_finish,
             analyze::analysis_list,
-            analyze::analysis_start, analyze::analysis_proc_start,
+            analyze::analysis_start, analyze::analysis_code_list, analyze::analysis_code_start,
             analyze::analysis_cancel,
             analyze::analysis_result,
             analyze::analysis_result_for,

@@ -43,7 +43,7 @@ class Tab {
   readonly output = h("pre", { class: "pane output" });
   readonly plan = h("pre", { class: "pane plan" });
   readonly desc = h("div", { class: "pane desc" });
-  readonly gridStatus = h("span", {});
+  readonly gridStatus = h("span", { class: "grid-status" });
   readonly tabEl: HTMLElement;
   private paneBtns = new Map<Pane, HTMLElement>();
   private panes = new Map<Pane, HTMLElement>();
@@ -142,7 +142,8 @@ class Tab {
     const editorHost = h("div", { class: "editor-host" });
     this.grid = new ResultGrid({
       onNeedMore: async () => (this.conn ? api.fetchMore(this.conn.id, 1000) : null),
-      onStatus: (t) => { this.gridStatus.textContent = t; },
+      // 한 줄로 — 길면 줄임표, 전체는 풍선으로 (여러 줄로 늘어나 탭 줄이 높아지던 것)
+      onStatus: (t) => { this.gridStatus.textContent = t; this.gridStatus.title = t; },
       onDirty: (n) => {
         this.applyBtn.textContent = n ? `적용 (${n})` : "적용";
         this.applyBtn.disabled = !n;
@@ -189,7 +190,11 @@ class Tab {
         this.filterIn, this.notesBtn, this.editBtn, this.delRowBtn, this.applyBtn, this.discardBtn,
         h("span", { class: "spacer" }), this.gridStatus,
         h("button", { class: "small", title: "가져온 행을 CSV 로 복사", onclick: () => this.copyCsv() }, "CSV 복사"),
-        exportSel),
+        exportSel,
+        h("span", { class: "pane-size" },
+          h("button", { class: "small", title: "결과 영역 키우기 (에디터를 줄인다) — 경계선을 끌어도 된다", onclick: () => this.resizePane("grow") }, "▲"),
+          h("button", { class: "small", title: "결과 영역 줄이기", onclick: () => this.resizePane("shrink") }, "▼"),
+          h("button", { class: "small", title: "원래 비율로 (경계선을 더블클릭해도 된다)", onclick: () => this.resizePane("reset") }, "↕"))),
       gridPane, this.output, this.plan, this.desc);
     const splitter = h("div", { class: "splitter" });
     this.root = h("div", { class: "tab-body" }, editorHost, splitter, bottom);
@@ -207,6 +212,13 @@ class Tab {
     this.editor.view.dom.addEventListener("input", () => this.setDirty(true));
     this.editor.view.dom.addEventListener("contextmenu", (e) => void app.editorMenu(this, e));
     dragSplit(splitter, editorHost);
+    this.editorHostEl = editorHost;
+    splitter.title = "끌어서 높이 조절 · 더블클릭: 원래 비율";
+    splitter.addEventListener("dblclick", () => this.resizePane("reset"));
+    try {
+      const saved = Number(localStorage.getItem("pane.editor"));
+      if (saved >= 15 && saved <= 85) editorHost.style.flexBasis = `${saved}%`;
+    } catch { /* 기본 비율 */ }
     this.show("result");
     this.grid.clear("Ctrl+Enter: 커서 위치 문장 실행 · F5: 스크립트 실행 · Ctrl+E: 실행계획");
     this.tabEl = h("div", { class: "tab", onclick: () => app.activate(this) },
@@ -214,6 +226,19 @@ class Tab {
       h("span", { class: "tab-txn", hidden: true, title: "커밋하지 않은 변경이 있습니다 (INSERT·UPDATE·DELETE·MERGE 등) — 커밋 또는 롤백하세요" }, "커밋 전"),
       h("button", { class: "tab-close", title: "닫기", onclick: (e: Event) => { e.stopPropagation(); app.closeTab(this); } }, "×"));
     this.refreshTitle();
+  }
+
+  private editorHostEl!: HTMLElement;
+
+  /** 에디터와 결과 영역의 높이 — 키우기·줄이기는 15%씩, 원래는 45%. 비율로 두어 창을 줄여도 경계선이 화면 밖으로 나가지 않는다 */
+  resizePane(how: "grow" | "shrink" | "reset") {
+    const host = this.editorHostEl;
+    const total = this.root.getBoundingClientRect().height || 1;
+    const cur = (host.getBoundingClientRect().height / total) * 100;
+    const next = how === "reset" ? 45 : how === "grow" ? cur - 15 : cur + 15;
+    const pct = Math.round(Math.max(15, Math.min(85, next)));
+    host.style.flexBasis = `${pct}%`;
+    try { localStorage.setItem("pane.editor", String(pct)); } catch { /* 기억 못 해도 된다 */ }
   }
 
   show(p: Pane) {
@@ -2211,8 +2236,19 @@ function dragSplit(handle: HTMLElement, top: HTMLElement) {
     e.preventDefault();
     const y0 = e.clientY;
     const h0 = top.getBoundingClientRect().height;
-    const move = (ev: MouseEvent) => { top.style.flexBasis = `${Math.max(80, h0 + ev.clientY - y0)}px`; };
-    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+    const total = (top.parentElement?.getBoundingClientRect().height ?? 600) - handle.getBoundingClientRect().height;
+    document.body.classList.add("row-resizing");
+    // 위 80px·아래 90px 은 남긴다 — 어느 쪽으로든 끌어서 다시 되돌릴 수 있게 (경계선이 화면 밖으로 나가지 않게)
+    const move = (ev: MouseEvent) => {
+      const px = Math.max(80, Math.min(total - 90, h0 + ev.clientY - y0));
+      top.style.flexBasis = `${(px / total) * 100}%`;
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.classList.remove("row-resizing");
+      try { localStorage.setItem("pane.editor", String(Math.round((top.getBoundingClientRect().height / total) * 100))); } catch { /* 기억 못 해도 된다 */ }
+    };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   });

@@ -228,7 +228,7 @@ export class ResultGrid {
     const shown = this.view.length !== this.rows.length ? `${this.view.length.toLocaleString()} / ` : "";
     const sorted = this.sortCol >= 0 && this.hasMore ? " · 가져온 행만 정렬됨 (전체는 ORDER BY)" : "";
     const edit = this.edit ? ` · 편집 중${this.changeCount() ? ` — 변경 ${this.changeCount()}` : ""}` : "";
-    this.opts.onStatus?.(`${shown}${this.rows.length.toLocaleString()}행${this.hasMore ? " (더 있음 — 스크롤하면 가져옵니다)" : ""}${sorted}${edit}`);
+    this.opts.onStatus?.(`${shown}${this.rows.length.toLocaleString()}행${this.hasMore ? " · 더 있음 (스크롤하면 가져옴)" : ""}${sorted}${edit}`);
   }
 
   // ── 정렬·필터 ─────────────────────────────────────

@@ -81,11 +81,20 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .tab-close { border: none; background: none; padding: 0 4px; }
 .tab-bodies { flex: 1; min-height: 0; display: flex; }
 .tab-body { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
-.editor-host { flex: 0 0 45%; min-height: 80px; overflow: hidden; background: var(--panel); }
-.splitter { height: 5px; cursor: row-resize; background: var(--line); }
+.editor-host { flex: 0 0 45%; min-height: 80px; max-height: calc(100% - 96px); overflow: hidden; background: var(--panel); }
+/* 경계선: 잡기 쉽게 위아래로 넓은 눌림 영역, 올리면 강조 */
+.splitter { flex: none; height: 5px; cursor: row-resize; background: var(--line); position: relative; }
+.splitter::before { content: ""; position: absolute; left: 0; right: 0; top: -4px; bottom: -4px; }
+.splitter:hover, body.row-resizing .splitter { background: var(--accent); }
+body.row-resizing { cursor: row-resize; user-select: none; }
 .bottom { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
-.pane-tabs { display: flex; align-items: center; gap: 2px; padding: 3px 6px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.pane-tabs { display: flex; flex: none; flex-wrap: nowrap; align-items: center; gap: 2px; padding: 3px 6px; border-bottom: 1px solid var(--line); font-size: 12px; overflow: hidden; }
+.pane-tabs > * { flex: none; }
 .pane-tabs span { color: var(--dim); margin-right: 8px; }
+/* 상태 글은 한 줄 — 길면 줄임표 (여러 줄로 늘어나 이 줄이 높아지지 않게) */
+.pane-tabs .grid-status { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pane-tabs .grid-filter { flex: 0 1 280px; min-width: 90px; }
+.pane-tabs .pane-size { display: inline-flex; gap: 2px; margin: 0 0 0 6px; }
 .pane-tab { border: none; background: none; padding: 2px 10px; border-radius: 3px; }
 .pane-tab.active { background: var(--sel); }
 .pane { flex: 1; min-height: 0; margin: 0; overflow: auto; }

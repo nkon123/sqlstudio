@@ -22,6 +22,8 @@ export interface ReportNode {
   text?: string; copy?: boolean; center?: boolean; color?: string; hidden?: boolean;
   /** 메모가 붙은 노드·선 */
   attach?: string; gone?: boolean;
+  /** 메모를 상자 없이 글만 */
+  plain?: boolean;
 }
 export interface ReportEdge {
   id: string; source: string; target: string; kind: EdgeKind | "manual"; label: string; guess?: boolean;
@@ -43,6 +45,8 @@ const isBox = (n: NodeSingular) => isItem(n) && n.data("type") !== "note";
 const GRID = 10;
 const NODE_COLORS = ["", "#fde2e1", "#fff1c2", "#dff5e1", "#dbeafe", "#efe1fb", "#e5e7eb"];
 const NOTE_COLORS = ["#fff8c5", "#dbeafe", "#dff5e1", "#fde2e1"];
+/** 상자 없는 글의 글자 색 ("" = 기본) */
+const TEXT_COLORS = ["", "#c62f3c", "#1a7f37", "#1f5fbf", "#8a5a00", "#6b7480"];
 const EDGE_COLORS = ["", "#c62f3c", "#1a7f37", "#7a4fd0", "#111827"];
 const MANUAL_COLOR = "#7a4fd0";
 const ROUTE_KO = { taxi: "직각", straight: "직선", bezier: "곡선" };
@@ -87,14 +91,15 @@ export class DfdReport {
     const tb = h("div", { class: "dfd-toolbar rp-toolbar" },
       h("strong", {}, "보고서"), this.nameIn,
       h("span", { class: "sep" }),
-      align("left", "⇤", "왼쪽 맞춤 (여러 개 고른 뒤 — Shift+클릭 또는 Ctrl+끌기)"), align("cx", "↔", "가로 가운데 맞춤"), align("right", "⇥", "오른쪽 맞춤"),
+      align("left", "⇤", "왼쪽 맞춤 (여러 개 고른 뒤 — Shift+클릭 또는 Shift+끌기)"), align("cx", "↔", "가로 가운데 맞춤"), align("right", "⇥", "오른쪽 맞춤"),
       align("top", "⤒", "위 맞춤"), align("cy", "↕", "세로 가운데 맞춤"), align("bottom", "⤓", "아래 맞춤"),
       align("hdist", "⇹", "가로 같은 간격"), align("vdist", "⇳", "세로 같은 간격"),
       h("label", { class: "check", title: "끌어 놓을 때 10px 격자에 붙인다" }, this.snapBox, "격자"),
       b("자동 배치", "지금 보이는 노드·선으로 다시 배치한다 (메모는 그대로)", () => this.autoLayout()),
       b("칸 맞추기", "입력·처리·출력 칸을 지금 노드 자리에 딱 맞춘다 (칸 경계는 끌어서도 옮긴다)", () => this.fitLanesNow()),
       h("span", { class: "sep" }),
-      b("메모", "메모 상자 — 노드·선을 고른 채 누르면 거기에 붙인다", () => this.addNote()),
+      b("메모", "메모 상자 — 노드·선을 하나 고른 채 누르면 거기에 붙인다", () => this.addNote()),
+      b("글", "상자 없이 글만 — 아무 데나 두거나, 노드·선을 하나 고른 채 누르면 그 아래에", () => this.addNote(undefined, true)),
       b("선 추가", "처음 노드 → 끝 노드를 차례로 누른다 (손으로 넣은 선은 보라색 점선)", () => this.startLink()),
       h("span", { class: "sep" }),
       b("↶", "되돌리기 (Ctrl+Z)", () => this.undo()), b("↷", "다시 (Ctrl+Y)", () => this.redo()),
@@ -181,7 +186,7 @@ export class DfdReport {
     const cy = L.cytoscape({
       container: this.canvas,
       wheelSensitivity: 0.25, minZoom: 0.05, maxZoom: 3,
-      boxSelectionEnabled: true, selectionType: "additive",
+      boxSelectionEnabled: true, selectionType: "single",
       style: [
         ...dfdStyle(),
         { selector: "node", style: { label: (n: NodeSingular) => n.data("text") || n.data("label") } },
@@ -189,6 +194,8 @@ export class DfdReport {
         { selector: "node[type='note']", style: { shape: "round-rectangle", "background-color": (n: NodeSingular) => n.data("color") || NOTE_COLORS[0],
           "border-width": 1, "border-color": "#c9a227", "text-wrap": "wrap", "text-max-width": (n: NodeSingular) => `${n.data("w") - 16}px`,
           "text-valign": "center", "text-halign": "center", "font-size": 11, "z-index": 20 } },
+        { selector: "node[type='note'][?plain]", style: { "background-opacity": 0, "border-width": 0, "text-valign": "center", "text-halign": "center",
+          color: (n: NodeSingular) => n.data("color") || v("--text"), "font-size": 12 } },
         { selector: "node.gone", style: { "border-color": "#c62f3c", "border-style": "dashed", opacity: 0.6 } },
         { selector: "edge", style: { "curve-style": "taxi", "taxi-direction": "horizontal", "taxi-turn": "50%", "taxi-turn-min-distance": 12,
           label: "data(text)", "font-size": 10, "text-wrap": "wrap", "text-max-width": "160px", "text-background-color": v("--bg"),
@@ -205,6 +212,7 @@ export class DfdReport {
         { selector: "node[type='divider'].hover, node[type='divider']:grabbed", style: { "background-opacity": 0.45 } },
       ] as never,
     });
+    cy.on("mousedown tapstart", () => { if (!this.el.contains(document.activeElement) || document.activeElement?.tagName === "TEXTAREA" || document.activeElement?.tagName === "INPUT") this.el.focus(); });
     cy.on("tap", "node", (ev) => this.onTapNode(ev.target as NodeSingular));
     cy.on("tap", "edge", (ev) => { if (this.linking === undefined) this.showEdge(ev.target as EdgeSingular); });
     cy.on("tap", (ev) => { if (ev.target === cy) { this.cancelLink(); this.showReport(); } });
@@ -436,7 +444,7 @@ export class DfdReport {
 
   private align(k: string) {
     const ns = this.selectedNodes();
-    if (ns.length < 2) return toast("노드를 둘 이상 고르세요 (Shift+클릭, 또는 Ctrl/Shift+끌기로 상자 선택)", "info");
+    if (ns.length < 2) return toast("노드를 둘 이상 고르세요 (Shift+클릭, 또는 Shift+끌기로 상자 선택)", "info");
     const box = (n: NodeSingular) => { const p = n.position(), w = n.width(), hh = n.height(); return { n, x1: p.x - w / 2, x2: p.x + w / 2, y1: p.y - hh / 2, y2: p.y + hh / 2, cx: p.x, cy: p.y, w, h: hh }; };
     const bs = ns.map(box);
     const set = (b: (typeof bs)[number], x: number, y: number) => b.n.position({ x, y });
@@ -488,26 +496,35 @@ export class DfdReport {
     cy.fit(undefined, 30);
   }
 
-  private addNote(attachTo?: string) {
+  /** plain: 상자 없이 글만 — 대상이 있으면 그 아래에 놓고 선은 잇지 않는다 (글은 아래에 붙은 설명처럼) */
+  private addNote(attachTo?: string, plain = false) {
     const cy = this.cy!;
     const sel = cy.$(":selected").filter((x) => x.data("type") !== "note");
     const target = attachTo ?? (sel.length === 1 ? sel[0].id() : undefined);
+    const w = plain ? 160 : 180;
     let x: number, y: number;
     if (target) {
-      const t = cy.getElementById(target);
-      const bb = t.boundingBox({});
-      x = bb.x2 + 110;
-      y = bb.y1 - 50;
+      const bb = cy.getElementById(target).boundingBox({});
+      if (plain) {
+        x = (bb.x1 + bb.x2) / 2;
+        y = bb.y2 + 10 + 15;
+      } else {
+        x = bb.x2 + 110;
+        y = bb.y1 - 50;
+      }
     } else {
       const ext = cy.extent();
       x = (ext.x1 + ext.x2) / 2;
       y = ext.y1 + 80;
     }
     const id = `note:${Date.now().toString(36)}`;
-    cy.add({ group: "nodes", data: { id, ref: id, type: "note", label: "", text: "메모", w: 180, h: 60, lane: -1, attach: target }, position: { x, y } });
-    if (target) this.addAttach(id, target);
+    const text = plain ? "글" : "메모";
+    cy.add({ group: "nodes", data: { id, ref: id, type: "note", label: "", text, w, h: plain ? 30 : 60, lane: -1, attach: target, ...(plain ? { plain: true } : {}) }, position: { x, y } });
+    if (target && !plain) this.addAttach(id, target);
     this.commit();
     cy.elements().unselect();
+    this.focusNote = id;
+    setTimeout(() => { if (this.focusNote === id) this.focusNote = null; }, 500);
     cy.getElementById(id).select();
   }
 
@@ -617,24 +634,43 @@ export class DfdReport {
       h("label", { class: "rp-lbl" }, "표시 이름 (비우면 원래 이름)"), nameIn,
       h("label", { class: "rp-lbl" }, "색"), this.palette(NODE_COLORS, n.data("color"), (c) => { this.setData(n, "color", c); this.showNode(n); }),
       h("div", { class: "row", style: "margin-top:8px" },
-        h("button", { class: "small", onclick: () => this.addNote(n.id()) }, "메모 달기"),
+        h("button", { class: "small", title: "노란 카드 메모 — 선으로 이어진다", onclick: () => this.addNote(n.id()) }, "메모 달기"),
+        h("button", { class: "small", title: "상자 없이 글만 — 이 아래에 놓인다", onclick: () => this.addNote(n.id(), true) }, "글 달기"),
         h("button", { class: "small", title: "보고서에서 뺀다 (Delete) — 위 '숨김' 에서 다시 보인다", onclick: () => this.removeSelected() }, "숨기기")));
   }
 
-  private showNote(n: NodeSingular) {
+  /** 글 길이에 맞춰 높이 (한글은 넓다) */
+  private fitNote(n: NodeSingular, text: string) {
+    const w = Number(n.data("w")) || 180;
+    const per = Math.max(4, Math.floor((w - 16) / (/[가-힣]/.test(text) ? 11 : 6.5)));
+    const lines = text.split("\n").reduce((a, l) => a + Math.max(1, Math.ceil(l.length / per)), 0);
+    n.data("h", Math.max(n.data("plain") ? 22 : 40, lines * 15 + (n.data("plain") ? 8 : 20)));
+  }
+
+  /** 방금 만든 메모 — 그 입력칸에만 포커스를 준다 (선택 이벤트가 옆 칸을 다시 그려도 이어지게) */
+  private focusNote: string | null = null;
+
+  private showNote(n: NodeSingular, focus = false) {
+    if (this.focusNote === n.id()) focus = true; // 선택 이벤트가 두 번 와 옆 칸을 다시 그려도 마지막 입력칸이 포커스를 받는다
     const ta = h("textarea", { rows: 6, style: "width:100%" }) as HTMLTextAreaElement;
     ta.value = n.data("text") ?? "";
-    ta.oninput = () => n.data("text", ta.value);
+    ta.oninput = () => { n.data("text", ta.value); this.fitNote(n, ta.value); };
     ta.onchange = () => this.commit();
-    const wIn = h("input", { type: "number", value: String(n.data("w")), min: "80", max: "600", step: "10", style: "width:70px" }) as HTMLInputElement;
-    wIn.onchange = () => { const w = Math.max(80, Math.min(600, Number(wIn.value) || 180)); n.data("w", w); n.data("h", Math.max(40, Math.ceil((ta.value.length * 7.5) / (w - 16)) * 16 + 20)); this.commit(); };
-    this.side.replaceChildren(h("h4", {}, "메모"), ta,
+    const wIn = h("input", { type: "number", value: String(n.data("w")), min: "60", max: "700", step: "10", style: "width:70px" }) as HTMLInputElement;
+    wIn.onchange = () => { const w = Math.max(60, Math.min(700, Number(wIn.value) || 180)); n.data("w", w); this.fitNote(n, ta.value); this.commit(); };
+    const plain = !!n.data("plain");
+    const look = h("select", {}, h("option", { value: "box", selected: !plain }, "상자 (노란 카드)"), h("option", { value: "plain", selected: plain }, "글만 (상자 없이)"));
+    look.onchange = () => { this.setData(n, "plain", look.value === "plain" ? true : ""); this.fitNote(n, ta.value); this.commit(); this.showNote(n); };
+    this.side.replaceChildren(h("h4", {}, plain ? "글" : "메모"), ta,
+      h("label", { class: "rp-lbl" }, "모양"), look,
       h("label", { class: "rp-lbl" }, "너비"), wIn,
-      h("label", { class: "rp-lbl" }, "색"), this.palette(NOTE_COLORS, n.data("color") ?? NOTE_COLORS[0], (c) => { this.setData(n, "color", c === NOTE_COLORS[0] ? "" : c); this.showNote(n); }),
+      plain ? h("label", { class: "rp-lbl" }, "글자 색") : h("label", { class: "rp-lbl" }, "색"),
+      this.palette(plain ? TEXT_COLORS : NOTE_COLORS, n.data("color") ?? (plain ? "" : NOTE_COLORS[0]), (c) => { this.setData(n, "color", c === NOTE_COLORS[0] && !plain ? "" : c); this.showNote(n); }),
       h("div", { class: "row", style: "margin-top:8px" },
         n.data("attach") ? h("button", { class: "small", onclick: () => { this.cy!.getElementById(`att:${n.id()}`).remove(); this.setData(n, "attach", ""); this.showNote(n); } }, "연결 끊기") : "",
         h("button", { class: "small", onclick: () => this.removeSelected() }, "지우기")));
-    setTimeout(() => ta.focus(), 0);
+    // 새로 만들었을 때만 바로 쓰게 한다 — 고르기만 해도 입력칸이 포커스를 가지면 Delete 가 글자를 지운다
+    if (focus) setTimeout(() => { ta.focus(); ta.select(); }, 0);
   }
 
   private showEdge(e: EdgeSingular) {
@@ -655,7 +691,8 @@ export class DfdReport {
       h("label", { class: "rp-lbl" }, "모양"), route,
       h("label", { class: "rp-lbl" }, "색"), this.palette(EDGE_COLORS, e.data("color"), (c) => { this.setData(e, "color", c); this.showEdge(e); }),
       h("div", { class: "row", style: "margin-top:8px" },
-        h("button", { class: "small", onclick: () => this.addNote(e.id()) }, "메모 달기"),
+        h("button", { class: "small", title: "노란 카드 메모 — 선으로 이어진다", onclick: () => this.addNote(e.id()) }, "메모 달기"),
+        h("button", { class: "small", title: "상자 없이 글만 — 이 선 아래에 놓인다", onclick: () => this.addNote(e.id(), true) }, "글 달기"),
         h("button", { class: "small", onclick: () => this.removeSelected() }, kind === "manual" ? "지우기" : "숨기기")));
   }
 
@@ -688,7 +725,7 @@ export class DfdReport {
     const hid = this.hiddenNodes.length + this.hiddenEdges.length;
     if (hid) box.append(h("div", { class: "row", style: "margin-top:8px" }, h("button", { class: "small", onclick: () => this.showAllHidden() }, `숨긴 것 ${hid}개 다시 보이기`)));
     box.append(h("h4", {}, "고치는 법"), h("ul", { class: "an-ul" },
-      h("li", {}, "끌기: 옮기기 · Shift+클릭 / Ctrl+끌기: 여러 개 고르기 · Ctrl+A: 모두"),
+      h("li", {}, "끌기: 옮기기 · Shift+클릭 / Shift+끌기(상자): 여러 개 고르기 · Ctrl+A: 모두"),
       h("li", {}, "노드·선을 누르면 오른쪽에서 이름·설명·색·모양"),
       h("li", {}, "Delete: 분석에서 온 것은 숨기고, 손으로 넣은 메모·선은 지운다"),
       h("li", {}, "Ctrl+Z / Ctrl+Y · Ctrl+S 저장")));

@@ -593,3 +593,6 @@ button.small.on { background: var(--sel); border-color: var(--accent); }
 .run-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab.running .tab-title::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 5px; border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; }
 button.danger.running-btn { animation: pulse 1.2s infinite; }
+
+.usage-grid { height: min(52vh, 460px); border: 1px solid var(--line); border-radius: 4px; display: flex; }
+.usage-grid > .grid { flex: 1; min-width: 0; }

@@ -3,7 +3,9 @@
 // 이름이 안 보여도 테이블을 쓰는 객체(SELECT *, %ROWTYPE, 동적 SQL)는 따로 — 그래도 영향을 받을 수 있다.
 
 import { invoke } from "@tauri-apps/api/core";
-import { errOf } from "./api";
+import { errOf, type Column } from "./api";
+import { showMenu } from "./ctxmenu";
+import { ResultGrid } from "./grid";
 import { h, modal, toast } from "./ui";
 
 interface Line { line: number; text: string; in_comment: boolean }
@@ -31,26 +33,47 @@ export async function showUsage(id: number, table: string, column: string, openS
   const codeLines = u.hits.reduce((n, o) => n + o.lines.filter((l) => !l.in_comment).length, 0);
   const summary = `${u.table}.${u.column}: 컬럼이 나오는 객체 ${u.hits.length}개 (${codeLines}줄)` +
     ` · 테이블만 쓰는 객체 ${u.silent.length}개 · 인덱스 ${u.indexes.length} · 제약 ${u.constraints.length} · 이 컬럼을 가리키는 외래 키 ${u.referenced_by.length}`;
-  const objEl = (o: Obj, withLines: boolean) => h("details", { class: "usage-obj", open: withLines && o.lines.length <= 12 },
-    h("summary", {},
-      h("span", { class: "badge" }, KIND[o.kind] ?? o.kind), " ", h("strong", {}, `${o.owner}.${o.name}`),
-      o.via ? h("span", { class: "dim" }, ` (동의어 ${o.via})`) : "",
-      withLines ? h("span", { class: "dim" }, ` · ${o.lines.length}줄`) : "",
-      h("button", { class: "small", style: "margin-left:8px", title: "소스를 새 탭으로", onclick: (e: Event) => { e.preventDefault(); openSource(o.owner, o.name, o.kind); } }, "열기")),
-    withLines ? h("table", { class: "usage-lines" }, h("tbody", {}, ...o.lines.map((l) => h("tr", { class: l.in_comment ? "dim" : "" },
-      h("td", { class: "num" }, String(l.line)), h("td", {}, h("code", {}, l.text.trim())), h("td", { class: "dim" }, l.in_comment ? "주석" : "")))))
-      : "");
-  const list = (title: string, xs: string[]) => xs.length ? h("div", {}, h("h4", {}, `${title} ${xs.length}`), h("ul", { class: "an-ul" }, ...xs.map((x) => h("li", {}, h("code", {}, x))))) : "";
+  // 한 그리드에: 구분 · 객체 · 종류 · 줄 · 내용 — 셀 단위로 고르고 복사, 머리를 눌러 정렬, 글자로 거르기
+  const col = (name: string, type_name = "VARCHAR2"): Column => ({ name, type_name, nullable: true });
+  const columns = [col("구분"), col("객체"), col("종류"), col("줄", "NUMBER"), col("내용")];
+  const rows: (string | null)[][] = [];
+  const objs = new Map<string, Obj>();
+  const key = (r: (string | null)[]) => `${r[1]}|${r[2]}`;
+  for (const o of u.hits) {
+    const name = `${o.owner}.${o.name}${o.via ? ` (동의어 ${o.via})` : ""}`;
+    objs.set(`${name}|${KIND[o.kind] ?? o.kind}`, o);
+    for (const l of o.lines) rows.push([l.in_comment ? "주석" : "컬럼이 나옴", name, KIND[o.kind] ?? o.kind, String(l.line), l.text.trim()]);
+  }
+  for (const o of u.silent) {
+    const name = `${o.owner}.${o.name}${o.via ? ` (동의어 ${o.via})` : ""}`;
+    objs.set(`${name}|${KIND[o.kind] ?? o.kind}`, o);
+    rows.push(["테이블만 사용", name, KIND[o.kind] ?? o.kind, "", "컬럼 이름은 안 보임 — SELECT *, %ROWTYPE, 동적 SQL 이면 영향을 받을 수 있음"]);
+  }
+  for (const [g, xs] of [["인덱스", u.indexes], ["제약조건", u.constraints], ["외래 키", u.referenced_by]] as const) {
+    for (const x of xs) rows.push([g, x, "", "", ""]);
+  }
+  const grid: ResultGrid = new ResultGrid({
+    onDoubleClick: (r) => { const o = objs.get(key(r)); if (o) openSource(o.owner, o.name, o.kind); return !!o; },
+    onContextMenu: (r, _c, e) => {
+      const o = objs.get(key(r));
+      showMenu(e.clientX, e.clientY, [
+        ...(o ? [{ label: "소스 열기", hint: "더블클릭", run: () => openSource(o.owner, o.name, o.kind) }, { sep: true as const }] : []),
+        { label: "고른 셀 복사", hint: "Ctrl+C", run: () => navigator.clipboard.writeText(grid.selectionText()).catch(() => {}) },
+        { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(grid.selectionText(true)).catch(() => {}) },
+        { label: "객체 이름 복사", run: () => navigator.clipboard.writeText([...new Set(grid.selectedRows().map((x) => x[1]).filter(Boolean))].join("\n")).catch(() => {}) },
+      ]);
+    },
+  });
+  grid.setPage({ columns, rows, has_more: false, fetched_total: rows.length });
+  const filter = h("input", { placeholder: "거르기 (예: 주석, PACKAGE, 객체 이름)", style: "width:260px" }) as HTMLInputElement;
+  filter.addEventListener("input", () => grid.setFilter(filter.value));
+  filter.addEventListener("keydown", (e) => { if (e.key === "ArrowDown") { e.preventDefault(); grid.el.focus(); } });
   body.replaceChildren(
     h("div", { class: "row" }, h("span", {}, summary), h("span", { class: "spacer" }),
       h("button", { class: "small", onclick: () => navigator.clipboard.writeText(report(u)).then(() => toast("영향도 목록을 복사했습니다", "info", 1500)) }, "목록 복사")),
-    h("div", { class: "dim", style: "font-size:12px;margin:4px 0 8px" }, `${secs}초 · 사전 의존성과 소스·뷰 정의로 찾았습니다. 동적 SQL 문자열 안의 이름과 다른 DB(DB 링크)는 찾지 못합니다.`),
-    u.hits.length ? h("h4", {}, `컬럼이 나오는 곳 ${u.hits.length}`) : h("p", { class: "hint" }, "소스·뷰 정의에 이 컬럼 이름이 나오는 객체가 없습니다."),
-    ...u.hits.map((o) => objEl(o, true)),
-    u.silent.length ? h("h4", {}, `테이블은 쓰지만 컬럼 이름이 안 보이는 곳 ${u.silent.length}`) : "",
-    u.silent.length ? h("p", { class: "hint" }, "SELECT *, %ROWTYPE, INSERT … VALUES (컬럼 목록 없이), 동적 SQL 이면 컬럼을 바꿀 때 영향을 받을 수 있습니다.") : "",
-    ...u.silent.map((o) => objEl(o, false)),
-    list("인덱스", u.indexes), list("제약조건", u.constraints), list("이 컬럼을 가리키는 외래 키", u.referenced_by));
+    h("div", { class: "dim", style: "font-size:12px;margin:4px 0 6px" }, `${secs}초 · 사전 의존성과 소스·뷰 정의로 찾았습니다. 동적 SQL 문자열 안의 이름과 다른 DB(DB 링크)는 찾지 못합니다. 더블클릭하면 그 객체의 소스를 엽니다.`),
+    rows.length ? h("div", { class: "row", style: "margin-bottom:6px" }, filter) : h("p", { class: "hint" }, "이 컬럼을 쓰는 객체를 찾지 못했습니다."),
+    rows.length ? h("div", { class: "usage-grid" }, grid.el) : "");
   return shown;
 }
 

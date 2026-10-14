@@ -21,10 +21,35 @@ import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightSty
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import type { Command } from "@codemirror/view";
 import { EditorSelection, EditorState, StateEffect, StateField } from "@codemirror/state";
+import { type CaseMode, convertRange } from "./case-convert";
 import {
   Decoration, type DecorationSet, EditorView, drawSelection, highlightActiveLine, highlightActiveLineGutter,
   crosshairCursor, keymap, lineNumbers, rectangularSelection,
 } from "@codemirror/view";
+
+/** 선택한 곳(없으면 커서의 낱말)의 구문을 대·소문자로. 문자열·따옴표 이름·주석·바인드·숫자는 건드리지 않는다 */
+export function changeCase(mode: CaseMode): (view: EditorView) => boolean {
+  return (view) => {
+    const doc = view.state.doc.toString();
+    const tr = view.state.changeByRange((range) => {
+      let { from, to } = range;
+      if (from === to) {
+        const w = view.state.wordAt(from);
+        if (!w) return { range };
+        from = w.from;
+        to = w.to;
+      }
+      const next = convertRange(doc, from, to, mode);
+      if (next === doc.slice(from, to)) return { range };
+      // 대부분 길이가 같아 선택은 그대로. 달라지는 드문 경우(ß → SS)는 바꾼 글 전체를 선택
+      const same = next.length === to - from;
+      return { changes: { from, to, insert: next }, range: same ? range : EditorSelection.range(from, from + next.length) };
+    });
+    if (tr.changes.empty) return true;
+    view.dispatch(view.state.update(tr, { userEvent: "input.case" }));
+    return true;
+  };
+}
 
 export interface EditorActions {
   runStatement: () => void;
@@ -144,6 +169,9 @@ export class SqlEditor {
             { key: "Ctrl-Shift-s", mac: "Cmd-Shift-s", run: run(actions.saveAs), preventDefault: true },
             { key: "Ctrl-s", mac: "Cmd-s", run: run(actions.save), preventDefault: true },
             { key: "Ctrl-/", mac: "Cmd-/", run: toggleComment },
+            // 구문만 대·소문자로 (값·이름표는 그대로) — 기본의 '선택 다시 하기(Ctrl+Shift+U)' 보다 먼저
+            { key: "Ctrl-Shift-u", mac: "Cmd-Shift-u", run: changeCase("upper"), preventDefault: true },
+            { key: "Ctrl-Alt-u", mac: "Cmd-Alt-u", run: changeCase("lower"), preventDefault: true },
             { key: "Ctrl-Shift-f", mac: "Cmd-Shift-f", run: run(actions.format), preventDefault: true },
             { key: "F4", run: run(actions.describe), preventDefault: true },
             { key: "F8", run: run(actions.history), preventDefault: true },

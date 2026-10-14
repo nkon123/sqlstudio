@@ -19,6 +19,21 @@ mod state;
 
 use state::AppState;
 
+/// 이 창이 닫힐 때 열린 세션을 모두 닫는지 — 메인 창만
+pub(crate) fn closes_sessions(label: &str) -> bool {
+    label == "main"
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_main_window_closes_sessions() {
+        assert!(super::closes_sessions("main"));
+        assert!(!super::closes_sessions("dfd-1"));
+        assert!(!super::closes_sessions("dfd-27"));
+    }
+}
+
 /// 포터블이면 WebView 데이터 폴더 (모든 창이 같은 곳을 써야 한다)
 pub(crate) fn webview_dir() -> Option<std::path::PathBuf> {
     sqls_core::config::portable_data_dir().map(|d| d.join("webview"))
@@ -184,11 +199,15 @@ pub fn run() {
             import::import_run,
         ])
         .on_window_event(|window, event| {
-            // 창을 닫으면 열린 세션을 모두 닫는다 (커밋 안 한 변경은 롤백)
             if let tauri::WindowEvent::Destroyed = event {
                 use tauri::Manager;
-                if let Some(st) = window.try_state::<AppState>() {
-                    st.close_all();
+                tracing::info!("창 닫힘: {}", window.label());
+                // 메인 창을 닫을 때만 열린 세션을 모두 닫는다 (커밋 안 한 변경은 롤백).
+                // 흐름도 같은 보조 창을 닫는다고 작업 탭의 접속까지 닫으면 안 된다
+                if closes_sessions(window.label()) {
+                    if let Some(st) = window.try_state::<AppState>() {
+                        st.close_all();
+                    }
                 }
             }
         })

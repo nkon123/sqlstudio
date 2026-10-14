@@ -293,8 +293,20 @@ pub async fn open_dfd_window(
     if let Some(dir) = crate::webview_dir() {
         b = b.data_directory(dir);
     }
-    b.build()
-        .map_err(|e| ErrView::msg("invalid", format!("창을 열 수 없습니다: {e}")))?;
+    let win = b.build().map_err(|e| {
+        tracing::warn!("흐름도 창을 열 수 없습니다: {e}");
+        ErrView::msg("invalid", format!("창을 열 수 없습니다: {e}"))
+    })?;
+    tracing::info!("흐름도 창 열림: {} ({profile})", win.label());
+    // 메뉴가 닫히며 메인 창이 다시 앞으로 오면 새 창이 그 뒤로 가 사라진 것처럼 보인다 — 몇 번 앞으로 가져온다
+    tauri::async_runtime::spawn(async move {
+        for ms in [0u64, 250, 800] {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+    });
     Ok(())
 }
 

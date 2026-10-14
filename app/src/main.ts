@@ -15,7 +15,7 @@ import { sqlCompletion } from "./completion";
 import { AnalysisView } from "./analysis";
 import { DebugView } from "./debugger";
 import { MonitorView } from "./monitor";
-import { SqlEditor } from "./editor";
+import { SqlEditor, changeCase } from "./editor";
 import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from "./format";
 import type { GitPanel } from "./git";
 import { ResultGrid } from "./grid";
@@ -414,7 +414,7 @@ class App {
       (this.btn[key] = h("button", { class: cls, title, onclick }, label));
     const toolbar = h("header", { class: "toolbar" },
       this.profileSel,
-      b("connect", "접속", "선택한 프로필로 현재 탭을 접속", () => this.connectActive()),
+      b("connect", "접속", "선택한 프로필로 접속 — 이미 접속한 탭에서 다른 접속을 고르면 새 탭에 접속합니다 (지금 탭은 그대로)", () => void this.connectActive()),
       b("disconnect", "끊기", "현재 탭의 접속을 끊는다", () => this.disconnectActive()),
       this.connBadge, this.txnBadge,
       h("span", { class: "sep" }),
@@ -643,8 +643,23 @@ class App {
 
   // ── 접속 ─────────────────────────────────────────
 
-  private connectActive() {
-    if (this.active) this.connect(this.active, this.profileSel.value);
+  /** 접속 단추 — 이미 접속한 탭에서 다른 접속을 고르면 그 탭은 그대로 두고 새 탭에 접속한다 (Toad 처럼).
+   *  접속하지 않은 탭이거나 같은 접속을 다시 고르면 지금 탭에 (다시) 접속한다 */
+  private async connectActive() {
+    const t = this.active;
+    if (!t) return;
+    const name = this.profileSel.value;
+    if (t.conn && t.conn.profile !== name) {
+      const nt = this.newTab(false);
+      await this.connect(nt, name);
+      // 접속을 못 했거나 취소했으면 빈 새 탭을 치우고 원래 탭으로
+      if (!nt.conn && !nt.dirty && this.tabs.includes(nt)) {
+        await this.closeTab(nt);
+        if (this.tabs.includes(t)) this.activate(t);
+      }
+      return;
+    }
+    await this.connect(t, name);
   }
 
   async connect(t: Tab, profileName: string) {
@@ -1523,6 +1538,8 @@ class App {
     const edit: MenuItem[] = [
       { label: "실행", hint: "Ctrl+Enter", run: () => this.runStatement() },
       { label: "SQL 포맷", hint: "Ctrl+Shift+F", run: () => this.formatSql() },
+      { label: "대문자로 (구문만)", hint: "Ctrl+Shift+U", run: () => { changeCase("upper")(view); view.focus(); } },
+      { label: "소문자로 (구문만)", hint: "Ctrl+Alt+U", run: () => { changeCase("lower")(view); view.focus(); } },
       { sep: true },
       { label: "저장", hint: "Ctrl+S", run: () => this.save() },
       { label: "다른 이름으로 저장", hint: "Ctrl+Shift+S", run: () => this.saveAs() },

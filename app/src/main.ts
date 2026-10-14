@@ -58,6 +58,11 @@ class Tab {
   recovering = false;
   running = false;
   runStarted = 0;
+  /** 실행 중 표시를 갱신하는 타이머 (탭마다 — 두 탭이 동시에 돌아도 각자 센다) */
+  runTimer = 0;
+  /** 결과 영역 위에 뜨는 '실행 중' 표시 — 1초 넘게 걸릴 때만 */
+  readonly runBox = h("div", { class: "run-overlay", hidden: true });
+  private runText = h("span", { class: "run-text" });
   lastError: string | undefined;
   private editorParts: HTMLElement[] = [];
   /** 마지막으로 결과를 띄운 조회 (편집할 때 ROWID 를 붙여 다시 돈다) */
@@ -195,7 +200,9 @@ class Tab {
           h("button", { class: "small", title: "결과 영역 키우기 (에디터를 줄인다) — 경계선을 끌어도 된다", onclick: () => this.resizePane("grow") }, "▲"),
           h("button", { class: "small", title: "결과 영역 줄이기", onclick: () => this.resizePane("shrink") }, "▼"),
           h("button", { class: "small", title: "원래 비율로 (경계선을 더블클릭해도 된다)", onclick: () => this.resizePane("reset") }, "↕"))),
-      gridPane, this.output, this.plan, this.desc);
+      gridPane, this.output, this.plan, this.desc, this.runBox);
+    this.runBox.append(h("span", { class: "spinner" }), this.runText,
+      h("button", { class: "small danger", title: "실행 중인 쿼리를 취소 (Esc)", onclick: () => void app.cancel() }, "중지"));
     const splitter = h("div", { class: "splitter" });
     this.root = h("div", { class: "tab-body" }, editorHost, splitter, bottom);
     this.editorParts = [editorHost, splitter, bottom];
@@ -239,6 +246,22 @@ class Tab {
     const pct = Math.round(Math.max(15, Math.min(85, next)));
     host.style.flexBasis = `${pct}%`;
     try { localStorage.setItem("pane.editor", String(pct)); } catch { /* 기억 못 해도 된다 */ }
+  }
+
+  /** 오래 걸리는 쿼리 표시 — 결과 영역 위 안내, 탭의 도는 표시. secs 가 null 이면 끝 */
+  showRunning(secs: number | null) {
+    this.tabEl.classList.toggle("running", secs != null);
+    if (secs == null || secs < 1) {
+      this.runBox.hidden = true;
+      return;
+    }
+    const whole = Math.floor(secs);
+    const t = whole >= 60 ? `${Math.floor(whole / 60)}분 ${whole % 60}초` : `${secs.toFixed(1)}초`;
+    this.runText.textContent = whole >= 10
+      ? `서버가 실행 중입니다 · ${t} — 응답을 기다리는 중 (오래 걸리는 쿼리입니다)`
+      : `서버가 실행 중입니다 · ${t}`;
+    this.runText.title = "응답이 올 때까지 정상적으로 기다리는 중입니다. 너무 오래 걸리면 중지(Esc)하고 실행계획(Ctrl+E)이나 세션 모니터(세션)에서 원인을 보세요.";
+    this.runBox.hidden = false;
   }
 
   show(p: Pane) {
@@ -385,7 +408,6 @@ class App {
   private gitLoading: Promise<GitPanel> | null = null;
   private gitBadge = h("span", { class: "git-badge" });
   private layout!: SideLayout;
-  private timer = 0;
 
   constructor(root: HTMLElement) {
     const b = (key: string, label: string, title: string, onclick: () => void, cls = "") =>
@@ -1005,15 +1027,27 @@ class App {
     t.running = true;
     t.runStarted = performance.now();
     this.refresh();
-    clearInterval(this.timer);
-    this.timer = window.setInterval(() => {
-      if (t === this.active && t.running) this.statusRight.textContent = `실행 중 ${((performance.now() - t.runStarted) / 1000).toFixed(1)}s (Esc: 중지)`;
-    }, 200);
+    clearInterval(t.runTimer);
+    const tick = () => {
+      if (!t.running) return;
+      const secs = (performance.now() - t.runStarted) / 1000;
+      t.showRunning(secs);
+      if (t === this.active) {
+        this.statusRight.textContent = `실행 중 ${secs.toFixed(1)}s (Esc: 중지)`;
+        // 중지 단추에도 — 눈에 띄는 곳에서 돌고 있는 것이 보이게
+        this.btn.cancel.textContent = secs >= 1 ? `중지 ${Math.floor(secs)}s` : "중지";
+      }
+    };
+    t.runTimer = window.setInterval(tick, 200);
+    // 탭을 바꿔 와도 바로 보이게
+    tick();
     try {
       await f();
     } finally {
       t.running = false;
-      clearInterval(this.timer);
+      clearInterval(t.runTimer);
+      t.showRunning(null);
+      this.btn.cancel.textContent = "중지";
       t.editor.clearRunning();
       this.refresh();
     }
@@ -1690,6 +1724,7 @@ class App {
     // 분석은 접속 없이도 — 가져온 결과를 본다
     this.btn.analyze.disabled = busy;
     this.btn.cancel.disabled = !busy;
+    if (!busy) this.btn.cancel.textContent = "중지"; // 다른 탭으로 옮겨 와도 남은 경과 시간이 보이지 않게
     this.btn.commit.disabled = !c || busy || !t?.txnPending;
     this.btn.rollback.disabled = !c || busy || !t?.txnPending;
     this.txnBadge.hidden = !t?.txnPending;

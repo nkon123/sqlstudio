@@ -87,7 +87,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .splitter::before { content: ""; position: absolute; left: 0; right: 0; top: -4px; bottom: -4px; }
 .splitter:hover, body.row-resizing .splitter { background: var(--accent); }
 body.row-resizing { cursor: row-resize; user-select: none; }
-.bottom { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+.bottom { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--panel); position: relative; }
 .pane-tabs { display: flex; flex: none; flex-wrap: nowrap; align-items: center; gap: 2px; padding: 3px 6px; border-bottom: 1px solid var(--line); font-size: 12px; overflow: hidden; }
 .pane-tabs > * { flex: none; }
 .pane-tabs span { color: var(--dim); margin-right: 8px; }
@@ -583,3 +583,13 @@ button.small.on { background: var(--sel); border-color: var(--accent); }
 .usage-lines td { padding: 1px 6px; vertical-align: top; }
 .usage-lines td.num { width: 48px; text-align: right; color: var(--dim); font-family: var(--mono); }
 .usage-lines code { white-space: pre-wrap; word-break: break-all; }
+
+/* 실행 중 표시 — 오래 걸리는 쿼리가 돌고 있는 것이 보이게 */
+.spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.run-overlay { position: absolute; top: 40px; left: 50%; transform: translateX(-50%); z-index: 6; display: flex; align-items: center; gap: 8px; max-width: 92%;
+  padding: 6px 12px; border: 1px solid var(--accent); border-radius: 18px; background: var(--panel); box-shadow: 0 2px 10px rgba(0, 0, 0, .25); font-size: 12px; }
+.run-overlay[hidden] { display: none; }
+.run-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab.running .tab-title::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 5px; border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; }
+button.danger.running-btn { animation: pulse 1.2s infinite; }

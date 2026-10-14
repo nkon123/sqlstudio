@@ -1440,6 +1440,22 @@ class App {
     return { error: last };
   }
 
+  /** 테이블이 아닌 객체(프로시저·함수·패키지·시퀀스·트리거·타입…) 찾기 — 후보 이름을 차례로 사전에서. 패키지 본문보다 명세를 먼저 */
+  private async resolveObject(t: Tab, tries: { name: string }[]): Promise<ObjectEntry | null> {
+    for (const x of tries) {
+      const parts = x.name.replace(/"/g, "").split(".").filter(Boolean);
+      if (!parts.length || parts.length > 2) continue;
+      const name = parts[parts.length - 1].toUpperCase();
+      const owner = parts.length === 2 ? parts[0] : undefined;
+      try {
+        const list = (await api.listObjects(t.conn!.id, owner, undefined, name.replace(/[_%]/g, "\$&"))).filter((o) => o.name === name);
+        const best = list.find((o) => !o.object_type.endsWith("BODY")) ?? list[0];
+        if (best) return best;
+      } catch { /* 다음 후보 */ }
+    }
+    return null;
+  }
+
   /** F4: 커서 위치의 테이블(또는 별칭·스키마.테이블·별칭.컬럼)의 컬럼 팝업 */
   async describeAtCursor() {
     const t = this.active;
@@ -1447,11 +1463,20 @@ class App {
     const view = t.editor.view;
     const pos = view.state.selection.main.head;
     const { raw, tries } = this.tableCandidatesAt(t, pos);
-    if (!tries.length) return toast("커서를 테이블 이름(또는 별칭) 위에 두고 F4", "info");
+    if (!tries.length) return toast("커서를 테이블·프로시저 같은 이름(또는 별칭) 위에 두고 F4", "info");
     const c = view.coordsAtPos(pos);
     const r = await this.resolveTable(t, tries);
     if ("d" in r) return this.openColumns(r.d, c ? { x: c.left, y: c.bottom } : undefined, r.alias);
-    toast(`'${raw}' 를 테이블·뷰로 찾지 못했습니다${r.error ? ` — ${errOf(r.error).message}` : ""}`, "error");
+    // 테이블이 아니면 다른 객체: 코드(프로시저·함수·패키지·트리거·타입)는 소스를 새 탭에, 그 밖은 구조 탭의 상세로
+    const o = await this.resolveObject(t, tries);
+    if (o) {
+      const type = o.object_type.toUpperCase();
+      if (["PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY"].includes(type)) {
+        return api.getDdl(t.conn.id, type, `"${o.owner}"."${o.name}"`).then((x) => this.newTab(true, x)).catch((e) => toast(errOf(e).message, "error"));
+      }
+      return this.showObject(o);
+    }
+    toast(`'${raw}' 를 찾지 못했습니다${r.error ? ` — ${errOf(r.error).message}` : ""}`, "error");
   }
 
   // ── 우클릭 메뉴 ─────────────────────────────────
@@ -1556,7 +1581,13 @@ class App {
     const r = await this.resolveTable(t, tries);
     if (!document.querySelector(".ctx-menu")) return; // 그새 닫았으면 그대로
     if ("d" in r) showMenu(at.x, at.y, [...this.objectMenuItems(t, { owner: r.d.owner, name: r.d.name, object_type: r.d.object_type }, at, r.alias), { sep: true }, ...edit]);
-    else showMenu(at.x, at.y, [{ title: `${raw} — 테이블·뷰가 아님` }, { sep: true }, ...edit]);
+    else {
+      // 테이블이 아니면 다른 객체(프로시저·함수·패키지…)인지
+      const o = await this.resolveObject(t, tries);
+      if (!document.querySelector(".ctx-menu")) return;
+      if (o) showMenu(at.x, at.y, [...this.objectMenuItems(t, o, at), { sep: true }, ...edit]);
+      else showMenu(at.x, at.y, [{ title: `${raw} — 찾을 수 없는 이름` }, { sep: true }, ...edit]);
+    }
   }
 
   /** 문장 하나를 이 탭에서 실행해 결과 그리드로 (건수 세기 등) */

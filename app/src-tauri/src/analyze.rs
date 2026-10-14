@@ -233,6 +233,24 @@ pub async fn analysis_start(
     Ok(run)
 }
 
+/// 0.5.10 은 코드 파일 단위를 `PC_…`·`XQ_…` 이름의 패키지로 저장했다 — 새 이름(파일 이름 그대로 · 형식 Proc/XML)으로 바뀌었으니
+/// 같은 파일의 옛 결과를 치운다 (안 그러면 같은 파일이 두 번 보인다). 지운 게 있으면 통합 분석을 다시 만든다
+fn drop_legacy_code_units(store: &Store, units: &[source::CodeUnit]) {
+    let mut removed = 0;
+    for c in units {
+        let key = sqls_analyze::chunk::unit_key(&c.unit.owner, &c.legacy_name, "PACKAGE BODY");
+        let dir = store.unit_dir(&key);
+        if dir.is_dir() && std::fs::remove_dir_all(&dir).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        tracing::info!("옛 이름(PC_·XQ_)의 코드 분석 결과 {removed}개를 치움");
+        let overview = store.read_integrated::<Integrated>("integrated.json").and_then(|g| g.overview);
+        let _ = integrate::write_all(store, overview);
+    }
+}
+
 #[derive(Serialize)]
 pub struct CodeRow {
     /// 폴더 기준 상대 경로 (화면에 보이는 이름)
@@ -265,6 +283,7 @@ pub async fn analysis_code_list(st: State<'_, AppState>, id: u64, folder: String
         .await
         .map_err(|e| ErrView::msg("io", e.to_string()))?
         .map_err(|e| ErrView::msg("io", format!("{folder}: {e}")))?;
+    drop_legacy_code_units(&store, &units);
     let base = std::path::PathBuf::from(&folder);
     Ok(units
         .into_iter()

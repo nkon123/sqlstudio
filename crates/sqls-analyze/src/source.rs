@@ -150,7 +150,9 @@ pub fn from_files(paths: &[PathBuf], default_owner: &str) -> std::io::Result<Vec
 /// 코드 파일 하나에서 만든 분석 단위 (Pro*C · XML 쿼리)
 pub struct CodeUnit {
     pub path: PathBuf,
-    /// "Pro*C" | "XML 쿼리"
+    /// 0.5.10 이 쓰던 옛 단위 이름 (`PC_…` · `XQ_…`) — 남은 옛 결과를 치울 때
+    pub legacy_name: String,
+    /// "Proc" | "XML" (화면의 형식)
     pub kind: &'static str,
     /// 함수·쿼리 수
     pub count: usize,
@@ -160,7 +162,7 @@ pub struct CodeUnit {
 fn unique_name(used: &std::collections::HashSet<String>, base: &str) -> String {
     let mut name = base.to_string();
     let mut n = 1;
-    while used.contains(&name) {
+    while used.contains(&name.to_uppercase()) {
         n += 1;
         name = format!("{base}_{n}");
     }
@@ -177,6 +179,7 @@ pub fn scan_code(paths: &[PathBuf], owner: &str) -> std::io::Result<Vec<CodeUnit
         collect_with(p, &mut files, &|f| crate::proc::is_proc_file(f) || crate::xmlquery::is_xml_file(f))?;
     }
     files.sort();
+    // 같은 이름은 대소문자 구분 없이 (결과 폴더 이름이 겹치지 않게)
     let mut used: std::collections::HashSet<String> = Default::default();
     let mut out = Vec::new();
     for f in files {
@@ -189,18 +192,18 @@ pub fn scan_code(paths: &[PathBuf], owner: &str) -> std::io::Result<Vec<CodeUnit
         let name = unique_name(&used, &base);
         let t = if xml { crate::xmlquery::translate(&text, owner, &name) } else { crate::proc::translate(&text, owner, &name) };
         let Some(t) = t else { continue };
-        used.insert(name);
-        out.push(CodeUnit { path: f, kind: if xml { "XML 쿼리" } else { "Pro*C" }, count: t.functions, unit: t.unit });
+        used.insert(name.to_uppercase());
+        out.push(CodeUnit { legacy_name: if xml { crate::xmlquery::legacy_name(&f) } else { crate::proc::legacy_name(&f) }, path: f, kind: if xml { "XML" } else { "Proc" }, count: t.functions, unit: t.unit });
     }
     Ok(out)
 }
 
 pub fn from_proc(paths: &[PathBuf], owner: &str) -> std::io::Result<Vec<(UnitSource, Option<String>)>> {
-    Ok(scan_code(paths, owner)?.into_iter().filter(|c| c.kind == "Pro*C").map(|c| (c.unit, None)).collect())
+    Ok(scan_code(paths, owner)?.into_iter().filter(|c| c.kind == "Proc").map(|c| (c.unit, None)).collect())
 }
 
 pub fn from_xml(paths: &[PathBuf], owner: &str) -> std::io::Result<Vec<(UnitSource, Option<String>)>> {
-    Ok(scan_code(paths, owner)?.into_iter().filter(|c| c.kind == "XML 쿼리").map(|c| (c.unit, None)).collect())
+    Ok(scan_code(paths, owner)?.into_iter().filter(|c| c.kind == "XML").map(|c| (c.unit, None)).collect())
 }
 
 fn collect_with(p: &Path, out: &mut Vec<PathBuf>, keep: &dyn Fn(&Path) -> bool) -> std::io::Result<()> {

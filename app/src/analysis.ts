@@ -121,7 +121,7 @@ interface DfdTarget { focus: string; unit: "proc" | "pkg" }
 const LIST_COLS = ["✓", "형식", "이름", "분석", "분석 시각", "모델", "키"].map((name) => ({ name, type_name: "VARCHAR2", nullable: true }));
 const KEY_COL = LIST_COLS.length - 1;
 
-const TYPE_LABEL: Record<string, string> = { "PACKAGE BODY": "패키지", PROCEDURE: "프로시저", FUNCTION: "함수", TRIGGER: "트리거", "TYPE BODY": "타입" };
+const TYPE_LABEL: Record<string, string> = { "PACKAGE BODY": "패키지", PROCEDURE: "프로시저", FUNCTION: "함수", TRIGGER: "트리거", "TYPE BODY": "타입", "PROC BODY": "Proc", "XML BODY": "XML" };
 
 export class AnalysisView {
   readonly el: HTMLElement;
@@ -445,7 +445,7 @@ export class AnalysisView {
       const k = keyOf(r);
       const state = r.warning ? "읽을 수 없음" : r.analyzed_at ? `${r.chunks ?? 0}조각${r.failed ? ` · 실패 ${r.failed}` : ""}` : "—";
       if (r.path) {
-        const what = r.kind === "XML 쿼리" ? `쿼리 ${r.count ?? 0}개` : `함수 ${r.count ?? 0}개`;
+        const what = r.kind === "XML" ? `쿼리 ${r.count ?? 0}개` : `함수 ${r.count ?? 0}개`;
         return [this.checked.has(k) ? "✓" : "", r.kind ?? "", r.rel ?? r.name, r.analyzed_at ? `${state} · ${what}` : what,
           r.analyzed_at ? when(r.analyzed_at) : "", r.analyzed_at ? (r.model ?? "정적") : "", k];
       }
@@ -479,7 +479,7 @@ export class AnalysisView {
 
   /** 단위를 흐름도 가운데에 — 패키지는 패키지 상자로, 단독 프로시저·함수·트리거는 그 노드로 */
   private unitTarget(r: UnitRow): DfdTarget {
-    const body = r.unit_type === "PACKAGE BODY" || r.unit_type === "TYPE BODY";
+    const body = r.unit_type.endsWith("BODY");
     return { focus: `${r.owner}.${r.name}`, unit: body ? "pkg" : "proc" };
   }
 
@@ -714,7 +714,7 @@ export class AnalysisView {
     const u = d.unit;
     const box = h("div", { class: "an-pad" },
       h("div", { class: "an-head" }, h("button", { class: "small", onclick: () => { this.selectedUnit = null; this.renderList(); this.render(); } }, "← 전체"),
-        h("strong", {}, `${u.unit_type} ${u.owner}.${u.name}`),
+        h("strong", {}, `${TYPE_LABEL[u.unit_type] ?? u.unit_type} ${u.owner}.${u.name}`),
         h("small", { class: "dim" }, `${u.lines}행 · 조각 ${u.stats.chunks}${u.stats.failed ? ` · 실패 ${u.stats.failed}` : ""} · ${u.model ?? "정적 분석"} · ${when(u.analyzed_at)}`)));
     if (u.warning) box.append(h("p", { class: "warn" }, u.warning));
     if (u.summary) box.append(insightEl(u.summary));

@@ -11,13 +11,22 @@
 use std::path::Path;
 
 use crate::chunk::UnitSource;
-use crate::proc::Translated;
+use crate::proc::{Translated, INNER};
 
 pub fn is_xml_file(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("xml"))
 }
 
+/// 분석 단위의 형식 — 화면에는 "XML" 으로 보인다. `…BODY` 로 끝나니 패키지처럼 서브프로그램 묶음으로 다뤄진다
+pub const UNIT_TYPE: &str = "XML BODY";
+
+/// 파일 이름 → 단위 이름 (`order.xml` → `order`, 파일 이름 그대로)
 pub fn unit_name(path: &Path) -> String {
+    path.file_stem().and_then(|s| s.to_str()).unwrap_or("X").to_string()
+}
+
+/// 바로 앞 버전(0.5.10)이 쓰던 이름 (`XQ_ORDER`) — 남아 있는 옛 결과를 치울 때
+pub fn legacy_name(path: &Path) -> String {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("X");
     let s: String = stem.chars().map(|c| if c.is_alphanumeric() || c == '_' { c.to_ascii_uppercase() } else { '_' }).collect();
     format!("XQ_{s}")
@@ -56,8 +65,8 @@ pub fn translate(text: &str, owner: &str, name: &str) -> Option<Translated> {
         return None;
     }
     out.push_str(&newlines(&text[at..]));
-    let body = format!("PACKAGE BODY {name} IS {} END {name};", out.trim_end_matches('\n'));
-    Some(Translated { unit: UnitSource { owner: owner.to_uppercase(), name: name.to_string(), unit_type: "PACKAGE BODY".into(), text: body }, functions: count, statements: count })
+    let body = format!("PACKAGE BODY {INNER} IS {} END {INNER};", out.trim_end_matches('\n'));
+    Some(Translated { unit: UnitSource { owner: owner.to_uppercase(), name: name.to_string(), unit_type: UNIT_TYPE.into(), text: body }, functions: count, statements: count })
 }
 
 fn newlines(s: &str) -> String {
@@ -386,7 +395,7 @@ mod tests {
     fn facts_from_translated_xml() {
         let t = translate(XML, "SCOTT", "XQ_ORDER").unwrap();
         let (st, toks) = crate::plsql::structure(&t.unit.text);
-        assert_eq!(st.name, "XQ_ORDER");
+        assert_eq!(st.name, "CODE_UNIT");
         assert_eq!(st.subprograms.len(), 6, "{:?}", st.subprograms.iter().map(|s| &s.name).collect::<Vec<_>>());
         let locals = crate::facts::local_names(&toks);
         let f = crate::facts::extract(&toks, &locals);

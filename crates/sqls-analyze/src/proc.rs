@@ -20,8 +20,19 @@ pub fn is_proc_file(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| EXTS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
-/// 파일 이름 → 단위 이름 (`order_load.pc` → `PC_ORDER_LOAD`)
+/// 변환한 PL/SQL 안의 패키지 이름 — 이름이 숫자로 시작하거나 한글이어도 파서가 읽게 고정 (화면에 보이는 이름은 단위 이름)
+pub(crate) const INNER: &str = "CODE_UNIT";
+
+/// 분석 단위의 형식 — 화면에는 "Proc" 으로 보인다. `…BODY` 로 끝나니 패키지처럼 서브프로그램 묶음으로 다뤄진다
+pub const UNIT_TYPE: &str = "PROC BODY";
+
+/// 파일 이름 → 단위 이름 (`order_load.pc` → `order_load`, 파일 이름 그대로)
 pub fn unit_name(path: &Path) -> String {
+    path.file_stem().and_then(|s| s.to_str()).unwrap_or("X").to_string()
+}
+
+/// 바로 앞 버전(0.5.10)이 쓰던 이름 (`PC_ORDER_LOAD`) — 남아 있는 옛 결과를 치울 때
+pub fn legacy_name(path: &Path) -> String {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("X");
     let s: String = stem.chars().map(|c| if c.is_alphanumeric() || c == '_' { c.to_ascii_uppercase() } else { '_' }).collect();
     format!("PC_{s}")
@@ -48,8 +59,8 @@ pub fn translate(text: &str, owner: &str, name: &str) -> Option<Translated> {
         return None;
     }
     // 끝 줄바꿈은 걷어 END 를 마지막 줄에 붙인다 (줄 수를 원본과 같게)
-    let body = format!("PACKAGE BODY {name} IS {} END {name};", s.out.trim_end_matches('\n'));
-    Some(Translated { unit: UnitSource { owner: owner.to_uppercase(), name: name.to_string(), unit_type: "PACKAGE BODY".into(), text: body }, functions: s.names.len(), statements: s.stmts })
+    let body = format!("PACKAGE BODY {INNER} IS {} END {INNER};", s.out.trim_end_matches('\n'));
+    Some(Translated { unit: UnitSource { owner: owner.to_uppercase(), name: name.to_string(), unit_type: UNIT_TYPE.into(), text: body }, functions: s.names.len(), statements: s.stmts })
 }
 
 fn ident_start(c: char) -> bool {
@@ -635,7 +646,7 @@ err:
         let t = translate(PC, "scott", "PC_LOAD").expect("EXEC SQL 이 있다");
         assert_eq!(t.functions, 2);
         let out = &t.unit.text;
-        assert!(out.starts_with("PACKAGE BODY PC_LOAD IS "), "{out}");
+        assert!(out.starts_with("PACKAGE BODY CODE_UNIT IS "), "{out}");
         assert!(out.contains("PROCEDURE LOAD_ORDERS IS BEGIN"));
         assert!(out.contains("PROCEDURE MAIN IS BEGIN"));
         // 줄 수는 원본과 같다 (맨 앞 줄에 머리를 붙이므로)
@@ -658,7 +669,7 @@ err:
     fn facts_from_translated_proc() {
         let t = translate(PC, "SCOTT", "PC_LOAD").unwrap();
         let (st, toks) = crate::plsql::structure(&t.unit.text);
-        assert_eq!(st.name, "PC_LOAD");
+        assert_eq!(st.name, "CODE_UNIT");
         let locals = crate::facts::local_names(&toks);
         let f = crate::facts::extract(&toks, &locals);
         let tab = |n: &str| f.tables.iter().find(|t| t.name == n).map(|t| t.ops.clone());

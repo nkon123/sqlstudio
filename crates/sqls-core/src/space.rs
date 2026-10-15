@@ -32,11 +32,11 @@ fn is_privilege_error(e: &Error) -> bool {
 /// 자동 확장 파일은 최대 크기도 함께 (사용률이 낮아 보여도 한도가 가까울 수 있다)
 pub async fn tablespaces(s: &Session) -> Result<SpaceGrid> {
     let sql = "SELECT t.tablespace_name, t.contents, t.status, \
-                      ROUND(d.total / 1048576, 1), \
-                      ROUND((d.total - NVL(f.free, 0)) / 1048576, 1), \
-                      ROUND(NVL(f.free, 0) / 1048576, 1), \
+                      ROUND(d.total / 1073741824, 2), \
+                      ROUND((d.total - NVL(f.free, 0)) / 1073741824, 2), \
+                      ROUND(NVL(f.free, 0) / 1073741824, 2), \
                       ROUND((d.total - NVL(f.free, 0)) / NULLIF(d.total, 0) * 100, 1), \
-                      ROUND(d.maxb / 1048576, 1), \
+                      ROUND(d.maxb / 1073741824, 2), \
                       ROUND((d.total - NVL(f.free, 0)) / NULLIF(d.maxb, 0) * 100, 1), \
                       d.files, d.autoext \
                FROM dba_tablespaces t \
@@ -48,17 +48,17 @@ pub async fn tablespaces(s: &Session) -> Result<SpaceGrid> {
                       ON f.tablespace_name = t.tablespace_name \
                ORDER BY 7 DESC NULLS LAST, 1";
     let columns = cols(&[
-        ("테이블스페이스", false), ("종류", false), ("상태", false), ("전체(MB)", true), ("사용(MB)", true), ("남음(MB)", true),
-        ("사용률(%)", true), ("최대(MB)", true), ("최대 대비(%)", true), ("파일 수", true), ("자동 확장", false),
+        ("테이블스페이스", false), ("종류", false), ("상태", false), ("전체(GB)", true), ("사용(GB)", true), ("남음(GB)", true),
+        ("사용률(%)", true), ("최대(GB)", true), ("최대 대비(%)", true), ("파일 수", true), ("자동 확장", false),
     ]);
     match s.query(sql, vec![], 5_000).await {
         Ok(page) => {
             let mut rows = page.rows;
             // 임시 테이블스페이스 — 11g 부터의 DBA_TEMP_FREE_SPACE. 못 보면 건너뛴다
             let temp = "SELECT f.tablespace_name, 'TEMPORARY', t.status, \
-                               ROUND(f.tablespace_size / 1048576, 1), ROUND(f.allocated_space / 1048576, 1), ROUND(f.free_space / 1048576, 1), \
+                               ROUND(f.tablespace_size / 1073741824, 2), ROUND(f.allocated_space / 1073741824, 2), ROUND(f.free_space / 1073741824, 2), \
                                ROUND(f.allocated_space / NULLIF(f.tablespace_size, 0) * 100, 1), \
-                               ROUND(m.maxb / 1048576, 1), ROUND(f.allocated_space / NULLIF(m.maxb, 0) * 100, 1), m.files, m.autoext \
+                               ROUND(m.maxb / 1073741824, 2), ROUND(f.allocated_space / NULLIF(m.maxb, 0) * 100, 1), m.files, m.autoext \
                         FROM dba_temp_free_space f \
                         JOIN dba_tablespaces t ON t.tablespace_name = f.tablespace_name \
                         JOIN (SELECT tablespace_name, SUM(GREATEST(bytes, DECODE(autoextensible, 'YES', maxbytes, bytes))) maxb, COUNT(*) files, MAX(autoextensible) autoext \
@@ -76,13 +76,13 @@ pub async fn tablespaces(s: &Session) -> Result<SpaceGrid> {
 /// DBA 권한이 없을 때 — 접속 계정에 허용된 테이블스페이스의 쿼터와 사용량
 async fn user_quotas(s: &Session) -> Result<SpaceGrid> {
     let sql = "SELECT tablespace_name, \
-                      ROUND(bytes / 1048576, 1), \
-                      CASE WHEN max_bytes < 0 THEN NULL ELSE ROUND(max_bytes / 1048576, 1) END, \
+                      ROUND(bytes / 1073741824, 2), \
+                      CASE WHEN max_bytes < 0 THEN NULL ELSE ROUND(max_bytes / 1073741824, 2) END, \
                       CASE WHEN max_bytes < 0 THEN '무제한' ELSE TO_CHAR(ROUND(bytes / NULLIF(max_bytes, 0) * 100, 1)) END \
                FROM user_ts_quotas ORDER BY bytes DESC";
     let page = s.query(sql, vec![], 1_000).await?;
     Ok(SpaceGrid {
-        columns: cols(&[("테이블스페이스", false), ("내가 쓴 크기(MB)", true), ("쿼터(MB)", true), ("쿼터 대비", false)]),
+        columns: cols(&[("테이블스페이스", false), ("내가 쓴 크기(GB)", true), ("쿼터(GB)", true), ("쿼터 대비", false)]),
         rows: page.rows,
         note: Some("DBA 권한이 없어 접속 계정의 테이블스페이스 쿼터만 보여 줍니다 (전체 용량은 DBA_ 뷰 조회 권한이 필요합니다)".into()),
     })
@@ -99,8 +99,8 @@ pub async fn table_sizes(s: &Session, owner: Option<&str>, name_like: Option<&st
             "WITH seg AS (SELECT segment_name, segment_type, tablespace_name, bytes FROM {seg_from} \
                             AND (segment_type LIKE 'TABLE%' OR segment_type LIKE 'INDEX%' OR segment_type LIKE 'LOB%' OR segment_type = 'NESTED TABLE')) \
              SELECT t.table_name, \
-                    ROUND(NVL(tb.b, 0) / 1048576, 2), ROUND(NVL(ix.b, 0) / 1048576, 2), ROUND(NVL(lb.b, 0) / 1048576, 2), \
-                    ROUND((NVL(tb.b, 0) + NVL(ix.b, 0) + NVL(lb.b, 0)) / 1048576, 2), \
+                    ROUND(NVL(tb.b, 0) / 1073741824, 4), ROUND(NVL(ix.b, 0) / 1073741824, 4), ROUND(NVL(lb.b, 0) / 1073741824, 4), \
+                    ROUND((NVL(tb.b, 0) + NVL(ix.b, 0) + NVL(lb.b, 0)) / 1073741824, 4), \
                     t.num_rows, TO_CHAR(t.last_analyzed, 'YYYY-MM-DD'), NVL(tb.ts, t.tablespace_name), t.partitioned \
              FROM all_tables t \
              LEFT JOIN (SELECT segment_name n, SUM(bytes) b, MAX(tablespace_name) ts FROM seg WHERE segment_type LIKE 'TABLE%' OR segment_type = 'NESTED TABLE' GROUP BY segment_name) tb \
@@ -115,7 +115,7 @@ pub async fn table_sizes(s: &Session, owner: Option<&str>, name_like: Option<&st
     };
     let binds = || vec![("O".to_string(), Some(owner.clone())), ("PAT".to_string(), pat.clone())];
     let columns = cols(&[
-        ("테이블", false), ("테이블(MB)", true), ("인덱스(MB)", true), ("LOB(MB)", true), ("합계(MB)", true),
+        ("테이블", false), ("테이블(GB)", true), ("인덱스(GB)", true), ("LOB(GB)", true), ("합계(GB)", true),
         ("행 수(통계)", true), ("통계 시각", false), ("테이블스페이스", false), ("파티션", false),
     ]);
     match s.query(&build("dba_segments WHERE owner = :o"), binds(), limit).await {

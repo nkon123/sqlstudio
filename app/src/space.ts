@@ -11,7 +11,8 @@ interface SpaceGrid { columns: [string, boolean][]; rows: (string | null)[][]; n
 
 type Tab = "tables" | "spaces";
 
-const size = (mb: number) => (mb >= 1048576 ? `${(mb / 1048576).toFixed(2)} TB` : mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`);
+/** 합계 표시 — 입력은 GB */
+const size = (gb: number) => (gb >= 1024 ? `${(gb / 1024).toFixed(2)} TB` : gb >= 1 ? `${gb.toFixed(2)} GB` : `${(gb * 1024).toFixed(1)} MB`);
 
 /** user: 접속 계정 (스키마 칸의 기본값) */
 export function showSpace(id: number, user: string, owner?: string): Promise<unknown> {
@@ -43,7 +44,7 @@ export function showSpace(id: number, user: string, owner?: string): Promise<unk
   const summarize = () => {
     if (!data) return;
     const rows = grid.viewRows();
-    const idx = data.columns.findIndex(([n]) => n === (tab === "tables" ? "합계(MB)" : "사용(MB)"));
+    const idx = data.columns.findIndex(([n]) => n === (tab === "tables" ? "합계(GB)" : "사용(GB)"));
     const sum = idx < 0 ? null : rows.reduce((a, r) => a + (Number(r[idx]) || 0), 0);
     const total = data.rows.length;
     statusEl.textContent = `${rows.length === total ? `${total}행` : `${rows.length}/${total}행`}${sum == null ? "" : ` · ${tab === "tables" ? "합계" : "사용"} ${size(sum)}`}${tab === "tables" && total >= 3000 ? " · 큰 것부터 3,000개만" : ""}`;

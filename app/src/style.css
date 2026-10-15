@@ -610,5 +610,9 @@ button.danger.running-btn { animation: pulse 1.2s infinite; }
 .tab-plus { border: none; background: none; padding: 0 12px; font-size: 16px; line-height: 1; color: var(--dim); cursor: pointer; flex: none; }
 .tab-plus:hover { color: var(--text); background: var(--sel); }
 .tab { user-select: none; }
-.tab.dragging { opacity: .75; box-shadow: 0 2px 8px rgba(0, 0, 0, .3); position: relative; z-index: 2; }
+/* 탭 끌기: 원래 탭은 제자리에서 흐리게, 복제본이 마우스를 따라다니고, 놓일 자리에 파란 선 */
+.tab.drag-origin { opacity: .35; }
+.tab-ghost { position: fixed; z-index: 3000; pointer-events: none; background: var(--panel); color: var(--text); border: 1px solid var(--accent);
+  border-radius: 4px 4px 0 0; box-shadow: 0 4px 14px rgba(0, 0, 0, .35); opacity: .95; }
+.tab-drop { position: fixed; z-index: 3001; width: 3px; border-radius: 2px; background: var(--accent); pointer-events: none; box-shadow: 0 0 6px var(--accent); }
 body.tab-dragging { cursor: grabbing; user-select: none; }

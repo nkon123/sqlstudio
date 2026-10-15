@@ -16,6 +16,7 @@ import { AnalysisView } from "./analysis";
 import { DebugView } from "./debugger";
 import { MonitorView } from "./monitor";
 import { showSpace } from "./space";
+import { enableTabDrag } from "./tabdrag";
 import { addCondition, cellCondition, listCondition, listText, selectExpr, type CondOp, type ListCond, type ListText } from "./cond";
 import { SqlEditor, changeCase } from "./editor";
 import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from "./format";
@@ -623,39 +624,15 @@ class App {
     return t;
   }
 
-  /** 탭을 끌어 순서 바꾸기 — HTML5 드래그는 창의 파일 드롭과 얽히므로 마우스 이벤트로 */
+  /** 탭을 끌어 순서 바꾸기 (끄는 동안 놓일 자리를 선으로 보인다) */
   private enableTabDrag(t: Tab) {
-    const el = t.tabEl;
-    el.addEventListener("mousedown", (e) => {
-      if (e.button !== 0 || (e.target as HTMLElement).closest(".tab-close")) return;
-      const startX = e.clientX;
-      let dragging = false;
-      const move = (ev: MouseEvent) => {
-        if (!dragging && Math.abs(ev.clientX - startX) < 6) return;
-        if (!dragging) {
-          dragging = true;
-          el.classList.add("dragging");
-          document.body.classList.add("tab-dragging");
-        }
-        // 마우스가 다른 탭의 가운데선을 넘으면 그 앞·뒤로 자리를 옮긴다
-        const others = [...this.tabStrip.querySelectorAll<HTMLElement>(".tab")].filter((x) => x !== el);
-        const before = others.find((o) => { const r = o.getBoundingClientRect(); return ev.clientX < r.left + r.width / 2; }) ?? null;
-        if (before !== el.nextElementSibling) this.tabStrip.insertBefore(el, before);
-      };
-      const up = () => {
-        window.removeEventListener("mousemove", move);
-        el.classList.remove("dragging");
-        document.body.classList.remove("tab-dragging");
-        if (!dragging) return;
+    enableTabDrag(t.tabEl, this.tabStrip, {
+      onReorder: () => {
         // 화면의 순서를 탭 목록에 반영한다
         const order = [...this.tabStrip.querySelectorAll<HTMLElement>(".tab")];
         this.tabs.sort((a, b) => order.indexOf(a.tabEl) - order.indexOf(b.tabEl));
-        el.scrollIntoView({ inline: "nearest", block: "nearest" });
-        this.tabJustDragged = true;
-        setTimeout(() => { this.tabJustDragged = false; }, 0);
-      };
-      window.addEventListener("mousemove", move);
-      window.addEventListener("mouseup", up, { once: true });
+      },
+      setJustDragged: (v) => { this.tabJustDragged = v; },
     });
   }
 

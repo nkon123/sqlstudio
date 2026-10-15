@@ -301,7 +301,7 @@ fn renamed_profile_adopts_the_only_orphan_result() {
     let _ = fs::remove_dir_all(&root);
     let make = |name: &str, imported: bool| {
         let d = root.join(name);
-        fs::create_dir_all(d.join("units").join("A")).unwrap();
+        fs::create_dir_all(d.join("units").join("APP.PKG.PACKAGE_BODY")).unwrap();
         if imported { fs::write(d.join("imported.json"), "{}").unwrap(); }
     };
     make("OLD_NAME", false);
@@ -309,19 +309,25 @@ fn renamed_profile_adopts_the_only_orphan_result() {
     make("QA", false);
     let profiles = vec!["QA".to_string(), "NEW_NAME".to_string()];
     // 이미 결과가 있으면 건드리지 않는다
-    assert_eq!(crate::adopt_renamed_in(&root, "QA", &profiles), None);
+    assert_eq!(crate::adopt_renamed_in(&root, "QA", &profiles, "APP"), None);
     // 새 이름: 어느 접속의 것도 아니고 가져온 것도 아닌 OLD_NAME 하나뿐 → 이어 붙인다 (빈 폴더가 먼저 만들어져 있어도)
     fs::create_dir_all(root.join("NEW_NAME").join("units")).unwrap();
-    assert_eq!(crate::adopt_renamed_in(&root, "NEW_NAME", &profiles).as_deref(), Some("OLD_NAME"));
-    assert!(root.join("NEW_NAME").join("units").join("A").is_dir());
+    // 다른 계정으로 접속한 것이면(다른 DB 의 결과일 수 있다) 건드리지 않는다
+    assert_eq!(crate::adopt_renamed_in(&root, "NEW_NAME", &profiles, "OTHER"), None);
+    assert_eq!(crate::adopt_renamed_in(&root, "NEW_NAME", &profiles, "app").as_deref(), Some("OLD_NAME"));
+    assert!(root.join("NEW_NAME").join("units").join("APP.PKG.PACKAGE_BODY").is_dir());
     assert!(!root.join("OLD_NAME").exists());
     assert!(root.join("받은것").exists());
     // 더는 고아가 없다
     let _ = fs::remove_dir_all(root.join("NEW_NAME"));
-    assert_eq!(crate::adopt_renamed_in(&root, "NEW_NAME", &profiles), None);
+    assert_eq!(crate::adopt_renamed_in(&root, "NEW_NAME", &profiles, "APP"), None);
+    // 지운 접속의 결과는 이어 붙이지 않는다
+    make("GONE", false);
+    fs::write(root.join("GONE").join(crate::DELETED_MARK), "{}").unwrap();
+    assert_eq!(crate::adopt_renamed_in(&root, "NEW_NAME", &profiles, "APP"), None);
     // 고아가 둘이면 고르지 않는다
     make("X1", false);
     make("X2", false);
-    assert_eq!(crate::adopt_renamed_in(&root, "NEW_NAME", &profiles), None);
+    assert_eq!(crate::adopt_renamed_in(&root, "NEW_NAME", &profiles, "APP"), None);
     let _ = fs::remove_dir_all(&root);
 }

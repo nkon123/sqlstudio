@@ -1484,7 +1484,7 @@ class App {
       const name = parts[parts.length - 1].toUpperCase();
       const owner = parts.length === 2 ? parts[0] : undefined;
       try {
-        const list = (await api.listObjects(t.conn!.id, owner, undefined, name.replace(/[_%]/g, "\$&"))).filter((o) => o.name === name);
+        const list = (await api.listObjects(t.conn!.id, owner, undefined, name.replace(/[_%\\]/g, "\\$&"))).filter((o) => o.name === name);
         const best = list.find((o) => !o.object_type.endsWith("BODY")) ?? list[0];
         if (best) return best;
       } catch { /* 다음 후보 */ }
@@ -1678,7 +1678,14 @@ class App {
     if (!q) return;
     const view = t.editor.view;
     const doc = view.state.doc.toString();
-    const at = doc.indexOf(q.sql);
+    // 같은 쿼리가 여러 번 있으면 커서에 가장 가까운 것 (보통 방금 실행한 것)
+    const cursor = view.state.selection.main.head;
+    let at = -1;
+    for (let i = doc.indexOf(q.sql); i >= 0; i = doc.indexOf(q.sql, i + 1)) {
+      const dist = cursor < i ? i - cursor : cursor > i + q.sql.length ? cursor - i - q.sql.length : 0;
+      const best = at < 0 ? Infinity : cursor < at ? at - cursor : cursor > at + q.sql.length ? cursor - at - q.sql.length : 0;
+      if (dist < best) at = i;
+    }
     if (at < 0) return toast("에디터에서 이 결과를 만든 쿼리를 찾지 못했습니다 — 쿼리를 고쳤거나 지웠다면 다시 실행한 뒤 눌러 주세요", "error", 6000);
     const added = placeCondition(q.sql, column, make);
     if ("error" in added) return toast(added.error, "error", 6000);

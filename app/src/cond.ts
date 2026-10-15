@@ -118,12 +118,16 @@ const ident = (s: string) => (/^[A-Z][A-Z0-9_$#]*$/.test(s) ? s : `"${s.replace(
 /** 값 하나의 SQL 리터럴 (열 종류에 맞게). 못 만들면 null */
 function literal(col: Column, v: string): string | null {
   const t = col.type_name || "";
-  if (NUMERIC.test(t)) return /^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(v.trim()) ? v.trim() : q(v);
+  // .5 · -.5 · 1. 처럼 앞뒤 0 이 빠진 숫자도 그대로
+  if (NUMERIC.test(t)) return /^-?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(v.trim()) ? v.trim() : q(v);
   if (/^DATE/i.test(t) || /^TIMESTAMP/i.test(t)) {
     const m = TS.exec(v);
     if (!m) return null;
     const base = `${m[1]} ${m[2]}`;
     if (/^DATE/i.test(t)) return `TO_DATE('${base}', 'YYYY-MM-DD HH24:MI:SS')`;
+    // 시간대가 있는 열은 값의 시간대(+09:00)까지 — 빼면 세션 시간대로 읽혀 같은 값이 안 맞을 수 있다
+    const tz = /TIME ZONE/i.test(t) ? /\s*([+-]\d{2}:\d{2})\s*$/.exec(v)?.[1] : undefined;
+    if (tz) return `TO_TIMESTAMP_TZ('${base}${m[3] ?? ""} ${tz}', 'YYYY-MM-DD HH24:MI:SS${m[3] ? ".FF9" : ""} TZH:TZM')`;
     return m[3] ? `TO_TIMESTAMP('${base}${m[3]}', 'YYYY-MM-DD HH24:MI:SS.FF9')` : `TO_TIMESTAMP('${base}', 'YYYY-MM-DD HH24:MI:SS')`;
   }
   return q(v);
@@ -334,7 +338,9 @@ export function placeCondition(
   make: (expr: string | null) => { cond: string } | { error: string },
 ): { sql: string; cond: string; wrapped: boolean } | { error: string } {
   const setOp = scan(sql).words.some((x) => WORD_SET_OPS.has(x.w));
-  const kind = setOp ? "complex" : columnKind(sql, col.name);
+  // 분석 함수(… OVER (…))·ROWNUM 이 SELECT 목록에 있으면 WHERE 에 넣는 순간 그 값(순번·누계)이 달라진다 — 감싼다
+  const windowed = (selectList(sql) ?? []).some((i) => /\bOVER\s*\(|\bROWNUM\b/i.test(i));
+  const kind = setOp || windowed ? "complex" : columnKind(sql, col.name);
   if (kind === "complex") {
     const c = make(null);
     if ("error" in c) return c;

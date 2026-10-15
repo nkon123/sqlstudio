@@ -186,7 +186,8 @@ fn to_plsql(raw: &str) -> (String, bool) {
         if let Some(r) = s.strip_prefix("?") {
             s = r.trim_start().trim_start_matches('=').trim().to_string();
         }
-        if s.len() >= 4 && s[..4].eq_ignore_ascii_case("call") {
+        // get: 앞 4바이트가 글자 경계가 아니면(한글 등) 'call' 일 수 없다 — 잘라서 패닉 나지 않게
+        if s.get(..4).is_some_and(|w| w.eq_ignore_ascii_case("call")) {
             s = s[4..].trim().to_string();
         }
         return (format!("{};", crate::proc::hostvars(&s)), dynamic);

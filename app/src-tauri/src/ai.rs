@@ -88,11 +88,18 @@ pub fn delete_provider(st: State<'_, AppState>, name: String) -> R<()> {
 }
 
 /// 모델 목록 — 아직 저장하지 않은 설정(주소·종류)으로 서버에 묻는다 (Ollama 는 /api/tags).
-/// 같은 이름으로 저장된 API 키가 있으면 쓴다
+/// 같은 이름으로 저장된 API 키는 저장된 설정과 같은 서버(종류·주소)로 물을 때만 쓴다 —
+/// 주소 칸을 고치는 중에(치는 도중 자동으로 묻는다) 저장된 키가 다른 서버로 나가지 않게
 #[tauri::command]
 pub async fn ai_list_models(st: State<'_, AppState>, provider: ProviderConfig) -> R<Vec<String>> {
     let mut p = provider;
-    if p.api_key.is_none() {
+    let same_server = st
+        .providers
+        .read()
+        .unwrap()
+        .iter()
+        .any(|s| s.name == p.name && s.kind == p.kind && s.base_url().trim_end_matches('/') == p.base_url().trim_end_matches('/'));
+    if p.api_key.is_none() && same_server {
         if let Some(k) = st.api_keys.read().unwrap().get(&p.name) {
             p.api_key = Some(k.clone());
         } else if let Some(k) = sqls_core::secret::get(&sqls_core::secret::llm_account(&p.name)) {

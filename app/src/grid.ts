@@ -221,6 +221,8 @@ export class ResultGrid {
   append(page: RowPage) {
     for (const r of page.rows) this.rows.push(r);
     this.hasMore = page.has_more;
+    // 정렬 중이면 새 행이 사이사이에 끼어 화면 행 번호가 바뀐다 — 고른 셀이 엉뚱한 행을 가리키지 않게 푼다
+    if (this.sortCol >= 0) { this.sel = null; this.picked.clear(); }
     this.rebuildView();
     this.update();
     this.status();
@@ -358,9 +360,10 @@ export class ResultGrid {
 
   /** 선택한 행들을 지울 행으로 표시 (다시 하면 풀린다) */
   toggleDeleteSelected() {
-    if (!this.edit || !this.sel) return;
-    const [a, b] = [Math.min(this.sel.r0, this.sel.r1), Math.max(this.sel.r0, this.sel.r1)];
-    const rs = this.view.slice(a, b + 1);
+    if (!this.edit) return;
+    // 사각형 선택과 Ctrl+클릭으로 고른 셀의 행 모두
+    const rs = this.selRowIdx().map((r) => this.view[r]);
+    if (!rs.length) return;
     const all = rs.every((r) => this.deleted.has(r));
     for (const r of rs) (all ? this.deleted.delete(r) : this.deleted.add(r));
     this.update();

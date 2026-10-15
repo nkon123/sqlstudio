@@ -143,6 +143,8 @@ pub fn save_profile(st: State<'_, AppState>, profile: Profile, original_name: Op
                 }
             }
         }
+        // 지웠던 이름을 다시 쓰면 그 결과 폴더는 다시 이 접속의 것이다
+        let _ = std::fs::remove_file(sqls_analyze::default_dir(&profile.name).join(sqls_analyze::DELETED_MARK));
         match cfg.connections.iter_mut().find(|p| p.name.eq_ignore_ascii_case(&key)) {
             Some(p) => *p = profile,
             None => cfg.connections.push(profile),
@@ -158,6 +160,8 @@ pub fn delete_profile(st: State<'_, AppState>, name: String) -> R<()> {
         cfg.connections.retain(|p| !p.name.eq_ignore_ascii_case(&name));
         cfg.mcp.allowed_connections.retain(|n| !n.eq_ignore_ascii_case(&name));
     }
+    // 분석 결과는 남겨 두되, 다른 접속이 '이름이 바뀐 옛 결과' 로 이어 붙이지 않게 표시한다
+    sqls_analyze::mark_deleted(&name);
     st.save_config()
 }
 
@@ -640,7 +644,7 @@ pub struct CountView {
 #[tauri::command]
 pub async fn count_rows(st: State<'_, AppState>, id: u64, sql: String, binds: Vec<(String, Option<String>)>) -> R<CountView> {
     let body = sql.trim().trim_end_matches(['/', ';']).trim_end();
-    let head = body.trim_start().split(|c: char| c.is_whitespace() || c == '(').find(|w| !w.is_empty()).unwrap_or("").to_uppercase();
+    let head = first_keyword(body);
     if body.is_empty() || !matches!(head.as_str(), "SELECT" | "WITH") {
         return Err(ErrView::msg("invalid", "조회(SELECT)의 결과만 셀 수 있습니다"));
     }
@@ -651,6 +655,35 @@ pub async fn count_rows(st: State<'_, AppState>, id: u64, sql: String, binds: Ve
 )"), binds, 1).await?;
     let rows = page.rows.first().and_then(|r| r.first().cloned().flatten()).unwrap_or_else(|| "0".into());
     Ok(CountView { rows, elapsed_ms: started.elapsed().as_millis() as u64 })
+}
+
+/// 맨 앞 낱말(대문자) — 앞의 주석(`--`·`/* */`)과 여는 괄호는 건너뛴다
+fn first_keyword(sql: &str) -> String {
+    let mut s = sql.trim_start();
+    loop {
+        if let Some(r) = s.strip_prefix("--") {
+            s = r.find('\n').map(|i| &r[i + 1..]).unwrap_or("").trim_start();
+        } else if let Some(r) = s.strip_prefix("/*") {
+            s = r.find("*/").map(|i| &r[i + 2..]).unwrap_or("").trim_start();
+        } else if let Some(r) = s.strip_prefix('(') {
+            s = r.trim_start();
+        } else {
+            break;
+        }
+    }
+    s.split(|c: char| c.is_whitespace() || c == '(').next().unwrap_or("").to_uppercase()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn first_keyword_skips_comments() {
+        assert_eq!(super::first_keyword("  -- 건수\n/* x */ select 1 from dual"), "SELECT");
+        assert_eq!(super::first_keyword("(SELECT 1 FROM dual) UNION ALL (SELECT 2 FROM dual)"), "SELECT");
+        assert_eq!(super::first_keyword("WITH a AS (SELECT 1 FROM dual) SELECT * FROM a"), "WITH");
+        assert_eq!(super::first_keyword("update t set a = 1"), "UPDATE");
+        assert_eq!(super::first_keyword("-- 끝"), "");
+    }
 }
 
 /// 테이블스페이스별 용량 (읽기 전용 사전 조회 세션으로)

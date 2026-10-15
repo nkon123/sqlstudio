@@ -31,17 +31,18 @@ fn profile_of(st: &AppState, id: u64) -> R<String> {
         .ok_or_else(|| ErrView::msg("session_closed", "세션이 닫혀 있습니다"))
 }
 
-/// 접속 이름을 바꿔 결과 폴더를 못 찾으면, 옛 이름으로 남은 결과를 이어 붙인다 (이 접속의 결과가 없을 때만)
-fn adopt_old_results(st: &AppState, profile: &str) {
+/// 접속 이름을 바꿔 결과 폴더를 못 찾으면, 옛 이름으로 남은 결과를 이어 붙인다 (이 접속의 결과가 없고, 옛 결과가 이 접속 계정의 것일 때만)
+fn adopt_old_results(st: &AppState, id: u64, profile: &str) {
+    let Ok(owner) = session_user(st, id) else { return };
     let names: Vec<String> = st.cfg.read().unwrap().connections.iter().map(|p| p.name.clone()).collect();
-    if let Some(old) = sqls_analyze::adopt_renamed(profile, &names) {
+    if let Some(old) = sqls_analyze::adopt_renamed(profile, &names, &owner) {
         tracing::info!("분석 결과 '{old}' 를 '{profile}' 로 이어 붙임 (접속 이름이 바뀐 것으로 보임)");
     }
 }
 
 fn store_for(st: &AppState, id: u64) -> R<Store> {
     let p = profile_of(st, id)?;
-    adopt_old_results(st, &p);
+    adopt_old_results(st, id, &p);
     Store::open(sqls_analyze::default_dir(&p)).map_err(|e| ErrView::msg("io", e.to_string()))
 }
 
@@ -464,7 +465,7 @@ pub async fn open_dfd_window(
         }
         (None, Some(id)) => {
             let p = profile_of(&st, id)?;
-            adopt_old_results(&st, &p);
+            adopt_old_results(&st, id, &p);
             p
         }
         (None, None) => return Err(ErrView::msg("invalid", "접속하거나 볼 분석 결과를 고르세요")),

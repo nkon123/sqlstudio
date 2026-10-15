@@ -2264,12 +2264,18 @@ class App {
         h("option", { value: "openai_compatible", selected: p?.kind === "openai_compatible" }, "OpenAI 호환 (LM Studio, vLLM, OpenAI…)"),
         h("option", { value: "anthropic", selected: p?.kind === "anthropic" }, "Anthropic (Claude)"));
       const base = h("input", { value: p?.base_url ?? "", placeholder: "비우면 기본값" });
-      const model = h("input", { value: p?.model ?? "" });
+      const model = h("input", { value: p?.model ?? "", style: "flex:1" });
+      // 서버에서 받아 온 모델 목록 — 골라서 모델 칸에 넣는다 (직접 쳐도 된다)
+      const modelPick = h("select", { title: "서버에서 받아 온 모델 — 고르면 모델 칸에 들어갑니다", hidden: true, style: "max-width:100%" }) as HTMLSelectElement;
+      const modelNote = h("span", { class: "hint" });
       const keyEnv = h("input", { value: p?.api_key_env ?? "", placeholder: "예: ANTHROPIC_API_KEY" });
       const key = h("input", { type: "password", placeholder: p?.has_key ? "(설정됨)" : "API 키" });
       const keyRemember = h("input", { type: "checkbox" });
       const numCtx = h("input", { type: "number", value: p?.num_ctx ?? "", placeholder: "16384" });
       const effort = h("select", {}, ...["", "low", "medium", "high", "xhigh", "max"].map((x) => h("option", { value: x, selected: (p?.effort ?? "") === x }, x || "(기본)")));
+      // 생각(thinking) — Ollama 는 끄기·켜기·수준, OpenAI 호환은 끄기·수준(reasoning_effort)
+      const thinkOpts: [string, string][] = [["", "(모델 기본)"], ["off", "끄기 — 생각 없이 바로 답 (빠름)"], ["on", "켜기"], ["low", "낮음 (low)"], ["medium", "중간 (medium)"], ["high", "높음 (high)"]];
+      const think = h("select", {}, ...thinkOpts.map(([v, l]) => h("option", { value: v, selected: (p?.think ?? "") === v }, l))) as HTMLSelectElement;
       const fallbacks = h("input", { type: "checkbox", checked: p?.fallbacks ?? true });
       const maxTokens = h("input", { type: "number", value: p?.max_tokens ?? 8192 });
       // 사내 PC 는 시스템 프록시가 잡혀 있어 사내 LLM 서버로 가는 요청까지 프록시로 나가 막히곤 한다 (브라우저는 PAC 로 직접 연결)
@@ -2282,8 +2288,42 @@ class App {
         name: name.value.trim(), kind: kind.value as Provider["kind"], base_url: base.value.trim() || null,
         model: model.value.trim(), api_key_env: keyEnv.value.trim() || null, num_ctx: numCtx.value ? Number(numCtx.value) : null,
         effort: effort.value || null, fallbacks: fallbacks.checked, max_tokens: Number(maxTokens.value) || 8192,
-        proxy: proxy.value || null,
+        proxy: proxy.value || null, think: kind.value === "anthropic" ? null : think.value || null,
       });
+      // 모델 목록 받아 오기 — 저장하지 않은 주소로도 된다. 종류가 Ollama 면 /api/tags
+      let listRun = 0;
+      const loadModels = async (quiet: boolean) => {
+        const run = ++listRun;
+        modelNote.textContent = "모델 목록을 받는 중…";
+        try {
+          const names = await api.listModels({ ...collect(), name: name.value.trim() || p?.name || "새 공급자", model: model.value.trim() || "x" });
+          if (run !== listRun) return;
+          modelPick.replaceChildren(h("option", { value: "" }, `— 서버의 모델 ${names.length}개 중 고르기 —`),
+            ...names.map((n) => h("option", { value: n, selected: n === model.value.trim() }, n)));
+          modelPick.hidden = !names.length;
+          const has = !model.value.trim() || names.some((n) => n === model.value.trim() || n.replace(/:latest$/, "") === model.value.trim());
+          modelNote.textContent = names.length ? `${names.length}개${has ? "" : ` — 설정한 '${model.value.trim()}' 은 이 서버에 없습니다`}` : "모델이 없습니다 (서버에서 ollama pull 로 받으세요)";
+        } catch (err) {
+          if (run !== listRun) return;
+          modelPick.hidden = true;
+          modelNote.textContent = quiet ? "" : `목록을 받지 못했습니다: ${errOf(err).message}`;
+        }
+      };
+      modelPick.onchange = () => { if (modelPick.value) model.value = modelPick.value; };
+      const modelBtn = h("button", { class: "small", title: "서버에서 모델 목록을 받아 옵니다 (Ollama: /api/tags)", onclick: (e: Event) => { e.preventDefault(); void loadModels(false); } }, "목록 받기");
+      // 종류에 맞는 칸만
+      const thinkField = field("Thinking (생각)", think, "Ollama: 끄기 = think:false, low/medium/high 는 gpt-oss 같은 모델만. OpenAI 호환: reasoning_effort (끄기 = none). 모델이 지원하지 않으면 서버가 오류를 냅니다");
+      const effortField = field("effort (Claude)", effort);
+      const ctxField = field("num_ctx (Ollama)", numCtx, "기본 컨텍스트(2~4K)는 스키마 문맥을 조용히 잘라 버립니다");
+      const syncKind = () => {
+        const k = kind.value;
+        thinkField.hidden = k === "anthropic";
+        effortField.hidden = k !== "anthropic";
+        ctxField.hidden = k !== "ollama";
+      };
+      kind.onchange = () => { syncKind(); modelPick.hidden = true; modelNote.textContent = ""; if (kind.value === "ollama") void loadModels(true); };
+      let urlT = 0;
+      base.addEventListener("input", () => { clearTimeout(urlT); urlT = window.setTimeout(() => { if (kind.value === "ollama") void loadModels(true); }, 600); });
       const persist = async () => {
         const np = collect();
         await api.saveProvider(np, p?.name);
@@ -2293,11 +2333,11 @@ class App {
       form.replaceChildren(
         field("이름", name), field("종류", kind), field("주소", base, "Ollama: http://127.0.0.1:11434 · 사내 GPU 서버 주소도 됩니다 (http:// 를 빼도 됩니다)"),
         field("프록시", proxy, "브라우저에서는 되는데 여기서 안 되면 '사용 안 함'으로"),
-        field("모델", model, "예: qwen2.5-coder:14b, gemma3:12b"),
+        field("모델", h("div", { style: "display:flex;flex-direction:column;gap:4px" },
+          h("div", { style: "display:flex;gap:6px" }, model, modelBtn), modelPick, modelNote), "직접 쳐도 되고, '목록 받기'로 서버의 모델을 골라도 됩니다 (예: qwen2.5-coder:14b, gemma3:12b)"),
         field("API 키 환경변수", keyEnv), field("API 키", key, "설정 파일에는 쓰지 않습니다"),
         h("label", { class: "check" }, keyRemember, "OS 자격 증명 관리자에 저장 (끄면 이 실행 동안만)"),
-        field("num_ctx (Ollama)", numCtx, "기본 컨텍스트(2~4K)는 스키마 문맥을 조용히 잘라 버립니다"),
-        field("effort (Claude)", effort),
+        ctxField, thinkField, effortField,
         h("label", { class: "check" }, fallbacks, "거절 시 대체 모델로 이어서 답하기 (Claude API 직통일 때만)"),
         field("max_tokens", maxTokens),
         h("div", { class: "row" },
@@ -2318,8 +2358,20 @@ class App {
                 `\n${models.slice(0, 30).join("\n")}`;
               result.classList.toggle("warn", !has);
             } catch (err) { result.textContent = errOf(err).message; }
-          } }, "연결 테스트")),
+          } }, "연결 테스트"),
+          p ? h("button", { class: "danger", onclick: async (e: Event) => {
+            e.preventDefault();
+            if (!(await confirmBox("AI 연결 삭제", `'${p.name}' 연결을 지울까요?\n저장해 둔 API 키(OS 자격 증명 관리자)도 함께 지웁니다.`, "삭제"))) return;
+            try {
+              await api.deleteProvider(p.name);
+              form.replaceChildren();
+              toast("지웠습니다", "ok");
+              await refreshList();
+            } catch (err) { toast(errOf(err).message, "error"); }
+          } }, "삭제") : null),
         result);
+      syncKind();
+      if (kind.value === "ollama") void loadModels(true);
     };
     const refreshList = async () => {
       const ps = await api.listProviders();

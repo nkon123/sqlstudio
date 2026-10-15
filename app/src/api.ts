@@ -54,6 +54,8 @@ export interface Provider {
   name: string; kind: ProviderKind; base_url?: string | null; model: string; api_key_env?: string | null;
   max_tokens?: number; temperature?: number | null; num_ctx?: number | null; keep_alive?: string | null;
   effort?: string | null; fallbacks?: boolean; connect_timeout_secs?: number; idle_timeout_secs?: number;
+  /** 생각(thinking) 조절 — Ollama·OpenAI 호환: off | on | low | medium | high. 비우면 모델 기본 */
+  think?: string | null;
   remote?: boolean; remote_ok?: boolean; has_key?: boolean;
   /** "auto"(기본) | "none" | "system" */
   proxy?: string | null;
@@ -131,6 +133,9 @@ export const api = {
   saveProvider: (provider: Provider, originalName?: string) => invoke<void>("save_provider", { provider, originalName }),
   setApiKey: (provider: string, key: string, remember?: boolean) => invoke<void>("set_api_key", { provider, key, remember }),
   testProvider: (name: string) => invoke<string[]>("test_provider", { name }),
+  deleteProvider: (name: string) => invoke<void>("delete_provider", { name }),
+  /** 저장하지 않은 설정(주소·종류)으로 서버의 모델 목록 — Ollama 는 /api/tags */
+  listModels: (provider: Provider) => invoke<string[]>("ai_list_models", { provider }),
   aiAsk: (args: {
     request_id: number; provider: string; task: Task; session_id?: number; sql?: string; question?: string;
     error?: string; tables?: string[]; history?: ChatMsg[];

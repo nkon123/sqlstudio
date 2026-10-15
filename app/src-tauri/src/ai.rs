@@ -71,6 +71,39 @@ pub fn save_provider(st: State<'_, AppState>, provider: ProviderConfig, original
     st.save_config()
 }
 
+/// 공급자 삭제 — 저장된 API 키(실행 중 기억·OS 자격 증명)도 함께 지운다
+#[tauri::command]
+pub fn delete_provider(st: State<'_, AppState>, name: String) -> R<()> {
+    {
+        let mut list = st.providers.write().unwrap();
+        let before = list.len();
+        list.retain(|p| p.name != name);
+        if list.len() == before {
+            return Err(ErrView::msg("invalid", format!("AI 공급자가 없습니다: {name}")));
+        }
+    }
+    st.api_keys.write().unwrap().remove(&name);
+    sqls_core::secret::delete(&sqls_core::secret::llm_account(&name));
+    st.save_config()
+}
+
+/// 모델 목록 — 아직 저장하지 않은 설정(주소·종류)으로 서버에 묻는다 (Ollama 는 /api/tags).
+/// 같은 이름으로 저장된 API 키가 있으면 쓴다
+#[tauri::command]
+pub async fn ai_list_models(st: State<'_, AppState>, provider: ProviderConfig) -> R<Vec<String>> {
+    let mut p = provider;
+    if p.api_key.is_none() {
+        if let Some(k) = st.api_keys.read().unwrap().get(&p.name) {
+            p.api_key = Some(k.clone());
+        } else if let Some(k) = sqls_core::secret::get(&sqls_core::secret::llm_account(&p.name)) {
+            p.api_key = Some(k);
+        }
+    }
+    let mut models = st.llm.list_models(&p).await?;
+    models.sort();
+    Ok(models)
+}
+
 /// 외부 전송 동의 — 확인 창에서 "계속"을 눌렀을 때. 지금 주소로 기록하고 설정 파일에 남긴다.
 #[tauri::command]
 pub fn ai_ack_remote(st: State<'_, AppState>, provider: String) -> R<()> {

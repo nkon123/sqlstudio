@@ -78,6 +78,10 @@ pub struct ProviderConfig {
     /// Anthropic: 생각 깊이 (low | medium | high | xhigh | max)
     #[serde(default)]
     pub effort: Option<String>,
+    /// 생각(thinking) 조절 — Ollama·OpenAI 호환. off(끄기) | on(켜기) | low | medium | high. 비우면 모델 기본.
+    /// Ollama 는 `think` (false · true · "low"/"medium"/"high" — 문자열은 gpt-oss 같은 모델만), OpenAI 호환은 `reasoning_effort`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub think: Option<String>,
     /// Anthropic: 안전 분류기가 거절하면 서버가 다른 모델로 이어서 답하게 한다.
     /// Claude API 직통에서만 동작한다 (사내 게이트웨이/클라우드 경유면 끈다).
     #[serde(default = "default_true")]
@@ -121,6 +125,7 @@ impl ProviderConfig {
             num_ctx: None,
             keep_alive: None,
             effort: None,
+            think: None,
             fallbacks: true,
             remote_ack: None,
             proxy: None,
@@ -543,6 +548,27 @@ fn auth_headers(cfg: &ProviderConfig) -> Result<Vec<(&'static str, String)>> {
 
 type Built = (String, Value, Vec<(&'static str, String)>);
 
+/// Ollama `think`: 끄기 → false, 켜기 → true, low/medium/high → 그 문자열. 비우면 보내지 않는다 (모델 기본)
+fn ollama_think(t: Option<&str>) -> Option<Value> {
+    match t?.trim().to_lowercase().as_str() {
+        "off" | "false" | "none" => Some(json!(false)),
+        "on" | "true" => Some(json!(true)),
+        e @ ("low" | "medium" | "high") => Some(json!(e)),
+        _ => None,
+    }
+}
+
+/// OpenAI 호환 `reasoning_effort`: 끄기 → "none", low/medium/high. 켜기·비움은 보내지 않는다 (서버 기본)
+fn openai_effort(t: Option<&str>) -> Option<&'static str> {
+    match t?.trim().to_lowercase().as_str() {
+        "off" | "false" | "none" => Some("none"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        _ => None,
+    }
+}
+
 fn build_request(cfg: &ProviderConfig, req: &ChatRequest) -> Result<Built> {
     let base = cfg.base_url();
     let mut headers = auth_headers(cfg)?;
@@ -570,6 +596,9 @@ fn build_request(cfg: &ProviderConfig, req: &ChatRequest) -> Result<Built> {
                 "keep_alive": cfg.keep_alive.clone().unwrap_or_else(|| "30m".into()),
             });
             let mut body = body;
+            if let Some(t) = ollama_think(cfg.think.as_deref()) {
+                body["think"] = t;
+            }
             if let Some(schema) = &req.json_schema {
                 body["format"] = schema.clone();
             }
@@ -586,6 +615,9 @@ fn build_request(cfg: &ProviderConfig, req: &ChatRequest) -> Result<Built> {
             });
             if let Some(t) = cfg.temperature {
                 body["temperature"] = json!(t);
+            }
+            if let Some(e) = openai_effort(cfg.think.as_deref()) {
+                body["reasoning_effort"] = json!(e);
             }
             if let Some(schema) = &req.json_schema {
                 body["response_format"] = json!({

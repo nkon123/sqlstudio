@@ -170,6 +170,8 @@ pub fn run() {
             ai::set_api_key,
             ai::ai_ack_remote,
             ai::test_provider,
+            ai::delete_provider,
+            ai::ai_list_models,
             ai::ai_ask,
             ai::ai_cancel,
             ai::ai_guides_info,

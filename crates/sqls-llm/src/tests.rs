@@ -293,3 +293,26 @@ async fn connect_error_explains() {
     assert!(e.contains("연결: 프록시 없이 직접"), "{e}");
     assert!(e.contains("→"), "안내가 있어야 한다: {e}");
 }
+
+#[test]
+fn think_setting_maps_to_each_server() {
+    let r = req();
+    let build = |kind: ProviderKind, think: Option<&str>| {
+        let mut c = cfg(kind, "http://x");
+        c.think = think.map(String::from);
+        super::build_request(&c, &r).unwrap().1
+    };
+    // Ollama: 비우면 보내지 않고, 끄기·켜기는 불리언, 수준은 문자열
+    assert!(build(ProviderKind::Ollama, None).get("think").is_none());
+    assert_eq!(build(ProviderKind::Ollama, Some("off"))["think"], serde_json::json!(false));
+    assert_eq!(build(ProviderKind::Ollama, Some("on"))["think"], serde_json::json!(true));
+    assert_eq!(build(ProviderKind::Ollama, Some("high"))["think"], serde_json::json!("high"));
+    assert!(build(ProviderKind::Ollama, Some("???")).get("think").is_none());
+    // OpenAI 호환: 끄기 → "none", 수준 그대로, 켜기·비움은 보내지 않는다
+    assert_eq!(build(ProviderKind::OpenaiCompatible, Some("off"))["reasoning_effort"], serde_json::json!("none"));
+    assert_eq!(build(ProviderKind::OpenaiCompatible, Some("medium"))["reasoning_effort"], serde_json::json!("medium"));
+    assert!(build(ProviderKind::OpenaiCompatible, Some("on")).get("reasoning_effort").is_none());
+    assert!(build(ProviderKind::OpenaiCompatible, None).get("reasoning_effort").is_none());
+    // Anthropic 은 effort 를 쓴다 — think 는 무시
+    assert!(build(ProviderKind::Anthropic, Some("off")).get("think").is_none());
+}

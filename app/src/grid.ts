@@ -614,10 +614,11 @@ export class ResultGrid {
   }
 
   private onKey(e: KeyboardEvent) {
-    if ((e.ctrlKey || e.metaKey) && e.key === "c") {
+    // 물리 키(code)로 비교 — Shift 를 누르면 key 가 "C" 가 되고, 한글 입력 상태에서는 "ㅊ" 이 된다
+    if ((e.ctrlKey || e.metaKey) && e.code === "KeyC") {
       e.preventDefault();
       navigator.clipboard.writeText(this.selectionText(e.shiftKey)).catch(() => {});
-    } else if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+    } else if ((e.ctrlKey || e.metaKey) && e.code === "KeyA") {
       e.preventDefault();
       if (this.view.length) this.sel = { r0: 0, c0: 0, r1: this.view.length - 1, c1: this.columns.length - 1 };
       this.update();

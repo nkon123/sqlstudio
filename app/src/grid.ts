@@ -650,6 +650,11 @@ export class ResultGrid {
     return lines.join("\n");
   }
 
+  /** 열 정의 (화면 열 번호 — 숨긴 열 포함) */
+  columnAt(c: number): Column | undefined {
+    return this.columns[c];
+  }
+
   hasMoreRows() {
     return this.hasMore;
   }

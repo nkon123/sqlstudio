@@ -8,7 +8,7 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   api, byteToUtf16, errOf, utf16ToByte,
-  type Connected, type ErrView, type ExecView, type ObjectEntry, type Profile, type Provider, type TableDesc, type TnsEntry, type TnsView, type RowPage } from "./api";
+  type Column, type Connected, type ErrView, type ExecView, type ObjectEntry, type Profile, type Provider, type TableDesc, type TnsEntry, type TnsView, type RowPage } from "./api";
 import { AiPanel } from "./ai";
 import { listen } from "@tauri-apps/api/event";
 import { sqlCompletion } from "./completion";
@@ -16,6 +16,7 @@ import { AnalysisView } from "./analysis";
 import { DebugView } from "./debugger";
 import { MonitorView } from "./monitor";
 import { showSpace } from "./space";
+import { addCondition, cellCondition, selectExpr, type CondOp } from "./cond";
 import { SqlEditor, changeCase } from "./editor";
 import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from "./format";
 import type { GitPanel } from "./git";
@@ -150,7 +151,7 @@ class Tab {
       onNeedMore: async () => (this.conn ? api.fetchMore(this.conn.id, 1000) : null),
       // 한 줄로 — 길면 줄임표, 전체는 풍선으로 (여러 줄로 늘어나 탭 줄이 높아지던 것)
       onStatus: (t) => { this.gridStatus.textContent = t; this.gridStatus.title = t; },
-      onContextMenu: (_r, _c, e) => app.gridMenu(this, e),
+      onContextMenu: (r, c, e) => app.gridMenu(this, e, r[c] ?? null, c),
       onDirty: (n) => {
         this.applyBtn.textContent = n ? `적용 (${n})` : "적용";
         this.applyBtn.disabled = !n;
@@ -1610,15 +1611,47 @@ class App {
   }
 
   /** 결과 그리드 우클릭: 건수 확인, 복사 */
-  gridMenu(t: Tab, e: MouseEvent) {
+  gridMenu(t: Tab, e: MouseEvent, value: string | null, col: number) {
     const q = t.lastQuery;
     const n = t.grid.selectedRows().length;
+    const column = t.grid.columnAt(col);
+    const canCond = !!q && !!column && !t.grid.isEditing();
+    const shown = value == null ? "NULL" : value.length > 24 ? `${value.slice(0, 24)}…` : value;
     showMenu(e.clientX, e.clientY, [
+      { label: "조회 조건에 추가", hint: column ? `${column.name} · ${shown}` : "", disabled: !canCond, sub: [
+        { label: "같다 (=)", hint: "맨 끝 WHERE 에 AND", run: () => void this.addCellCondition(t, column!, value, "eq", false) },
+        { label: "포함 (LIKE '%값%')", hint: "글자 열", run: () => void this.addCellCondition(t, column!, value, "like", false) },
+        { sep: true },
+        { label: "같다 (=) 추가하고 실행", run: () => void this.addCellCondition(t, column!, value, "eq", true) },
+        { label: "포함 (LIKE) 추가하고 실행", run: () => void this.addCellCondition(t, column!, value, "like", true) },
+      ] },
+      { sep: true },
       { label: "건수 확인", hint: "전체 행 수", disabled: !q || !t.conn || t.grid.isEditing(), run: () => void this.countResult(t) },
       { sep: true },
       { label: n > 1 ? `고른 셀 복사 (${n}행)` : "고른 셀 복사", hint: "Ctrl+C", run: () => navigator.clipboard.writeText(t.grid.selectionText()).catch(() => {}) },
       { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(t.grid.selectionText(true)).catch(() => {}) },
     ]);
+  }
+
+  /** 셀 값을 조회 조건으로 — 에디터의 그 쿼리에서 WHERE 끝(없으면 새 WHERE, GROUP BY·ORDER BY 앞)에 넣는다.
+   *  넣은 뒤 그 쿼리가 현재 쿼리가 되므로, 여러 번 눌러 조건을 쌓을 수 있다 */
+  private async addCellCondition(t: Tab, column: Column, value: string | null, op: CondOp, run: boolean) {
+    const q = t.lastQuery;
+    if (!q) return;
+    const view = t.editor.view;
+    const doc = view.state.doc.toString();
+    const at = doc.indexOf(q.sql);
+    if (at < 0) return toast("에디터에서 이 결과를 만든 쿼리를 찾지 못했습니다 — 쿼리를 고쳤거나 지웠다면 다시 실행한 뒤 눌러 주세요", "error", 6000);
+    const cond = cellCondition(column, value, op, selectExpr(q.sql, column.name));
+    if ("error" in cond) return toast(cond.error, "error", 6000);
+    const added = addCondition(q.sql, cond.cond);
+    if ("error" in added) return toast(added.error, "error", 6000);
+    view.dispatch({ changes: { from: at, to: at + q.sql.length, insert: added.sql }, selection: { anchor: at }, scrollIntoView: true, userEvent: "input.cond" });
+    t.lastQuery = { sql: added.sql, binds: q.binds };
+    t.setDirty(true);
+    t.editor.flash(at, at + added.sql.length);
+    if (run) await this.runStatement();
+    else { this.status(`조건 추가: ${cond.cond}`); view.focus(); }
   }
 
   /** 지금 결과를 만든 조회의 전체 건수 — 읽고 있는 결과(커서)를 건드리지 않고 사전 조회 세션으로 센다 */

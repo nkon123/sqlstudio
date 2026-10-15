@@ -605,7 +605,8 @@ button.danger.running-btn { animation: pulse 1.2s infinite; }
 
 /* 탭 줄: 탭들(가로로 넘치면 스크롤) + 오른쪽의 "+" */
 .tabs-row { display: flex; background: var(--bg); border-bottom: 1px solid var(--line); }
-.tabs-row .tabs { flex: 1; min-width: 0; border-bottom: none; }
+/* 탭들은 탭 폭만큼만 — "+" 가 마지막 탭 바로 옆에 붙는다. 탭이 넘치면 탭들만 줄어들며 스크롤하고 "+" 는 남는다 */
+.tabs-row .tabs { flex: 0 1 auto; min-width: 0; border-bottom: none; }
 .tab-plus { border: none; background: none; padding: 0 12px; font-size: 16px; line-height: 1; color: var(--dim); cursor: pointer; flex: none; }
 .tab-plus:hover { color: var(--text); background: var(--sel); }
 .tab { user-select: none; }

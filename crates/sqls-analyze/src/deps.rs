@@ -67,6 +67,23 @@ const MAX_HOPS: usize = 8;
 /// IN 목록 하나에 넣는 쌍 수
 const IN_CHUNK: usize = 100;
 
+/// 적힌 이름 → (적힌 그대로, 자기 객체 후보 (owner, 이름), 안 적은 이름이면 PUBLIC 후보). DB 링크·DUAL 은 뺀다
+fn name_candidates(owner: &str, names: &[String]) -> Vec<(String, (String, String), Option<(String, String)>)> {
+    let mut out = Vec::new();
+    for n in names {
+        let n = n.trim().replace('"', "").to_uppercase();
+        if n.is_empty() || n.contains('@') || n == "DUAL" || n.ends_with(".DUAL") {
+            continue;
+        }
+        match n.split_once('.') {
+            Some((o, t)) if !t.contains('.') => out.push((n.clone(), (o.to_string(), t.to_string()), None)),
+            None => out.push((n.clone(), (owner.to_string(), n.clone()), Some(("PUBLIC".to_string(), n.clone())))),
+            _ => {}
+        }
+    }
+    out
+}
+
 fn pair_in(cols: &str, pairs: &[(String, String)]) -> (String, Vec<(String, Option<String>)>) {
     let mut list = Vec::new();
     let mut binds = Vec::new();
@@ -207,6 +224,82 @@ impl Fetcher {
             todo = targets.into_iter().filter(|k| self.kind.get(k).cloned().flatten().as_deref() == Some("SYNONYM") && !self.syn.contains_key(k)).collect();
         }
         Ok(())
+    }
+
+    /// 소스에서 뽑은 테이블 이름(적힌 그대로 — `T` · `S.T`)을 사전으로 풀어 실제 객체로 — Pro*C·XML 쿼리처럼 사전 의존성이 없는 단위용.
+    /// 스키마를 안 쓴 `T` 는 오라클이 그러듯 접속 계정(owner)의 객체 → 그 계정의 동의어 → PUBLIC 동의어 순으로 찾는다.
+    /// 못 찾은 이름은 돌려주지 않는다 (그 단위의 이름은 owner.T 그대로 남는다)
+    pub async fn resolve_names(&mut self, s: &Session, owner: &str, names: &[String]) -> sqls_core::Result<Vec<Dep>> {
+        let owner = owner.to_uppercase();
+        let cands = name_candidates(&owner, names);
+        // 객체 종류 (캐시에 없는 것만)
+        let mut unknown: Vec<(String, String)> = cands.iter().map(|c| c.1.clone()).filter(|k| !self.kind.contains_key(k)).collect();
+        unknown.sort();
+        unknown.dedup();
+        for chunk in unknown.chunks(IN_CHUNK) {
+            for k in chunk {
+                self.kind.insert(k.clone(), None);
+            }
+            let (cond, binds) = pair_in("owner, object_name", chunk);
+            let page = s
+                .query(
+                    &format!(
+                        "SELECT owner, object_name, object_type FROM all_objects WHERE {cond}                          AND object_type IN ('TABLE','VIEW','MATERIALIZED VIEW','SEQUENCE','PACKAGE','PROCEDURE','FUNCTION','TYPE','SYNONYM')"
+                    ),
+                    binds,
+                    10_000,
+                )
+                .await?;
+            for r in &page.rows {
+                let g = |i: usize| r.get(i).cloned().flatten();
+                if let (Some(o), Some(n), Some(t)) = (g(0), g(1), g(2)) {
+                    let e = self.kind.entry((o, n)).or_insert(None);
+                    if e.as_deref().is_none_or(|old| kind_rank(&t) < kind_rank(old)) {
+                        *e = Some(t);
+                    }
+                }
+            }
+        }
+        // 동의어: 종류가 SYNONYM 이거나 못 본 이름, 그리고 안 적은 이름은 PUBLIC 도
+        let mut syns: Vec<(String, String)> = Vec::new();
+        for (written, key, public) in &cands {
+            let k = self.kind.get(key).cloned().flatten();
+            if k.as_deref() == Some("SYNONYM") || k.is_none() {
+                syns.push(key.clone());
+            }
+            if let Some(p) = public {
+                syns.push(p.clone());
+            }
+            let _ = written;
+        }
+        self.resolve(s, &syns).await?;
+        Ok(self.pick_names(&cands))
+    }
+
+    /// 후보마다 (자기 객체 → 동의어 → PUBLIC 동의어) 순으로 하나를 고른다 — 캐시만 본다
+    fn pick_names(&self, cands: &[(String, (String, String), Option<(String, String)>)]) -> Vec<Dep> {
+        let mut out: Vec<Dep> = Vec::new();
+        for (_, key, public) in cands {
+            let own = self.kind.get(key).cloned().flatten();
+            let dep = match own.as_deref() {
+                Some("SYNONYM") => Some(self.follow(&key.0, &key.1)),
+                Some(k) => Some(Dep { owner: key.0.clone(), name: key.1.clone(), kind: k.to_string(), via: None, link: None }),
+                None => None,
+            };
+            let dep = dep.filter(|d| d.kind != "SYNONYM").or_else(|| {
+                public
+                    .as_ref()
+                    .and_then(|p| self.syn.get(p).cloned().flatten().map(|_| self.follow(&p.0, &p.1)))
+                    .filter(|d| d.kind != "SYNONYM")
+            });
+            if let Some(d) = dep {
+                if !out.contains(&d) {
+                    out.push(d);
+                }
+            }
+        }
+        out.sort_by(|a, b| (a.kind.as_str(), a.owner.as_str(), a.name.as_str()).cmp(&(b.kind.as_str(), b.owner.as_str(), b.name.as_str())));
+        out
     }
 
     /// 가져와서 단위 폴더에 저장한다. 못 가져와도 분석은 이어 간다 (권한이 없는 사전 등) — 오류를 돌려준다
@@ -569,5 +662,31 @@ mod tests {
         let v = first_json("음… ```json\n{\"ops\": \"ru\", \"reason\": \"갱신 {괄호}\"}\n``` 끝").unwrap();
         assert_eq!(clean_ops(v["ops"].as_str().unwrap()), "RU");
         assert!(first_json("없음").is_none());
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    #[test]
+    fn picks_own_then_synonym_then_public() {
+        let mut f = Fetcher::default();
+        // APP 의 ORDERS 는 자기 테이블, CUST 는 APP 동의어 → ERP.CUSTOMERS, CODES 는 PUBLIC 동의어 → ERP.CODES
+        f.kind.insert(("APP".into(), "ORDERS".into()), Some("TABLE".into()));
+        f.kind.insert(("APP".into(), "CUST".into()), Some("SYNONYM".into()));
+        f.syn.insert(("APP".into(), "CUST".into()), Some(("ERP".into(), "CUSTOMERS".into(), None)));
+        f.kind.insert(("ERP".into(), "CUSTOMERS".into()), Some("TABLE".into()));
+        f.kind.insert(("APP".into(), "CODES".into()), None);
+        f.syn.insert(("PUBLIC".into(), "CODES".into()), Some(("ERP".into(), "CODES".into(), None)));
+        f.kind.insert(("ERP".into(), "CODES".into()), Some("TABLE".into()));
+        f.kind.insert(("APP".into(), "GONE".into()), None);
+        f.kind.insert(("ERP".into(), "STOCK".into()), Some("TABLE".into()));
+        let names: Vec<String> = ["orders", "CUST", "codes", "gone", "erp.stock", "x@link", "dual"].iter().map(|s| s.to_string()).collect();
+        let cands = name_candidates("APP", &names);
+        assert_eq!(cands.len(), 5, "DB 링크·DUAL 은 뺀다");
+        let d = f.pick_names(&cands);
+        let q: Vec<String> = d.iter().map(|x| format!("{}{}", x.qualified(), x.via.as_ref().map(|v| format!(" via {v}")).unwrap_or_default())).collect();
+        assert_eq!(q, vec!["APP.ORDERS", "ERP.CODES via PUBLIC.CODES", "ERP.CUSTOMERS via APP.CUST", "ERP.STOCK"], "{q:?}");
     }
 }

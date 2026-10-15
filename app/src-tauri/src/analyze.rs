@@ -271,25 +271,27 @@ fn session_user(st: &AppState, id: u64) -> R<String> {
 
 /// 코드 폴더의 분석 대상 목록 — Pro*C(.pc) 와 XML 쿼리 파일(Anyframe). 파일을 읽기만 하고 분석은 하지 않는다 (저장된 결과 상태를 함께)
 #[tauri::command]
-pub async fn analysis_code_list(st: State<'_, AppState>, id: u64, folder: String) -> R<Vec<CodeRow>> {
+pub async fn analysis_code_list(st: State<'_, AppState>, id: u64, folders: Vec<String>) -> R<Vec<CodeRow>> {
     let owner = session_user(&st, id)?;
-    let root = std::path::PathBuf::from(&folder);
-    if !root.is_dir() {
-        return Err(ErrView::msg("invalid", format!("폴더를 찾을 수 없습니다: {folder}")));
+    let roots: Vec<std::path::PathBuf> = folders.iter().map(std::path::PathBuf::from).collect();
+    if let Some(bad) = roots.iter().find(|r| !r.is_dir()) {
+        return Err(ErrView::msg("invalid", format!("폴더를 찾을 수 없습니다: {}", bad.display())));
     }
     let store = store_for(&st, id)?;
     // 큰 폴더를 읽는 동안 화면이 멈추지 않게 별도 스레드에서
-    let units = tauri::async_runtime::spawn_blocking(move || source::scan_code(&[root], &owner))
+    let multi = roots.len() > 1;
+    let units = tauri::async_runtime::spawn_blocking(move || source::scan_code(&roots, &owner))
         .await
         .map_err(|e| ErrView::msg("io", e.to_string()))?
-        .map_err(|e| ErrView::msg("io", format!("{folder}: {e}")))?;
+        .map_err(|e| ErrView::msg("io", e.to_string()))?;
     drop_legacy_code_units(&store, &units);
-    let base = std::path::PathBuf::from(&folder);
     Ok(units
         .into_iter()
         .map(|c| {
             let saved = store.read_unit(&sqls_analyze::chunk::unit_key(&c.unit.owner, &c.unit.name, &c.unit.unit_type));
-            let rel = c.path.strip_prefix(&base).unwrap_or(&c.path).display().to_string();
+            let inner = c.path.strip_prefix(&c.root).unwrap_or(&c.path).display().to_string();
+            // 폴더가 여럿이면 어느 폴더의 것인지 폴더 이름을 앞에 붙인다
+            let rel = if multi { format!("{}/{inner}", c.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()) } else { inner };
             CodeRow {
                 rel,
                 path: c.path.display().to_string(),
@@ -315,7 +317,7 @@ pub async fn analysis_code_start(
     app: AppHandle,
     st: State<'_, AppState>,
     id: u64,
-    folder: String,
+    folders: Vec<String>,
     paths: Vec<String>,
     provider: Option<String>,
     allow_remote: bool,
@@ -326,11 +328,11 @@ pub async fn analysis_code_start(
     if want.is_empty() {
         return Err(ErrView::msg("invalid", "분석할 파일을 고르세요"));
     }
-    let root = std::path::PathBuf::from(&folder);
-    let units: Vec<_> = tauri::async_runtime::spawn_blocking(move || source::scan_code(&[root], &owner))
+    let roots: Vec<std::path::PathBuf> = folders.iter().map(std::path::PathBuf::from).collect();
+    let units: Vec<_> = tauri::async_runtime::spawn_blocking(move || source::scan_code(&roots, &owner))
         .await
         .map_err(|e| ErrView::msg("io", e.to_string()))?
-        .map_err(|e| ErrView::msg("io", format!("{folder}: {e}")))?
+        .map_err(|e| ErrView::msg("io", e.to_string()))?
         .into_iter()
         .filter(|c| want.contains(&c.path.display().to_string()))
         .map(|c| c.unit)
@@ -349,6 +351,8 @@ pub async fn analysis_code_start(
         None => None,
     };
     let store = store_for(&st, id)?;
+    // 테이블 이름을 사전(동의어)으로 푸는 데 쓰는 사전 조회 세션 — 없으면 풀지 못할 뿐 분석은 한다
+    let hub = hub_for(&st, id).ok();
     let client = st.llm.clone();
     let run = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
     let cancel = Arc::new(AtomicBool::new(false));
@@ -366,6 +370,7 @@ pub async fn analysis_code_start(
         };
         let total = units.len();
         let mut stop: Option<String> = None;
+        let mut fetcher = sqls_analyze::deps::Fetcher::default();
         for (i, src) in units.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 stop = Some("중지했습니다".into());
@@ -373,10 +378,27 @@ pub async fn analysis_code_start(
             }
             emit(Progress::Fetch { run, index: i, total, key: sqls_analyze::chunk::unit_key(&src.owner, &src.name, &src.unit_type), error: None });
             let llm = cfg.as_ref().map(|c| Llm { client: &client, cfg: c });
-            if let Err(e) = analyze_unit(&store, src, None, llm, &options, on.clone(), cancel.clone()).await {
-                if e.contains("모델 서버") || cancel.load(Ordering::Relaxed) {
-                    stop = Some(e);
-                    break;
+            match analyze_unit(&store, src, None, llm, &options, on.clone(), cancel.clone()).await {
+                Ok(u) => {
+                    // 스키마 없는 테이블 이름을 사전으로 풀어 저장 — DB 프로시저가 쓰는 실제 이름(소유 스키마·동의어 대상)과 같아져야 흐름이 이어진다
+                    if let Some(s) = hub.as_ref().and_then(|h| h.session()) {
+                        let names: Vec<String> = u.facts.tables.iter().map(|t| t.name.clone()).collect();
+                        match fetcher.resolve_names(&s, &src.owner, &names).await {
+                            Ok(deps) => {
+                                let d = sqls_analyze::deps::UnitDeps { key: u.key.clone(), fetched_at: sqls_analyze::store::now(), deps };
+                                if let Err(e) = store.write_deps(&d) {
+                                    tracing::warn!("{} 사전 이름 저장 실패: {e}", u.key);
+                                }
+                            }
+                            Err(e) => tracing::warn!("{} 테이블 이름을 사전으로 풀지 못함: {e}", u.key),
+                        }
+                    }
+                }
+                Err(e) => {
+                    if e.contains("모델 서버") || cancel.load(Ordering::Relaxed) {
+                        stop = Some(e);
+                        break;
+                    }
                 }
             }
         }

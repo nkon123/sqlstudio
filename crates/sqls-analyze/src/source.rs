@@ -150,6 +150,8 @@ pub fn from_files(paths: &[PathBuf], default_owner: &str) -> std::io::Result<Vec
 /// 코드 파일 하나에서 만든 분석 단위 (Pro*C · XML 쿼리)
 pub struct CodeUnit {
     pub path: PathBuf,
+    /// 이 파일을 찾은 폴더 (여러 폴더를 줬을 때 어느 것인지)
+    pub root: PathBuf,
     /// 0.5.10 이 쓰던 옛 단위 이름 (`PC_…` · `XQ_…`) — 남은 옛 결과를 치울 때
     pub legacy_name: String,
     /// "Proc" | "XML" (화면의 형식)
@@ -174,15 +176,18 @@ fn unique_name(used: &std::collections::HashSet<String>, base: &str) -> String {
 /// `owner` 는 그 프로그램이 접속하는 계정 — 스키마 없는 테이블 이름이 이 스키마로 풀린다.
 /// 같은 파일 이름이 다른 폴더에 또 있으면 뒤에 번호를 붙인다 (순서는 경로 정렬 — 같은 폴더면 늘 같은 이름).
 pub fn scan_code(paths: &[PathBuf], owner: &str) -> std::io::Result<Vec<CodeUnit>> {
-    let mut files = Vec::new();
+    // 폴더는 준 순서대로, 폴더 안에서는 경로 순 — 폴더를 더 추가해도 앞서 읽은 파일의 단위 이름(번호)이 바뀌지 않는다
+    let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
     for p in paths {
-        collect_with(p, &mut files, &|f| crate::proc::is_proc_file(f) || crate::xmlquery::is_xml_file(f))?;
+        let mut in_root = Vec::new();
+        collect_with(p, &mut in_root, &|f| crate::proc::is_proc_file(f) || crate::xmlquery::is_xml_file(f))?;
+        in_root.sort();
+        files.extend(in_root.into_iter().map(|f| (p.clone(), f)));
     }
-    files.sort();
     // 같은 이름은 대소문자 구분 없이 (결과 폴더 이름이 겹치지 않게)
     let mut used: std::collections::HashSet<String> = Default::default();
     let mut out = Vec::new();
-    for f in files {
+    for (root, f) in files {
         let xml = crate::xmlquery::is_xml_file(&f);
         let text = decode(&std::fs::read(&f)?);
         if xml && !text.contains("<query") {
@@ -193,7 +198,7 @@ pub fn scan_code(paths: &[PathBuf], owner: &str) -> std::io::Result<Vec<CodeUnit
         let t = if xml { crate::xmlquery::translate(&text, owner, &name) } else { crate::proc::translate(&text, owner, &name) };
         let Some(t) = t else { continue };
         used.insert(name.to_uppercase());
-        out.push(CodeUnit { legacy_name: if xml { crate::xmlquery::legacy_name(&f) } else { crate::proc::legacy_name(&f) }, path: f, kind: if xml { "XML" } else { "Proc" }, count: t.functions, unit: t.unit });
+        out.push(CodeUnit { root: root.clone(), legacy_name: if xml { crate::xmlquery::legacy_name(&f) } else { crate::proc::legacy_name(&f) }, path: f, kind: if xml { "XML" } else { "Proc" }, count: t.functions, unit: t.unit });
     }
     Ok(out)
 }

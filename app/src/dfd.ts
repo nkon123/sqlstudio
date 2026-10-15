@@ -204,6 +204,8 @@ export class DfdView {
     this.hiddenBtn.hidden = !this.hidden.size;
     this.hiddenBtn.textContent = `숨김 ${this.hidden.size} 해제`;
     this.info.textContent = `노드 ${view.nodes.filter((n) => !n.copy).length} · 선 ${view.edges.length}`;
+    // 가운데로 고른 것이 흐름에 없으면 전체를 그린다 — 그렇다고 알린다 (다른 프로시저가 나와 헷갈리지 않게)
+    if (this.center && !b.nodes.has(this.center)) this.info.textContent += ` · '${this.center}' 가 흐름에 없어 전체를 보여 줍니다`;
     if (!view.nodes.length) {
       this.cy?.elements().remove();
       this.info.textContent = "그릴 관계가 없습니다";

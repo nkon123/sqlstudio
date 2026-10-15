@@ -22,7 +22,8 @@ pub const UNIT_TYPE: &str = "XML BODY";
 
 /// 파일 이름 → 단위 이름 (`order.xml` → `order`, 파일 이름 그대로)
 pub fn unit_name(path: &Path) -> String {
-    path.file_stem().and_then(|s| s.to_str()).unwrap_or("X").to_string()
+    // 점은 노드 id(스키마.이름.함수)의 구분자라 밑줄로
+    path.file_stem().and_then(|s| s.to_str()).unwrap_or("X").replace('.', "_")
 }
 
 /// 바로 앞 버전(0.5.10)이 쓰던 이름 (`XQ_ORDER`) — 남아 있는 옛 결과를 치울 때

@@ -136,9 +136,10 @@ export class AnalysisView {
   /** 분석 대상: DB 의 PL/SQL 단위, 또는 폴더의 Pro*C·XML 쿼리 파일 */
   private mode: "db" | "code" = "db";
   private modeSel = h("select", { title: "분석할 대상" }, h("option", { value: "db" }, "DB 프로시저"), h("option", { value: "code" }, "코드 폴더 (Pro*C·XML)"));
-  private folder = "";
-  private folderIn = h("input", { placeholder: "Pro*C(.pc)·XML 쿼리 파일이 있는 폴더 (하위 폴더 포함)", readonly: true, style: "width:300px", hidden: true });
-  private folderBtn = h("button", { hidden: true, title: "폴더를 고르면 파일 목록만 읽습니다 — 분석은 목록에서 고른 뒤 '분석 시작'" }, "폴더 고르기…");
+  /** 분석할 코드 폴더들 — Pro*C 와 XML 이 다른 폴더에 있을 수 있어 여러 개를 추가한다 */
+  private folders: string[] = [];
+  private folderIn = h("input", { placeholder: "Pro*C(.pc)·XML 쿼리 파일이 있는 폴더 (하위 폴더 포함) — 누르면 목록 관리", readonly: true, style: "width:300px;cursor:pointer", hidden: true });
+  private folderBtn = h("button", { hidden: true, title: "폴더를 추가하면 파일 목록만 읽습니다 — 분석은 목록에서 고른 뒤 '분석 시작'. 여러 폴더를 추가할 수 있습니다" }, "폴더 추가…");
   private stopBtn = h("button", { class: "danger", disabled: true }, "중지");
   private statusEl = h("span", { class: "dbg-status" }, "");
   private bar = h("div", { class: "an-bar-fill" });
@@ -176,8 +177,15 @@ export class AnalysisView {
 
   constructor(private sessionId: () => number | undefined, private onClose: () => void) {
     this.startBtn.onclick = () => this.start();
-    try { this.folder = localStorage.getItem("analysis.codeFolder") ?? ""; } catch { /* 기억 못 해도 된다 */ }
-    this.folderIn.value = this.folder;
+    try {
+      const saved = JSON.parse(localStorage.getItem("analysis.codeFolders") ?? "[]");
+      if (Array.isArray(saved)) this.folders = saved.filter((x) => typeof x === "string");
+      // 전에는 폴더 하나만 기억했다
+      const one = localStorage.getItem("analysis.codeFolder");
+      if (!this.folders.length && one) this.folders = [one];
+    } catch { /* 기억 못 해도 된다 */ }
+    this.showFolders();
+    this.folderIn.onclick = () => void this.manageFolders();
     this.modeSel.onchange = () => this.setMode(this.modeSel.value === "code" ? "code" : "db");
     this.folderBtn.onclick = () => this.pickFolder();
     this.stopBtn.onclick = () => this.cancel();
@@ -412,10 +420,10 @@ export class AnalysisView {
       return toast("접속하거나, '가져오기' 로 다른 곳에서 내보낸 결과를 여세요", "info", 5000);
     }
     if (this.mode === "code") {
-      if (!this.folder) { this.rows = []; this.renderList(); this.statusEl.textContent = "'폴더 고르기…' 로 소스 폴더를 고르세요"; return; }
+      if (!this.folders.length) { this.rows = []; this.renderList(); this.statusEl.textContent = "'폴더 추가…' 로 소스 폴더를 추가하세요 (Pro*C 와 XML 이 다른 폴더여도 됩니다)"; return; }
       this.statusEl.textContent = "파일을 읽는 중…";
       try {
-        this.rows = await invoke<UnitRow[]>("analysis_code_list", { id, folder: this.folder });
+        this.rows = await invoke<UnitRow[]>("analysis_code_list", { id, folders: this.folders });
         this.statusEl.textContent = `분석할 수 있는 파일 ${this.rows.length}개 (Pro*C·XML 쿼리) — 체크해서 '분석 시작'`;
       } catch (e) {
         this.rows = [];
@@ -483,6 +491,26 @@ export class AnalysisView {
     return { focus: `${r.owner}.${r.name}`, unit: body ? "pkg" : "proc" };
   }
 
+  /** 이 단위가 지금 통합 결과의 흐름에 있는지 (분석 도중에는 통합이 아직 안 만들어져 없을 수 있다) */
+  private hasFlow(t: DfdTarget): boolean {
+    const g = this.g;
+    if (!g) return false;
+    return t.unit === "pkg" ? g.nodes.some((n) => n.id.startsWith(`${t.focus}.`)) : g.nodes.some((n) => n.id === t.focus);
+  }
+
+  /** 단위의 흐름도 — 방금 분석한 단위가 아직 통합에 없으면(분석 도중) 저장된 결과로 통합을 다시 만든 뒤 연다.
+   *  없는 채로 열면 가운데를 못 찾아 전체 그림이 나온다 */
+  private async openUnitDfd(t: DfdTarget, pop: boolean) {
+    if (!this.hasFlow(t)) {
+      this.statusEl.textContent = "통합 분석을 다시 만드는 중…";
+      await this.reload(true);
+      this.statusEl.textContent = "";
+      if (!this.hasFlow(t)) return toast(`'${t.focus}' 는 흐름도에 올라간 것이 없습니다 — 읽고 쓰는 테이블·호출이 없거나, 분석이 아직 끝나지 않았습니다`, "info", 7000);
+    }
+    if (pop) this.popDfd(t);
+    else this.showDfd(t);
+  }
+
   private showDfd(t: DfdTarget) {
     this.dfdFocus = t;
     this.view = "dfd";
@@ -502,8 +530,8 @@ export class AnalysisView {
     const t = this.unitTarget(r);
     const items: MenuItem[] = [
       { title: `${TYPE_LABEL[r.unit_type] ?? r.unit_type} ${r.name}` },
-      { label: "흐름도 보기", hint: t.unit === "pkg" ? "패키지 단위" : "", disabled: !done, run: () => this.showDfd(t) },
-      { label: "흐름도 새 창", disabled: !done, run: () => this.popDfd(t) },
+      { label: "흐름도 보기", hint: t.unit === "pkg" ? "패키지 단위" : "", disabled: !done, run: () => void this.openUnitDfd(t, false) },
+      { label: "흐름도 새 창", disabled: !done, run: () => void this.openUnitDfd(t, true) },
       { label: "분석 결과 보기", disabled: !r.analyzed_at, run: () => this.showUnit(key) },
       ...(t.unit === "proc" ? [{ label: "호출 관계", disabled: !done, run: () => { this.focusNode = t.focus; this.view = "calls"; this.render(); } }] : []),
       { sep: true },
@@ -550,7 +578,7 @@ export class AnalysisView {
     };
     try {
       this.run = this.mode === "code"
-        ? await invoke<number>("analysis_code_start", { id, folder: this.folder, paths: picked.map((r) => r.path), provider: p?.name ?? null, allowRemote: !!p?.remote, options })
+        ? await invoke<number>("analysis_code_start", { id, folders: this.folders, paths: picked.map((r) => r.path), provider: p?.name ?? null, allowRemote: !!p?.remote, options })
         : await invoke<number>("analysis_start", { id, units, provider: p?.name ?? null, allowRemote: !!p?.remote, options });
     } catch (e) {
       return toast(errOf(e).message, "error");
@@ -576,13 +604,34 @@ export class AnalysisView {
     void this.load();
   }
 
-  /** 폴더 고르기 — 목록만 읽는다 (분석은 고른 뒤 '분석 시작') */
+  private showFolders() {
+    const last = (f: string) => f.split(/[\\/]/).filter(Boolean).pop() ?? f;
+    this.folderIn.value = !this.folders.length ? "" : this.folders.length === 1 ? this.folders[0] : `폴더 ${this.folders.length}개 — ${this.folders.map(last).join(", ")}`;
+    this.folderIn.title = this.folders.join("\n");
+    try { localStorage.setItem("analysis.codeFolders", JSON.stringify(this.folders)); } catch { /* 기억 못 해도 된다 */ }
+  }
+
+  /** 폴더 추가 — 목록만 읽는다 (분석은 고른 뒤 '분석 시작') */
   private async pickFolder() {
-    const f = await openDialog({ directory: true, multiple: false, title: "Pro*C·XML 쿼리 소스 폴더 (하위 폴더 포함)", defaultPath: this.folder || undefined });
+    const f = await openDialog({ directory: true, multiple: false, title: "Pro*C·XML 쿼리 소스 폴더 추가 (하위 폴더 포함)", defaultPath: this.folders[this.folders.length - 1] || undefined });
     if (!f || Array.isArray(f)) return;
-    this.folder = f;
-    this.folderIn.value = f;
-    try { localStorage.setItem("analysis.codeFolder", f); } catch { /* 기억 못 해도 된다 */ }
+    if (this.folders.includes(f)) return toast("이미 추가한 폴더입니다", "info");
+    this.folders.push(f);
+    this.showFolders();
+    await this.load();
+  }
+
+  /** 추가한 폴더 목록 — 빼기 */
+  private async manageFolders() {
+    if (!this.folders.length) return this.pickFolder();
+    const body = h("div", { class: "folder-list" });
+    const draw = () => body.replaceChildren(
+      ...this.folders.map((f, i) => h("div", { class: "row", style: "display:flex;gap:8px;align-items:center;margin:4px 0" },
+        h("code", { style: "flex:1;word-break:break-all" }, f),
+        h("button", { class: "small", onclick: () => { this.folders.splice(i, 1); this.showFolders(); draw(); } }, "빼기"))),
+      h("p", { class: "hint" }, "빼도 이미 분석한 결과는 그대로 남습니다 (목록에서만 안 보입니다)."));
+    draw();
+    await modal("코드 폴더", body, [{ label: "닫기", value: true, kind: "primary" }]);
     this.checked.clear();
     await this.load();
   }

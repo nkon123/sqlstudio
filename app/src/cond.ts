@@ -211,3 +211,138 @@ export function listText(col: Column, values: (string | null)[], form: ListText)
   const c = listCondition(col, values, "in");
   return "error" in c ? c : { text: c.cond };
 }
+
+// ── 계산한 열(DECODE·함수·집계·별칭)·UNION 은 WHERE 에 별칭을 쓸 수 없다 → SELECT * FROM (원본) WHERE 조건 으로 감싼다 ──────────
+
+const WORD_SET_OPS = new Set(["UNION", "INTERSECT", "MINUS"]);
+
+/** 첫 SELECT 의 목록 항목 (깊이 0 의 쉼표로 나눈 글) — 못 찾으면 null */
+function selectList(sql: string): string[] | null {
+  const { words } = scan(sql);
+  const sel = words.findIndex((x) => x.w === "SELECT");
+  const from = words.findIndex((x, k) => k > sel && x.w === "FROM");
+  if (sel < 0 || from < 0) return null;
+  const list = sql.slice(words[sel].at + 6, words[from].at);
+  const items: string[] = [];
+  let depth = 0, cur = "", quote = "";
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i];
+    if (quote) { cur += c; if (c === quote) quote = ""; continue; }
+    if (c === "'" || c === '"') { quote = c; cur += c; continue; }
+    if (c === "(") depth++;
+    else if (c === ")") depth--;
+    if (c === "," && depth === 0) { items.push(cur); cur = ""; continue; }
+    cur += c;
+  }
+  items.push(cur);
+  return items.map((s) => s.replace(/--[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "").trim().replace(/^(DISTINCT|UNIQUE|ALL)\s+/i, ""));
+}
+
+const SIMPLE_ITEM = /^((?:"[^"]+"|\w[\w$#]*)(?:\.(?:"[^"]+"|\w[\w$#]*))?)(?:\s+(?:AS\s+)?("[^"]+"|\w[\w$#]*))?$/i;
+
+/** 이 결과 열이 SELECT 목록의 단순한 열인지 — simple: `[별칭.]열 [AS 이름]` 이라 WHERE 에 그대로 쓸 수 있다,
+ *  star: `*` 로 가져온 것(그 이름으로 쓴다), complex: DECODE·함수·집계·식 이거나 어느 항목인지 모르겠다 → 감싸야 한다 */
+export function columnKind(sql: string, colName: string): "simple" | "star" | "complex" {
+  const items = selectList(sql);
+  if (!items) return "complex";
+  const want = colName.toUpperCase();
+  const hits = items.filter((item) => {
+    const m = SIMPLE_ITEM.exec(item);
+    if (m) return (m[2] ?? m[1].split(".").pop()!).replace(/"/g, "").toUpperCase() === want;
+    // 단순하지 않은 항목: 별칭이 같으면 그 항목이 이 열이다 (예: DECODE(…) AS ST_NM)
+    const alias = /\s(?:AS\s+)?("[^"]+"|\w[\w$#]*)$/i.exec(item);
+    return !!alias && alias[1].replace(/"/g, "").toUpperCase() === want;
+  });
+  if (hits.length === 1) return SIMPLE_ITEM.test(hits[0]) ? "simple" : "complex";
+  if (hits.length === 0 && items.some((i) => /(^|\.)\*$/.test(i))) return "star";
+  return "complex";
+}
+
+/** SELECT 목록의 출력 이름들(대문자)과 `식 → 이름` */
+function outputNames(sql: string): { names: Set<string>; byExpr: Map<string, string>; star: boolean } {
+  const names = new Set<string>();
+  const byExpr = new Map<string, string>();
+  let star = false;
+  for (const item of selectList(sql) ?? []) {
+    if (/(^|\.)\*$/.test(item)) { star = true; continue; }
+    const m = SIMPLE_ITEM.exec(item);
+    if (m) {
+      const name = (m[2] ?? m[1].split(".").pop()!).replace(/"/g, "").toUpperCase();
+      names.add(name);
+      byExpr.set(m[1].replace(/"/g, "").toUpperCase(), name);
+      continue;
+    }
+    const alias = /\s(?:AS\s+)?("[^"]+"|\w[\w$#]*)$/i.exec(item);
+    if (alias) names.add(alias[1].replace(/"/g, "").toUpperCase());
+  }
+  return { names, byExpr, star };
+}
+
+/** SQL 을 `SELECT * FROM (원본) WHERE 조건` 으로 감싼다. 끝의 ORDER BY 는 출력 열 이름·번호로 쓴 것만 바깥으로 옮긴다
+ *  (안쪽의 ORDER BY 는 순서가 보장되지 않는다). FOR UPDATE 는 감쌀 수 없다 */
+export function wrapCondition(sql: string, cond: string): { sql: string } | { error: string } {
+  const { words, end } = scan(sql);
+  const first = words[0]?.w;
+  if (first !== "SELECT" && first !== "WITH") return { error: "조회(SELECT) 문에만 조건을 붙일 수 있습니다" };
+  if (words.some((x, k) => x.w === "FOR" && words[k + 1]?.w === "UPDATE")) return { error: "FOR UPDATE 가 있는 쿼리는 감쌀 수 없습니다 — 조건을 직접 넣어 주세요" };
+  const tailStart = (() => {
+    const k = words.findIndex((x) => x.w === "FETCH" || x.w === "OFFSET");
+    return k >= 0 ? words[k].at : end;
+  })();
+  // 마지막 ORDER BY (깊이 0) — FETCH·OFFSET 이 뒤에 오면 옮기지 않는다 (먼저 N 개를 자르고 거르는 뜻이 달라진다)
+  let ob = -1;
+  words.forEach((x, k) => { if (x.w === "ORDER" && words[k + 1]?.w === "BY") ob = k; });
+  let inner = sql.slice(0, end).replace(/\s+$/, "");
+  let lifted = "";
+  if (ob >= 0 && tailStart === end) {
+    const at = words[ob].at;
+    const clause = sql.slice(at + "ORDER BY".length, end);
+    const { names, byExpr, star } = outputNames(sql);
+    const parts: string[] = [];
+    let depth = 0, cur = "";
+    for (const c of clause) {
+      if (c === "(") depth++;
+      else if (c === ")") depth--;
+      if (c === "," && depth === 0) { parts.push(cur); cur = ""; continue; }
+      cur += c;
+    }
+    parts.push(cur);
+    const out: string[] = [];
+    for (const p of parts) {
+      const m = /^\s*(\S+?)((?:\s+(?:ASC|DESC))?(?:\s+NULLS\s+(?:FIRST|LAST))?)\s*$/i.exec(p);
+      if (!m) { out.length = 0; break; }
+      const key = m[1].replace(/"/g, "").toUpperCase();
+      if (/^\d+$/.test(key)) out.push(`${m[1]}${m[2]}`);
+      else if (!key.includes(".") && (names.has(key) || star)) out.push(`${m[1]}${m[2]}`);
+      else if (byExpr.has(key)) out.push(`${byExpr.get(key)}${m[2]}`);
+      else { out.length = 0; break; }
+    }
+    if (out.length === parts.length) {
+      lifted = `ORDER BY ${out.map((s) => s.trim()).join(", ")}`;
+      inner = sql.slice(0, at).replace(/\s+$/, "");
+    }
+  }
+  const tail = sql.slice(end); // 끝의 세미콜론·빈 줄
+  return { sql: `SELECT *\nFROM (\n${inner}\n)\nWHERE ${cond}${lifted ? `\n${lifted}` : ""}${tail}` };
+}
+
+/** 셀 값 조건을 쿼리에 놓는다 — 단순한 열은 WHERE 끝에(인덱스를 탈 수 있고 쿼리가 그대로 보인다),
+ *  계산한 열·집계·UNION 은 감싸서 (별칭은 WHERE 에 쓸 수 없고, 집계는 WHERE 가 아니다) */
+export function placeCondition(
+  sql: string,
+  col: Column,
+  make: (expr: string | null) => { cond: string } | { error: string },
+): { sql: string; cond: string; wrapped: boolean } | { error: string } {
+  const setOp = scan(sql).words.some((x) => WORD_SET_OPS.has(x.w));
+  const kind = setOp ? "complex" : columnKind(sql, col.name);
+  if (kind === "complex") {
+    const c = make(null);
+    if ("error" in c) return c;
+    const w = wrapCondition(sql, c.cond);
+    return "error" in w ? w : { sql: w.sql, cond: c.cond, wrapped: true };
+  }
+  const c = make(kind === "simple" ? selectExpr(sql, col.name) : null);
+  if ("error" in c) return c;
+  const a = addCondition(sql, c.cond);
+  return "error" in a ? a : { sql: a.sql, cond: c.cond, wrapped: false };
+}

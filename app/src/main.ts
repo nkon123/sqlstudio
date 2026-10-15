@@ -17,7 +17,7 @@ import { DebugView } from "./debugger";
 import { MonitorView } from "./monitor";
 import { showSpace } from "./space";
 import { enableTabDrag } from "./tabdrag";
-import { addCondition, cellCondition, listCondition, listText, selectExpr, type CondOp, type ListCond, type ListText } from "./cond";
+import { cellCondition, listCondition, listText, placeCondition, type CondOp, type ListCond, type ListText } from "./cond";
 import { SqlEditor, changeCase } from "./editor";
 import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from "./format";
 import type { GitPanel } from "./git";
@@ -1680,16 +1680,14 @@ class App {
     const doc = view.state.doc.toString();
     const at = doc.indexOf(q.sql);
     if (at < 0) return toast("에디터에서 이 결과를 만든 쿼리를 찾지 못했습니다 — 쿼리를 고쳤거나 지웠다면 다시 실행한 뒤 눌러 주세요", "error", 6000);
-    const cond = make(selectExpr(q.sql, column.name));
-    if ("error" in cond) return toast(cond.error, "error", 6000);
-    const added = addCondition(q.sql, cond.cond);
+    const added = placeCondition(q.sql, column, make);
     if ("error" in added) return toast(added.error, "error", 6000);
     view.dispatch({ changes: { from: at, to: at + q.sql.length, insert: added.sql }, selection: { anchor: at }, scrollIntoView: true, userEvent: "input.cond" });
     t.lastQuery = { sql: added.sql, binds: q.binds };
     t.setDirty(true);
     t.editor.flash(at, at + added.sql.length);
     if (run) await this.runStatement();
-    else { this.status(`조건 추가: ${cond.cond.length > 80 ? `${cond.cond.slice(0, 80)}…` : cond.cond}`); view.focus(); }
+    else { this.status(`조건 추가${added.wrapped ? " (계산한 열이라 SELECT * FROM (…) 로 감쌈)" : ""}: ${added.cond.length > 80 ? `${added.cond.slice(0, 80)}…` : added.cond}`); view.focus(); }
   }
 
   /** 지금 결과를 만든 조회의 전체 건수 — 읽고 있는 결과(커서)를 건드리지 않고 사전 조회 세션으로 센다 */

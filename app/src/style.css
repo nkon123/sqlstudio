@@ -119,7 +119,8 @@ body.row-resizing { cursor: row-resize; user-select: none; }
 .cm-ora-error { text-decoration: wavy underline var(--danger); background: color-mix(in srgb, var(--danger) 15%, transparent); }
 :root[data-theme="dark"] .cm-editor { background: var(--panel); color: var(--text); }
 :root[data-theme="dark"] .cm-gutters { background: var(--panel) !important; border-color: var(--line) !important; color: var(--dim) !important; }
-:root[data-theme="dark"] .cm-activeLine, :root[data-theme="dark"] .cm-activeLineGutter { background: #232931 !important; }
+/* 현재 줄 강조는 반투명으로 — 불투명이면 그 줄에 걸친 선택 영역(글 뒤에 깔린 층)을 덮어 선택이 안 보인다 */
+:root[data-theme="dark"] .cm-activeLine, :root[data-theme="dark"] .cm-activeLineGutter { background: rgba(140, 165, 210, .08) !important; }
 :root[data-theme="dark"] .cm-cursor { border-left-color: var(--text) !important; }
 .cm-editor .cm-selectionBackground, .cm-editor.cm-focused .cm-selectionBackground, .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground { background: var(--editor-sel) !important; }
 :root[data-theme="dark"] .cm-matchingBracket { background: #2e4a3a !important; color: inherit !important; }

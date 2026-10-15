@@ -3,6 +3,8 @@
   --accent: #2f6fdd; --accent-text: #fff; --danger: #c62f3c; --ok: #1d8a4a; --warn: #b8730a;
   --sel: #cfe0ff; --odd: #f7f9fc; --hover: #eef2f8;
   --hl-fn: #a05a00;
+  /* 편집기 선택 영역·같은 낱말 강조 — 설정 > 편집기에서 바꾼다 */
+  --editor-sel: #b3d1ff; --editor-sel-match: #d9efc4;
   /* 에디터 문법 색 */
   --hl-kw: #7a1fa2; --hl-str: #a3151b; --hl-num: #116644; --hl-cm: #7d8590; --hl-type: #0b6e5f; --hl-op: #4d5662;
   --mono: ui-monospace, "D2Coding", Consolas, "Cascadia Mono", monospace;
@@ -15,6 +17,7 @@
   --accent: #4b8cf0; --sel: #2b3f63; --odd: #20252c; --hover: #262c34;
   --danger: #e0525e; --ok: #3cb371; --warn: #e0a030;
   --hl-fn: #e0a860;
+  --editor-sel: #34609c; --editor-sel-match: #4a6a3e;
   --hl-kw: #c792ea; --hl-str: #e6a86b; --hl-num: #9cd68b; --hl-cm: #7f8c98; --hl-type: #4ec9b0; --hl-op: #aeb7c2;
   color-scheme: dark;
 }
@@ -118,12 +121,12 @@ body.row-resizing { cursor: row-resize; user-select: none; }
 :root[data-theme="dark"] .cm-gutters { background: var(--panel) !important; border-color: var(--line) !important; color: var(--dim) !important; }
 :root[data-theme="dark"] .cm-activeLine, :root[data-theme="dark"] .cm-activeLineGutter { background: #232931 !important; }
 :root[data-theme="dark"] .cm-cursor { border-left-color: var(--text) !important; }
-:root[data-theme="dark"] .cm-selectionBackground, :root[data-theme="dark"] .cm-focused .cm-selectionBackground { background: var(--sel) !important; }
+.cm-editor .cm-selectionBackground, .cm-editor.cm-focused .cm-selectionBackground, .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground { background: var(--editor-sel) !important; }
 :root[data-theme="dark"] .cm-matchingBracket { background: #2e4a3a !important; color: inherit !important; }
 :root[data-theme="dark"] .cm-tooltip { background: var(--panel); color: var(--text); border-color: var(--line); }
 :root[data-theme="dark"] .cm-tooltip-autocomplete ul li[aria-selected] { background: var(--sel); color: var(--text); }
 :root[data-theme="dark"] .cm-searchMatch { background: #4a4020; }
-:root[data-theme="dark"] .cm-selectionMatch { background: #2c3a2c; }
+.cm-editor .cm-selectionMatch { background: var(--editor-sel-match) !important; }
 
 /* ── 그리드 ── */
 .grid { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; outline: none; font: 12px var(--mono); }

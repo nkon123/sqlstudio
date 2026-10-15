@@ -30,7 +30,7 @@ import { openHistory } from "./history";
 import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
 import { DEFAULT_SNIPPETS, loadSnippets, parse as parseSnippets, saveSnippets, snippets, type Snip } from "./snippets";
-import { alertBox, applyTheme, bindBox, confirmBox, field, h, modal, passwordBox, themePref, toast, type ThemePref } from "./ui";
+import { alertBox, applyTheme, bindBox, confirmBox, editorColorNow, field, h, modal, passwordBox, setEditorColor, themePref, toast, type EditorColorKey, type ThemePref } from "./ui";
 
 type Conn = Connected & { profile: string; /** 접속한 때 (ms) */ at?: number };
 type Pane = "result" | "output" | "plan" | "desc";
@@ -2078,10 +2078,22 @@ class App {
     }).catch(() => {});
     histOn.onchange = () => invoke("set_history_enabled", { enabled: histOn.checked }).catch((err) => toast(errOf(err).message, "error"));
     const theme = sel(themePref(), [["system", "시스템 따름 (Windows 설정)"], ["light", "밝게"], ["dark", "어둡게"]]);
-    theme.onchange = () => applyTheme(theme.value as ThemePref);
+    // 편집기 선택 색 — 밝게·어둡게마다 따로 기억한다 (테마를 바꾸면 그 테마의 색으로)
+    const colorInputs: [EditorColorKey, HTMLInputElement][] = [];
+    const colorRow = (key: EditorColorKey, label: string, hint: string) => {
+      const input = h("input", { type: "color", style: "width:56px;height:28px;padding:0" }) as HTMLInputElement;
+      input.value = editorColorNow(key);
+      input.oninput = () => setEditorColor(key, input.value);
+      colorInputs.push([key, input]);
+      const reset = h("button", { class: "small", title: "이 테마의 기본 색으로", onclick: (e: Event) => { e.preventDefault(); setEditorColor(key, null); input.value = editorColorNow(key); } }, "기본값");
+      return field(label, h("div", { class: "row", style: "display:flex;gap:8px;align-items:center" }, input, reset), hint);
+    };
+    theme.onchange = () => { applyTheme(theme.value as ThemePref); setTimeout(() => { for (const [k, i] of colorInputs) i.value = editorColorNow(k); }, 0); };
     return h("div", { class: "form" },
       h("h3", {}, "화면"),
       field("화면 테마", theme, "바꾸면 바로 적용되고 이 PC 에 기억합니다. 흐름도 창도 따라갑니다"),
+      colorRow("sel", "편집기 선택 영역 색", "글을 드래그하거나 낱말을 더블클릭해 고른 곳의 배경색 — 밝은 화면·어두운 화면이 따로 기억됩니다"),
+      colorRow("match", "같은 낱말 강조 색", "낱말을 고르면 같은 낱말이 나오는 다른 곳에 칠하는 배경색"),
       h("h3", {}, "SQL 포맷 (Ctrl+Shift+F)"),
       field("키워드", kw), field("들여쓰기", ind), field("AND / OR 위치", logic),
       field("괄호 식 한 줄 최대 길이", width, "이보다 길면 여러 줄로 나눕니다"),

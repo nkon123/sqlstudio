@@ -142,6 +142,41 @@ export function themePref(): ThemePref {
   return "system";
 }
 
+export type EditorColorKey = "sel" | "match";
+const EDCOLOR_VAR: Record<EditorColorKey, string> = { sel: "--editor-sel", match: "--editor-sel-match" };
+
+const currentTheme = () => (document.documentElement.dataset.theme === "dark" ? "dark" : "light");
+
+/** 편집기 선택 색 — 밝게·어둡게마다 따로 이 PC 에 기억한다. 없으면 null (기본 색) */
+export function editorColor(key: EditorColorKey): string | null {
+  try { return localStorage.getItem(`ui.edcolor.${key}.${currentTheme()}`); } catch { return null; }
+}
+
+export function setEditorColor(key: EditorColorKey, value: string | null) {
+  try {
+    const k = `ui.edcolor.${key}.${currentTheme()}`;
+    if (value) localStorage.setItem(k, value);
+    else localStorage.removeItem(k);
+  } catch { /* 기억 못 해도 된다 */ }
+  applyEditorColors();
+}
+
+/** 기억한 색을 화면에 — 없으면 스타일 시트의 기본 색 */
+export function applyEditorColors() {
+  const root = document.documentElement;
+  for (const key of ["sel", "match"] as const) {
+    const v = editorColor(key);
+    if (v && /^#[0-9a-f]{6}$/i.test(v)) root.style.setProperty(EDCOLOR_VAR[key], v);
+    else root.style.removeProperty(EDCOLOR_VAR[key]);
+  }
+}
+
+/** 지금 적용 중인 색 (#rrggbb) — 색 고르개의 처음 값 */
+export function editorColorNow(key: EditorColorKey): string {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(EDCOLOR_VAR[key]).trim();
+  return /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : "#3465a4";
+}
+
 let themeWatch: MediaQueryList | null = null;
 
 export function applyTheme(pref: ThemePref = themePref()) {
@@ -150,6 +185,7 @@ export function applyTheme(pref: ThemePref = themePref()) {
   const resolve = () => {
     const dark = pref === "dark" || (pref === "system" && mq.matches);
     document.documentElement.dataset.theme = dark ? "dark" : "light";
+    applyEditorColors();
     // 창 머리(제목 표시줄)도 맞춘다 — 못 해도 화면은 바뀐다
     import("@tauri-apps/api/window").then(({ getCurrentWindow }) => getCurrentWindow().setTheme(pref === "system" ? null : pref)).catch(() => {});
   };
@@ -162,7 +198,10 @@ export function applyTheme(pref: ThemePref = themePref()) {
 }
 
 // 다른 창에서 테마를 바꾸면 따라간다
-window.addEventListener("storage", (e) => { if (e.key === "ui.theme") applyTheme(themePref()); });
+window.addEventListener("storage", (e) => {
+  if (e.key === "ui.theme") applyTheme(themePref());
+  else if (e.key?.startsWith("ui.edcolor.")) applyEditorColors();
+});
 
 export function toast(text: string, kind: "info" | "error" | "ok" = "info", ms = 3500) {
   let host = document.getElementById("toasts");

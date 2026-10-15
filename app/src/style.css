@@ -596,3 +596,15 @@ button.danger.running-btn { animation: pulse 1.2s infinite; }
 
 .usage-grid { height: min(52vh, 460px); border: 1px solid var(--line); border-radius: 4px; display: flex; }
 .usage-grid > .grid { flex: 1; min-width: 0; }
+
+.space-grid { height: min(60vh, 560px); }
+.space-view .pane-tab.active { font-weight: 600; }
+
+/* 탭 줄: 탭들(가로로 넘치면 스크롤) + 오른쪽의 "+" */
+.tabs-row { display: flex; background: var(--bg); border-bottom: 1px solid var(--line); }
+.tabs-row .tabs { flex: 1; min-width: 0; border-bottom: none; }
+.tab-plus { border: none; background: none; padding: 0 12px; font-size: 16px; line-height: 1; color: var(--dim); cursor: pointer; flex: none; }
+.tab-plus:hover { color: var(--text); background: var(--sel); }
+.tab { user-select: none; }
+.tab.dragging { opacity: .75; box-shadow: 0 2px 8px rgba(0, 0, 0, .3); position: relative; z-index: 2; }
+body.tab-dragging { cursor: grabbing; user-select: none; }

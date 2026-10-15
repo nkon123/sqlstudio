@@ -112,7 +112,7 @@ pub fn run() {
             db::analyze_sql,
             db::list_schemas,
             db::list_objects,
-            db::describe, db::count_rows,
+            db::describe, db::count_rows, db::tablespace_usage, db::table_sizes,
             db::describe_fast,
             db::get_ddl,
             db::object_sections,

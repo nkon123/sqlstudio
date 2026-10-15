@@ -15,6 +15,7 @@ import { sqlCompletion } from "./completion";
 import { AnalysisView } from "./analysis";
 import { DebugView } from "./debugger";
 import { MonitorView } from "./monitor";
+import { showSpace } from "./space";
 import { SqlEditor, changeCase } from "./editor";
 import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from "./format";
 import type { GitPanel } from "./git";
@@ -229,7 +230,7 @@ class Tab {
     } catch { /* 기본 비율 */ }
     this.show("result");
     this.grid.clear("Ctrl+Enter: 커서 위치 문장 실행 · F5: 스크립트 실행 · Ctrl+E: 실행계획");
-    this.tabEl = h("div", { class: "tab", onclick: () => app.activate(this) },
+    this.tabEl = h("div", { class: "tab", onclick: () => { if (!app.tabJustDragged) app.activate(this); } },
       h("span", { class: "tab-title" }),
       h("span", { class: "tab-txn", hidden: true, title: "커밋하지 않은 변경이 있습니다 (INSERT·UPDATE·DELETE·MERGE 등) — 커밋 또는 롤백하세요" }, "커밋 전"),
       h("button", { class: "tab-close", title: "닫기", onclick: (e: Event) => { e.stopPropagation(); app.closeTab(this); } }, "×"));
@@ -386,6 +387,10 @@ class App {
   private active: Tab | null = null;
   private profiles: Profile[] = [];
   private tabStrip = h("div", { class: "tabs" });
+  /** 탭 옆의 "+" — 새 탭 (지금 탭과 같은 접속으로) */
+  private plusBtn = h("button", { class: "tab-plus", title: "새 탭 (같은 접속으로)", onclick: () => this.newTab(true) }, "+");
+  /** 탭을 끌어 옮긴 직후의 클릭은 탭을 고르는 것이 아니다 */
+  tabJustDragged = false;
   private tabBodies = h("div", { class: "tab-bodies" });
   private profileSel = h("select", { title: "접속 프로필" });
   private connBadge = h("span", { class: "conn-badge" });
@@ -426,6 +431,7 @@ class App {
       b("dfd", "흐름도", "데이터 흐름도를 별도 창으로 — 분석 결과에서 테이블 ← 처리 ← 테이블 흐름 (테이블 상세의 '흐름도'로 열면 그 테이블 기준)", () => this.openDfd()),
       b("analyze", "분석", "PL/SQL 분석 — 패키지·프로시저를 조각내어 (로컬) 모델로 분석하고 호출 관계·테이블 CRUD 를 통합한다", () => this.analyzeActive()),
       b("compare", "비교", "스키마 비교 — 이 탭(원본)과 다른 접속(대상)의 테이블·뷰·시퀀스·소스를 맞대고 맞추는 스크립트를 만든다", () => this.compareActive()),
+      b("space", "용량", "용량 — 테이블별 크기(테이블+인덱스+LOB)와 테이블스페이스별 사용량을 그리드로", () => this.spaceActive()),
       b("monitor", "세션", "세션·락 모니터 — 누가 무엇을 막고 있는지, 세션의 SQL·트랜잭션, 세션 종료(확인 후)", () => this.monitorActive()),
       b("cancel", "중지", "실행 중인 쿼리를 취소", () => this.cancel(), "danger"),
       h("span", { class: "sep" }),
@@ -471,7 +477,7 @@ class App {
       insertSql: (s) => this.active?.editor.insert(s),
       replaceSql: (s) => this.replaceStatement(s),
     });
-    const center = h("section", { class: "center" }, this.tabStrip, this.tabBodies);
+    const center = h("section", { class: "center" }, h("div", { class: "tabs-row" }, this.tabStrip, this.plusBtn), this.tabBodies);
     const main = h("main", { class: "layout" });
     this.layout = new SideLayout(main, browser, center, this.ai.el, (side, open) => {
       this.btn[side === "left" ? "toggleBrowser" : "toggleAi"]?.classList.toggle("active", open);
@@ -608,10 +614,48 @@ class App {
     const t = new Tab(this, text);
     this.tabs.push(t);
     this.tabStrip.append(t.tabEl);
+    this.enableTabDrag(t);
     this.tabBodies.append(t.root);
     this.activate(t);
+    t.tabEl.scrollIntoView({ inline: "nearest", block: "nearest" });
     if (sameConnection && prev?.conn) this.connect(t, prev.conn.profile);
     return t;
+  }
+
+  /** 탭을 끌어 순서 바꾸기 — HTML5 드래그는 창의 파일 드롭과 얽히므로 마우스 이벤트로 */
+  private enableTabDrag(t: Tab) {
+    const el = t.tabEl;
+    el.addEventListener("mousedown", (e) => {
+      if (e.button !== 0 || (e.target as HTMLElement).closest(".tab-close")) return;
+      const startX = e.clientX;
+      let dragging = false;
+      const move = (ev: MouseEvent) => {
+        if (!dragging && Math.abs(ev.clientX - startX) < 6) return;
+        if (!dragging) {
+          dragging = true;
+          el.classList.add("dragging");
+          document.body.classList.add("tab-dragging");
+        }
+        // 마우스가 다른 탭의 가운데선을 넘으면 그 앞·뒤로 자리를 옮긴다
+        const others = [...this.tabStrip.querySelectorAll<HTMLElement>(".tab")].filter((x) => x !== el);
+        const before = others.find((o) => { const r = o.getBoundingClientRect(); return ev.clientX < r.left + r.width / 2; }) ?? null;
+        if (before !== el.nextElementSibling) this.tabStrip.insertBefore(el, before);
+      };
+      const up = () => {
+        window.removeEventListener("mousemove", move);
+        el.classList.remove("dragging");
+        document.body.classList.remove("tab-dragging");
+        if (!dragging) return;
+        // 화면의 순서를 탭 목록에 반영한다
+        const order = [...this.tabStrip.querySelectorAll<HTMLElement>(".tab")];
+        this.tabs.sort((a, b) => order.indexOf(a.tabEl) - order.indexOf(b.tabEl));
+        el.scrollIntoView({ inline: "nearest", block: "nearest" });
+        this.tabJustDragged = true;
+        setTimeout(() => { this.tabJustDragged = false; }, 0);
+      };
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up, { once: true });
+    });
   }
 
   activate(t: Tab) {
@@ -1108,6 +1152,13 @@ class App {
     const t = this.need();
     if (!t) return;
     void t.compare().open();
+  }
+
+  private spaceActive() {
+    const t = this.need();
+    if (!t) return;
+    if (!t.conn) return toast("먼저 접속하세요", "error");
+    void showSpace(t.conn.id, t.conn.user);
   }
 
   private monitorActive() {
@@ -1803,7 +1854,7 @@ class App {
     const busy = !!t?.running;
     this.btn.connect.disabled = busy;
     this.btn.disconnect.disabled = !c || busy;
-    for (const k of ["run", "script", "explain", "debug", "monitor", "compare"]) this.btn[k].disabled = !c || busy;
+    for (const k of ["run", "script", "explain", "debug", "monitor", "compare", "space"]) this.btn[k].disabled = !c || busy;
     // 분석은 접속 없이도 — 가져온 결과를 본다
     this.btn.analyze.disabled = busy;
     this.btn.cancel.disabled = !busy;

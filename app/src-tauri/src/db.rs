@@ -653,6 +653,20 @@ pub async fn count_rows(st: State<'_, AppState>, id: u64, sql: String, binds: Ve
     Ok(CountView { rows, elapsed_ms: started.elapsed().as_millis() as u64 })
 }
 
+/// 테이블스페이스별 용량 (읽기 전용 사전 조회 세션으로)
+#[tauri::command]
+pub async fn tablespace_usage(st: State<'_, AppState>, id: u64) -> R<sqls_core::space::SpaceGrid> {
+    let s = lookup_session(&st, id)?;
+    Ok(sqls_core::space::tablespaces(&s).await?)
+}
+
+/// 스키마의 테이블별 크기 (테이블 + 인덱스 + LOB)
+#[tauri::command]
+pub async fn table_sizes(st: State<'_, AppState>, id: u64, owner: Option<String>, name_like: Option<String>) -> R<sqls_core::space::SpaceGrid> {
+    let s = lookup_session(&st, id)?;
+    Ok(sqls_core::space::table_sizes(&s, owner.as_deref(), name_like.as_deref(), 3_000).await?)
+}
+
 /// 컬럼 영향도 — 이 컬럼을 쓰는 뷰·소스의 줄, 테이블만 쓰는 객체, 인덱스·제약·외래 키
 #[tauri::command]
 pub async fn column_usage(st: State<'_, AppState>, id: u64, table: String, column: String) -> R<meta::Usage> {

@@ -16,7 +16,7 @@ import { AnalysisView } from "./analysis";
 import { DebugView } from "./debugger";
 import { MonitorView } from "./monitor";
 import { showSpace } from "./space";
-import { addCondition, cellCondition, selectExpr, type CondOp } from "./cond";
+import { addCondition, cellCondition, listCondition, listText, selectExpr, type CondOp, type ListCond, type ListText } from "./cond";
 import { SqlEditor, changeCase } from "./editor";
 import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from "./format";
 import type { GitPanel } from "./git";
@@ -1611,38 +1611,99 @@ class App {
   }
 
   /** 결과 그리드 우클릭: 건수 확인, 복사 */
+  /** 한 번에 고를 수 있는 셀 수 (IN 목록·LIKE 묶음이 너무 길어지지 않게) */
+  private static readonly PICK_LIMIT = 100;
+
   gridMenu(t: Tab, e: MouseEvent, value: string | null, col: number) {
     const q = t.lastQuery;
-    const n = t.grid.selectedRows().length;
     const column = t.grid.columnAt(col);
     const canCond = !!q && !!column && !t.grid.isEditing();
     const shown = value == null ? "NULL" : value.length > 24 ? `${value.slice(0, 24)}…` : value;
-    showMenu(e.clientX, e.clientY, [
-      { label: "조회 조건에 추가", hint: column ? `${column.name} · ${shown}` : "", disabled: !canCond, sub: [
+    const n = t.grid.selectedRows().length;
+    const sv = t.grid.selectedValues(App.PICK_LIMIT);
+    const multi = sv.kind === "col" && sv.values.length > 1;
+    const items: MenuItem[] = [];
+    if (sv.kind === "col" && multi) {
+      // 같은 열에서 여러 셀을 골랐다 — 값 목록으로
+      const c = sv.column;
+      const vals = sv.values;
+      const distinctN = new Set(vals.filter((v) => v != null)).size;
+      const nulls = vals.filter((v) => v == null).length;
+      const info = `${c.name} · ${vals.length}개${distinctN !== vals.length - nulls ? ` (중복 제외 ${distinctN}개)` : ""}${nulls ? ` · NULL ${nulls}개` : ""}`;
+      const add = (kind: ListCond, run: boolean) => () => void this.addListCondition(t, c, vals, kind, run);
+      const copy = (form: ListText) => () => {
+        const r = listText(c, vals, form);
+        if ("error" in r) return toast(r.error, "error", 5000);
+        navigator.clipboard.writeText(r.text).then(() => toast(`복사: ${vals.length}개 값`, "ok", 1500)).catch(() => {});
+      };
+      items.push(
+        { title: info },
+        { label: "조회 조건에 추가", disabled: !canCond, sub: [
+          { label: "IN (고른 값)", hint: "맨 끝 WHERE 에 AND", run: add("in", false) },
+          { label: "NOT IN (고른 값 빼고)", run: add("notin", false) },
+          { label: "LIKE '%값%' 여러 개 (OR)", hint: "글자 열", run: add("like", false) },
+          { sep: true },
+          { label: "IN 추가하고 실행", run: add("in", true) },
+          { label: "NOT IN 추가하고 실행", run: add("notin", true) },
+          { label: "LIKE 추가하고 실행", run: add("like", true) },
+        ] },
+        { label: "고른 값 복사", sub: [
+          { label: "IN 절", hint: "('A', 'B')", run: copy("in") },
+          { label: "조건까지", hint: "COL IN ('A', 'B')", run: copy("cond") },
+          { label: "쉼표 목록", hint: "A,B", run: copy("comma") },
+          { label: "따옴표 쉼표 목록", hint: "'A','B'", run: copy("quoted") },
+          { label: "줄마다 하나", run: copy("lines") },
+        ] },
+      );
+    } else if (sv.kind === "many" || sv.kind === "multi") {
+      items.push({ title: sv.kind === "many" ? `${sv.count.toLocaleString()}개 선택 — 값 목록은 ${App.PICK_LIMIT}개까지` : `${sv.count}개 선택 — 값 목록은 한 열에서만` });
+    } else {
+      items.push({ label: "조회 조건에 추가", hint: column ? `${column.name} · ${shown}` : "", disabled: !canCond, sub: [
         { label: "같다 (=)", hint: "맨 끝 WHERE 에 AND", run: () => void this.addCellCondition(t, column!, value, "eq", false) },
         { label: "포함 (LIKE '%값%')", hint: "글자 열", run: () => void this.addCellCondition(t, column!, value, "like", false) },
         { sep: true },
         { label: "같다 (=) 추가하고 실행", run: () => void this.addCellCondition(t, column!, value, "eq", true) },
         { label: "포함 (LIKE) 추가하고 실행", run: () => void this.addCellCondition(t, column!, value, "like", true) },
+      ] });
+    }
+    // 고른 행만 보기·빼고 보기 — 화면에서만 거른다 (서버 쿼리는 그대로)
+    items.push(
+      { sep: true },
+      { label: "행 거르기 (화면에서만)", sub: [
+        { label: n > 1 ? `고른 ${n}행만 보기` : "이 행만 보기", run: () => t.grid.maskSelectedRows(true) },
+        { label: n > 1 ? `고른 ${n}행 빼고 보기` : "이 행 빼고 보기", run: () => t.grid.maskSelectedRows(false) },
+        { sep: true },
+        { label: "거르기 해제", disabled: !t.grid.hasRowMask(), run: () => t.grid.clearRowMask() },
       ] },
       { sep: true },
       { label: "건수 확인", hint: "전체 행 수", disabled: !q || !t.conn || t.grid.isEditing(), run: () => void this.countResult(t) },
       { sep: true },
       { label: n > 1 ? `고른 셀 복사 (${n}행)` : "고른 셀 복사", hint: "Ctrl+C", run: () => navigator.clipboard.writeText(t.grid.selectionText()).catch(() => {}) },
       { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(t.grid.selectionText(true)).catch(() => {}) },
-    ]);
+    );
+    showMenu(e.clientX, e.clientY, items);
   }
 
-  /** 셀 값을 조회 조건으로 — 에디터의 그 쿼리에서 WHERE 끝(없으면 새 WHERE, GROUP BY·ORDER BY 앞)에 넣는다.
+  /** 셀 값을 조회 조건으로 */
+  private addCellCondition(t: Tab, column: Column, value: string | null, op: CondOp, run: boolean) {
+    return this.applyCondition(t, column, (expr) => cellCondition(column, value, op, expr), run);
+  }
+
+  /** 고른 값 목록(IN · NOT IN · LIKE 여러 개)을 조회 조건으로 */
+  private addListCondition(t: Tab, column: Column, values: (string | null)[], kind: ListCond, run: boolean) {
+    return this.applyCondition(t, column, (expr) => listCondition(column, values, kind, expr), run);
+  }
+
+  /** 조건을 에디터의 그 쿼리에 넣는다 — WHERE 끝(없으면 새 WHERE, GROUP BY·ORDER BY 앞).
    *  넣은 뒤 그 쿼리가 현재 쿼리가 되므로, 여러 번 눌러 조건을 쌓을 수 있다 */
-  private async addCellCondition(t: Tab, column: Column, value: string | null, op: CondOp, run: boolean) {
+  private async applyCondition(t: Tab, column: Column, make: (expr: string | null) => { cond: string } | { error: string }, run: boolean) {
     const q = t.lastQuery;
     if (!q) return;
     const view = t.editor.view;
     const doc = view.state.doc.toString();
     const at = doc.indexOf(q.sql);
     if (at < 0) return toast("에디터에서 이 결과를 만든 쿼리를 찾지 못했습니다 — 쿼리를 고쳤거나 지웠다면 다시 실행한 뒤 눌러 주세요", "error", 6000);
-    const cond = cellCondition(column, value, op, selectExpr(q.sql, column.name));
+    const cond = make(selectExpr(q.sql, column.name));
     if ("error" in cond) return toast(cond.error, "error", 6000);
     const added = addCondition(q.sql, cond.cond);
     if ("error" in added) return toast(added.error, "error", 6000);
@@ -1651,7 +1712,7 @@ class App {
     t.setDirty(true);
     t.editor.flash(at, at + added.sql.length);
     if (run) await this.runStatement();
-    else { this.status(`조건 추가: ${cond.cond}`); view.focus(); }
+    else { this.status(`조건 추가: ${cond.cond.length > 80 ? `${cond.cond.slice(0, 80)}…` : cond.cond}`); view.focus(); }
   }
 
   /** 지금 결과를 만든 조회의 전체 건수 — 읽고 있는 결과(커서)를 건드리지 않고 사전 조회 세션으로 센다 */

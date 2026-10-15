@@ -143,3 +143,71 @@ export function cellCondition(col: Column, value: string | null, op: CondOp, exp
   const body = needsEscape ? value.replace(/([%_\\])/g, "\\$1") : value;
   return { cond: `${name} LIKE ${q(`%${body}%`)}${needsEscape ? " ESCAPE '\\'" : ""}` };
 }
+
+// ── 여러 셀(한 열)의 값 목록 → IN 절·조건·복사 문자열 ─────────────────────────────
+
+/** 중복 없이(처음 나온 순서), NULL 은 따로 */
+function distinct(values: (string | null)[]): { vals: string[]; hasNull: boolean } {
+  const seen = new Set<string>();
+  const vals: string[] = [];
+  let hasNull = false;
+  for (const v of values) {
+    if (v == null) { hasNull = true; continue; }
+    if (!seen.has(v)) { seen.add(v); vals.push(v); }
+  }
+  return { vals, hasNull };
+}
+
+export type ListCond = "in" | "notin" | "like";
+export type ListText = "in" | "cond" | "comma" | "quoted" | "lines";
+
+/** 조건 한 줄: IN / NOT IN / LIKE 여러 개(OR). NULL 을 정확히 다룬다 —
+ *  IN: 고른 것에 NULL 이 있으면 `OR 열 IS NULL`. NOT IN: 'NULL 이 아닌 다른 값' 이 되도록 NULL 행은 남기거나(고르지 않았으면) 뺀다(골랐으면) */
+export function listCondition(col: Column, values: (string | null)[], kind: ListCond, exprOverride?: string | null): { cond: string } | { error: string } {
+  const name = exprOverride ?? ident(col.name);
+  const { vals, hasNull } = distinct(values);
+  if (!vals.length && !hasNull) return { error: "고른 값이 없습니다" };
+  if (kind === "like") {
+    if (NUMERIC.test(col.type_name || "") || /^(DATE|TIMESTAMP)/i.test(col.type_name || "")) return { error: "LIKE 는 글자 열에만 씁니다 — 숫자·날짜는 IN 을 쓰세요" };
+    if (!vals.length) return { error: "빈 값(NULL)에는 LIKE 를 쓸 수 없습니다" };
+    const parts = vals.map((v) => {
+      const esc = /[%_\\]/.test(v);
+      return `${name} LIKE ${q(`%${esc ? v.replace(/([%_\\])/g, "\\$1") : v}%`)}${esc ? " ESCAPE '\\'" : ""}`;
+    });
+    const all = hasNull ? [...parts, `${name} IS NULL`] : parts;
+    return { cond: all.length === 1 ? all[0] : `(${all.join(" OR ")})` };
+  }
+  const lits: string[] = [];
+  for (const v of vals) {
+    const l = literal(col, v);
+    if (l == null) return { error: `'${col.name}' 의 값 '${v}' 을 조건으로 바꿀 수 없습니다 (${col.type_name})` };
+    lits.push(l);
+  }
+  if (kind === "in") {
+    if (!lits.length) return { cond: `${name} IS NULL` };
+    const inn = lits.length === 1 ? `${name} = ${lits[0]}` : `${name} IN (${lits.join(", ")})`;
+    return { cond: hasNull ? `(${inn} OR ${name} IS NULL)` : inn };
+  }
+  // NOT IN
+  if (!lits.length) return { cond: `${name} IS NOT NULL` };
+  const not = lits.length === 1 ? `${name} <> ${lits[0]}` : `${name} NOT IN (${lits.join(", ")})`;
+  return { cond: hasNull ? `${name} IS NOT NULL AND ${not}` : `(${not} OR ${name} IS NULL)` };
+}
+
+/** 복사할 글: IN 절 `('A','B')`, 조건까지 `COL IN ('A','B')`, 쉼표 `A,B`, 따옴표 쉼표 `'A','B'`, 줄마다 하나 */
+export function listText(col: Column, values: (string | null)[], form: ListText): { text: string } | { error: string } {
+  const { vals, hasNull } = distinct(values);
+  if (!vals.length) return { error: hasNull ? "고른 값이 모두 빈 값(NULL)입니다" : "고른 값이 없습니다" };
+  if (form === "comma") return { text: vals.join(",") };
+  if (form === "lines") return { text: vals.join("\n") };
+  if (form === "quoted") return { text: vals.map(q).join(",") };
+  const lits: string[] = [];
+  for (const v of vals) {
+    const l = literal(col, v);
+    if (l == null) return { error: `'${col.name}' 의 값 '${v}' 을 SQL 로 바꿀 수 없습니다 (${col.type_name})` };
+    lits.push(l);
+  }
+  if (form === "in") return { text: `(${lits.join(", ")})` };
+  const c = listCondition(col, values, "in");
+  return "error" in c ? c : { text: c.cond };
+}

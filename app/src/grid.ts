@@ -99,6 +99,10 @@ export class ResultGrid {
   private notes: Record<string, string> = {};
   /** 머리에 이름 대신 설명을 */
   private showNotes = false;
+  /** Ctrl+클릭으로 더한 셀들 (화면 행 * 10000 + 열) — 사각형(sel) 과 합쳐서 선택이 된다 */
+  private picked = new Set<number>();
+  /** 고른 행만 보기(keep) / 고른 행 빼고 보기 — 화면에서만 거른다. 값은 rows 인덱스 */
+  private rowMask: { keep: boolean; ids: Set<number> } | null = null;
 
   constructor(private opts: GridOptions = {}) {
     this.el = document.createElement("div");
@@ -120,6 +124,7 @@ export class ResultGrid {
       e.preventDefault();
       if (!this.inSel(at.r, at.c)) {
         this.sel = { r0: at.r, c0: at.c, r1: at.r, c1: at.c };
+        this.picked.clear();
         this.update();
       }
       this.opts.onContextMenu(this.rows[this.view[at.r]], at.c, e);
@@ -133,6 +138,8 @@ export class ResultGrid {
     this.rows = [];
     this.hasMore = false;
     this.sel = null;
+    this.picked.clear();
+    this.rowMask = null;
     this.view = [];
     this.edit = null;
     this.dirty.clear();
@@ -152,6 +159,8 @@ export class ResultGrid {
     this.rows = page.rows.slice();
     this.hasMore = page.has_more;
     this.sel = null;
+    this.picked.clear();
+    this.rowMask = null;
     this.sortCol = -1;
     this.edit = null;
     this.dirty.clear();
@@ -171,6 +180,7 @@ export class ResultGrid {
   replaceRows(rows: (string | null)[][]) {
     this.rows = rows.slice();
     this.rebuildView();
+    this.picked.clear();
     if (this.sel) {
       const max = this.view.length - 1;
       if (max < 0) this.sel = null;
@@ -190,11 +200,7 @@ export class ResultGrid {
 
   /** 선택 영역에 걸친 행들 (화면 순서) */
   selectedRows(): (string | null)[][] {
-    const s = this.sel;
-    if (!s) return [];
-    const out: (string | null)[][] = [];
-    for (let r = Math.min(s.r0, s.r1); r <= Math.max(s.r0, s.r1); r++) out.push(this.rows[this.view[r]]);
-    return out;
+    return this.selRowIdx().map((r) => this.rows[this.view[r]]);
   }
 
   /** 컬럼 설명 — 머리 풍선에, '설명' 을 켜면 머리 글자로 */
@@ -228,7 +234,10 @@ export class ResultGrid {
     const shown = this.view.length !== this.rows.length ? `${this.view.length.toLocaleString()} / ` : "";
     const sorted = this.sortCol >= 0 && this.hasMore ? " · 가져온 행만 정렬됨 (전체는 ORDER BY)" : "";
     const edit = this.edit ? ` · 편집 중${this.changeCount() ? ` — 변경 ${this.changeCount()}` : ""}` : "";
-    this.opts.onStatus?.(`${shown}${this.rows.length.toLocaleString()}행${this.hasMore ? " · 더 있음 (스크롤하면 가져옴)" : ""}${sorted}${edit}`);
+    const mask = this.rowMask ? (this.rowMask.keep ? " · 고른 행만 보는 중" : ` · 고른 행 ${this.rowMask.ids.size}개 뺀 것을 보는 중`) : "";
+    const n = this.selectionCount();
+    const pick = n > 1 ? ` · ${n.toLocaleString()}개 선택` : "";
+    this.opts.onStatus?.(`${shown}${this.rows.length.toLocaleString()}행${this.hasMore ? " · 더 있음 (스크롤하면 가져옴)" : ""}${sorted}${edit}${mask}${pick}`);
   }
 
   // ── 정렬·필터 ─────────────────────────────────────
@@ -236,6 +245,10 @@ export class ResultGrid {
   private rebuildView() {
     let v = this.rows.map((_, i) => i);
     if (this.filter) v = v.filter((i) => this.filter!(this.rows[i]));
+    if (this.rowMask) {
+      const m = this.rowMask;
+      v = v.filter((i) => m.ids.has(i) === m.keep);
+    }
     if (this.sortCol >= 0) {
       const c = this.sortCol;
       const num = NUMERIC.test(this.columns[c]?.type_name ?? "");
@@ -257,6 +270,7 @@ export class ResultGrid {
     this.filterText = text;
     this.filter = compileFilter(text, this.columns);
     this.sel = null;
+    this.picked.clear();
     this.rebuildView();
     this.viewport.scrollTop = 0;
     this.update();
@@ -273,6 +287,7 @@ export class ResultGrid {
       this.sortCol = -1;
     }
     this.sel = null;
+    this.picked.clear();
     this.rebuildView();
     this.renderHeader();
     this.update();
@@ -547,9 +562,86 @@ export class ResultGrid {
   // ── 선택과 복사 ─────────────────────────────────────
 
   private inSel(r: number, c: number) {
+    if (this.picked.has(r * 10000 + c)) return true;
     const s = this.sel;
     if (!s) return false;
     return r >= Math.min(s.r0, s.r1) && r <= Math.max(s.r0, s.r1) && c >= Math.min(s.c0, s.c1) && c <= Math.max(s.c0, s.c1);
+  }
+
+  /** 고른 셀 수 (사각형 + Ctrl 로 더한 셀 — 겹치면 두 번 셀 수 있다) */
+  selectionCount(): number {
+    const s = this.sel;
+    let n = this.picked.size;
+    if (s) {
+      let cols = 0;
+      for (let c = Math.min(s.c0, s.c1); c <= Math.max(s.c0, s.c1); c++) if (!this.hiddenCol(c)) cols++;
+      n += (Math.abs(s.r1 - s.r0) + 1) * cols;
+    }
+    return n;
+  }
+
+  /** 고른 셀 전부 (행 순서 → 열 순서) — 숨긴 열은 뺀다 */
+  private selCells(): { r: number; c: number }[] {
+    const keys = new Set<number>(this.picked);
+    const s = this.sel;
+    if (s) {
+      for (let r = Math.min(s.r0, s.r1); r <= Math.max(s.r0, s.r1); r++) {
+        for (let c = Math.min(s.c0, s.c1); c <= Math.max(s.c0, s.c1); c++) if (!this.hiddenCol(c)) keys.add(r * 10000 + c);
+      }
+    }
+    return [...keys].sort((a, b) => a - b).map((k) => ({ r: Math.floor(k / 10000), c: k % 10000 }));
+  }
+
+  /** 고른 셀이 걸친 화면 행 번호 (오름차순, 중복 없음) */
+  private selRowIdx(): number[] {
+    const set = new Set<number>();
+    const s = this.sel;
+    if (s) for (let r = Math.min(s.r0, s.r1); r <= Math.max(s.r0, s.r1); r++) set.add(r);
+    for (const k of this.picked) set.add(Math.floor(k / 10000));
+    return [...set].sort((a, b) => a - b);
+  }
+
+  /** 고른 셀의 값 — 한 열에서만 골랐으면 그 열과 값들(행 순서). `max` 개를 넘으면 값을 읽지 않고 알린다 */
+  selectedValues(max: number): { kind: "none" } | { kind: "many"; count: number } | { kind: "multi"; count: number } | { kind: "col"; col: number; column: Column; values: (string | null)[] } {
+    const n = this.selectionCount();
+    if (n === 0) return { kind: "none" };
+    if (n > max) return { kind: "many", count: n };
+    const cells = this.selCells();
+    const col = cells[0]?.c;
+    if (col == null) return { kind: "none" };
+    if (cells.some((x) => x.c !== col)) return { kind: "multi", count: cells.length };
+    return { kind: "col", col, column: this.columns[col], values: cells.map((x) => this.value(this.view[x.r], col)) };
+  }
+
+  /** 고른 행만 보기(keep=true) / 고른 행을 뺀 나머지 보기 — 화면에서만 거른다 (서버 쿼리는 그대로) */
+  maskSelectedRows(keep: boolean) {
+    const idx = this.selRowIdx();
+    if (!idx.length) return;
+    const ids = new Set(idx.map((r) => this.view[r]));
+    const cur = this.rowMask;
+    if (keep) this.rowMask = { keep: true, ids };
+    else if (cur?.keep) this.rowMask = { keep: true, ids: new Set([...cur.ids].filter((i) => !ids.has(i))) };
+    else this.rowMask = { keep: false, ids: new Set([...(cur?.ids ?? []), ...ids]) };
+    this.sel = null;
+    this.picked.clear();
+    this.rebuildView();
+    this.viewport.scrollTop = 0;
+    this.update();
+    this.status();
+  }
+
+  hasRowMask(): boolean {
+    return this.rowMask != null;
+  }
+
+  clearRowMask() {
+    if (!this.rowMask) return;
+    this.rowMask = null;
+    this.sel = null;
+    this.picked.clear();
+    this.rebuildView();
+    this.update();
+    this.status();
   }
 
   private cellAt(e: MouseEvent): { r: number; c: number } | null {
@@ -567,6 +659,20 @@ export class ResultGrid {
       return;
     }
     this.el.focus();
+    // 이미 고른 셀 위의 오른쪽 클릭은 선택을 그대로 둔다 (고른 값으로 메뉴를 열려고)
+    if (e.button === 2 && this.inSel(at.r, at.c)) return;
+    if ((e.ctrlKey || e.metaKey) && e.button === 0) {
+      // Ctrl+클릭: 셀을 하나씩 더하거나 뺀다 (떨어진 셀·행도). 지금 사각형은 그 셀들로 바꿔 둔다
+      for (const x of this.selCells()) this.picked.add(x.r * 10000 + x.c);
+      this.sel = null;
+      const k = at.r * 10000 + at.c;
+      if (this.picked.has(k)) this.picked.delete(k);
+      else this.picked.add(k);
+      this.update();
+      this.status();
+      return;
+    }
+    this.picked.clear();
     if (e.shiftKey && this.sel) {
       this.sel.r1 = at.r;
       this.sel.c1 = at.c;
@@ -574,6 +680,7 @@ export class ResultGrid {
       this.sel = { r0: at.r, c0: at.c, r1: at.r, c1: at.c };
     }
     this.update();
+    this.status();
     if (e.button === 0 && !e.shiftKey) this.opts.onCellClick?.(this.rows[this.view[at.r]], at.c, e);
     const move = (ev: MouseEvent) => {
       const p = this.cellAt(ev);
@@ -581,6 +688,7 @@ export class ResultGrid {
         this.sel.r1 = p.r;
         this.sel.c1 = p.c;
         this.update();
+        this.status();
       }
     };
     const up = () => {
@@ -620,8 +728,10 @@ export class ResultGrid {
       navigator.clipboard.writeText(this.selectionText(e.shiftKey)).catch(() => {});
     } else if ((e.ctrlKey || e.metaKey) && e.code === "KeyA") {
       e.preventDefault();
+      this.picked.clear();
       if (this.view.length) this.sel = { r0: 0, c0: 0, r1: this.view.length - 1, c1: this.columns.length - 1 };
       this.update();
+      this.status();
     } else if (this.edit && (e.key === "Delete" || (e.ctrlKey && e.key === "Delete"))) {
       e.preventDefault();
       this.toggleDeleteSelected();
@@ -634,6 +744,7 @@ export class ResultGrid {
 
   /** 선택 영역을 TSV 로 (엑셀에 바로 붙는다). Ctrl+Shift+C 는 헤더 포함. */
   selectionText(withHeader = false): string {
+    if (this.picked.size) return this.pickedText(withHeader);
     const s = this.sel;
     if (!s) return "";
     const [r0, r1] = [Math.min(s.r0, s.r1), Math.max(s.r0, s.r1)];
@@ -647,6 +758,19 @@ export class ResultGrid {
     for (let c = c0; c <= c1; c++) if (!this.hiddenCol(c)) cols.push(c);
     if (withHeader) lines.push(cols.map((c) => this.columns[c].name).join("\t"));
     for (let r = r0; r <= r1; r++) lines.push(cols.map((c) => esc(this.value(this.view[r], c))).join("\t"));
+    return lines.join("\n");
+  }
+
+  /** Ctrl+클릭으로 고른 셀(+사각형)을 TSV 로 — 걸친 행·열의 상자에서 고르지 않은 칸은 비워 둔다 */
+  private pickedText(withHeader: boolean): string {
+    const cells = this.selCells();
+    const have = new Set(cells.map((x) => x.r * 10000 + x.c));
+    const rows = [...new Set(cells.map((x) => x.r))].sort((a, b) => a - b);
+    const cols = [...new Set(cells.map((x) => x.c))].sort((a, b) => a - b);
+    const esc = (v: string | null) => (v == null ? "" : /[\t\n"]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+    const lines: string[] = [];
+    if (withHeader) lines.push(cols.map((c) => this.columns[c].name).join("\t"));
+    for (const r of rows) lines.push(cols.map((c) => (have.has(r * 10000 + c) ? esc(this.value(this.view[r], c)) : "")).join("\t"));
     return lines.join("\n");
   }
 

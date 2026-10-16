@@ -17,6 +17,8 @@ export interface ReportBasis {
   center: string | null; dir: string; depth: number; unit: "proc" | "pkg"; calls: boolean; flows: boolean; hidden: string[];
   /** XML 쿼리를 파일·id 로 / 파일 하나로 (없으면 파일·id — 이 값이 생기기 전 보고서) */
   xml?: XmlMode;
+  /** 그린 배치 (없으면 요소별 칸 — 이 값이 생기기 전 보고서). 칸 배경은 요소별 칸에서만 */
+  layout?: "right" | "down" | "radial" | "lanes";
 }
 export interface ReportNode {
   id: string; ref: string; type: "proc" | "trig" | "table" | "xml" | "note"; label: string; x: number; y: number; w: number; h: number; lane: number;
@@ -289,6 +291,7 @@ export class DfdReport {
   }
 
   private fitLanesNow() {
+    if (!this.laned()) return toast("칸은 '요소별 칸' 배치로 만든 보고서에만 있습니다", "info");
     this.lanes = fitLanes(this.spans());
     this.relane();
     this.commit();
@@ -346,10 +349,16 @@ export class DfdReport {
   }
 
   /** 칸 배경과 경계 손잡이를 다시 그린다. 경계가 없거나 칸 수가 바뀌었으면 노드에 맞춘다 */
+  /** 요소별 칸으로 만든 보고서인지 (흐름·중심형은 칸이 없다) */
+  private laned() {
+    return (this.r?.basis.layout ?? "lanes") === "lanes";
+  }
+
   private relane() {
     const cy = this.cy!;
     cy.batch(() => {
       cy.nodes("[type='lane'], [type='divider']").remove();
+      if (!this.laned()) return;
       const ns = cy.nodes().filter((n) => isBox(n as NodeSingular));
       if (!ns.length) return;
       const spans = this.spans();
@@ -482,12 +491,16 @@ export class DfdReport {
     const cy = this.cy!;
     const ns = cy.nodes().filter((n) => isBox(n as NodeSingular));
     const es = cy.edges().filter((e) => e.data("kind") !== "attach" && ns.contains(e.source()) && ns.contains(e.target()));
+    // 요소별 칸이면 칸을 지켜서, 아니면 흐름 순서로 (중심형은 가로 흐름으로 다시 놓는다)
+    const laned = this.laned();
     const graph = {
       id: "root",
-      layoutOptions: { "elk.algorithm": "layered", "elk.direction": "RIGHT", "elk.partitioning.activate": "true", "elk.separateConnectedComponents": "false",
-        "elk.spacing.nodeNode": "26", "elk.layered.spacing.nodeNodeBetweenLayers": "80", "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
-        "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF", "elk.layered.nodePlacement.favorStraightEdges": "true" },
-      children: ns.map((n) => ({ id: n.id(), width: n.width(), height: n.height(), layoutOptions: { "elk.partitioning.partition": String(LANE_POS[n.data("lane") ?? 1] ?? 2) } })),
+      layoutOptions: { "elk.algorithm": "layered", "elk.direction": this.r?.basis.layout === "down" ? "DOWN" : "RIGHT",
+        "elk.partitioning.activate": String(laned), "elk.separateConnectedComponents": "false",
+        "elk.spacing.nodeNode": "26", "elk.layered.spacing.nodeNodeBetweenLayers": laned ? "80" : "70", "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
+        "elk.layered.nodePlacement.strategy": laned ? "BRANDES_KOEPF" : "NETWORK_SIMPLEX", "elk.layered.nodePlacement.favorStraightEdges": "true" },
+      children: ns.map((n) => ({ id: n.id(), width: n.width(), height: n.height(),
+        layoutOptions: (laned ? { "elk.partitioning.partition": String(LANE_POS[n.data("lane") ?? 1] ?? 2) } : {}) as Record<string, string> })),
       edges: es.map((x) => { const e = x as EdgeSingular; return { id: e.id(), sources: [e.source().id()], targets: [e.target().id()] }; }),
     };
     try {
@@ -717,7 +730,7 @@ export class DfdReport {
       h("label", { class: "rp-lbl" }, "제목"), title,
       h("label", { class: "rp-lbl" }, "설명"), desc,
       h("div", { class: "hint", style: "margin-top:6px" },
-        `기준: ${b.center ?? "전체"} · ${{ up: "출력 기준", down: "입력 기준", both: "주변 전체" }[b.dir] ?? b.dir} · ${b.depth || "끝까지"}단계 · ${b.unit === "pkg" ? "패키지" : "프로시저"} 단위`));
+        `기준: ${b.center ?? "전체"} · ${{ up: "출력 기준", down: "입력 기준", both: "주변 전체" }[b.dir] ?? b.dir} · ${b.depth || "끝까지"}단계 · ${b.unit === "pkg" ? "패키지" : "프로시저"} 단위 · ${{ right: "가로 흐름", down: "세로 흐름", radial: "중심형", lanes: "요소별 칸" }[b.layout ?? "lanes"]}`));
     const d = this.diff;
     if (d && (d.added.length || d.gone.length)) {
       box.append(h("div", { class: "rp-diff" },
@@ -746,7 +759,7 @@ export class DfdReport {
     const base = buildBase(src, r.basis.unit === "pkg", r.basis.xml ?? "id");
     if (r.basis.center && !base.nodes.has(r.basis.center)) return null;
     const view = buildView(base, { center: r.basis.center, depth: r.basis.depth, showCalls: r.basis.calls, showFlows: r.basis.flows,
-      hidden: new Set(r.basis.hidden), direction: r.basis.center ? (r.basis.dir as "up" | "down" | "both") : "both" });
+      hidden: new Set(r.basis.hidden), direction: r.basis.center ? (r.basis.dir as "up" | "down" | "both") : "both", copies: (r.basis.layout ?? "lanes") === "lanes" });
     const mine = new Set(r.edges.filter((e) => e.kind !== "manual").map((e) => edgeKey(e.source, e.target, e.kind)));
     const now = new Set(view.edges.map((e) => edgeKey(e.source, e.target, e.kind)));
     const nodeIds = new Set(r.nodes.map((n) => n.id));

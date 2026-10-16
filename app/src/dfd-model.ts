@@ -43,6 +43,8 @@ export interface ViewOptions {
    * up/down 의 depth 는 "테이블 단계" (처리 하나 + 테이블 하나 = 1단계)
    */
   direction?: "both" | "up" | "down";
+  /** 읽히고 쓰이기도 하는 테이블의 입력 칸 사본 (요소별 칸에서만 — 흐름 배치는 테이블을 한 번만) */
+  copies?: boolean;
 }
 /** parent: 담는 파일 상자의 id (XML 쿼리 id) */
 export interface ViewNode { id: string; ref: string; type: NodeType; label: string; lane: number; copy: boolean; center: boolean; more: boolean; parent?: string }
@@ -219,9 +221,10 @@ export function buildView(b: Base, o: ViewOptions): View {
   const copies = new Set<string>();
   const out: ViewEdge[] = [];
   const merged = new Map<string, ViewEdge>();
+  const useCopies = o.copies ?? true;
   for (const e of edges) {
     let s = e.s;
-    if (written.has(s)) { s = `${s}@in`; copies.add(e.s); }
+    if (useCopies && written.has(s)) { s = `${s}@in`; copies.add(e.s); }
     const k = `${s}|${e.t}|${e.kind}`;
     const m = merged.get(k);
     if (m) {
@@ -252,6 +255,17 @@ export function buildView(b: Base, o: ViewOptions): View {
     if (copies.has(id)) mk(`${id}@in`, id, true);
   }
   return { nodes, edges: out };
+}
+
+/** 파일 상자를 풀어 쿼리 id 를 '파일 / id' 두 줄 상자로 (상자를 쓰지 않는 배치·보고서) */
+export function flattenBoxes(v: View): View {
+  const label = new Map(v.nodes.filter((n) => n.type === "xmlfile").map((n) => [n.id, n.label]));
+  if (!label.size) return v;
+  return {
+    edges: v.edges,
+    nodes: v.nodes.filter((n) => n.type !== "xmlfile").map((n) => (n.parent ? { ...n, label: `${label.get(n.parent)}
+${n.label}`, parent: undefined } : n)),
+  };
 }
 
 /** 노드 하나에 붙은 바탕 선 (상세 패널용) */

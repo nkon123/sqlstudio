@@ -7,7 +7,8 @@ import type { Core, EdgeSingular, NodeSingular } from "cytoscape";
 import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { errOf } from "./api";
-import { type Base, type DfdSource, type EdgeKind, LANES, LANE_POS, type LaneSpan, type XmlMode, buildBase, buildView, busiest, edgesOf, fileBoxId, fitLanes, hasXml, packageOf } from "./dfd-model";
+import { type Base, type DfdSource, type EdgeKind, type XmlMode, buildBase, buildView, busiest, edgesOf, fileBoxId, flattenBoxes, hasXml, packageOf } from "./dfd-model";
+import { BOX_TOP, LAYOUTS, VERT_LABEL, type LayoutKind, type Placed, place } from "./dfd-layout";
 import { field, h, modal, toast } from "./ui";
 import { showMenu } from "./ctxmenu";
 import type { DfdReport, Report } from "./dfd-report";
@@ -37,11 +38,15 @@ export class DfdView {
     h("option", { value: "down" }, "입력 기준 → 어디로 가나"),
     h("option", { value: "both" }, "주변 전체"));
   private depthSel = h("select", { title: "가운데에서 몇 단계까지 (출력·입력 기준이면 테이블 단계)" },
-    ...[1, 2, 3, 4].map((d) => h("option", { value: String(d), selected: d === 2 }, `${d}단계`)), h("option", { value: "0" }, "끝까지"));
+    ...[1, 2, 3, 4].map((d) => h("option", { value: String(d), selected: d === 1 }, `${d}단계`)), h("option", { value: "0" }, "끝까지"));
   private unitSel = h("select", { title: "처리 상자 하나가 프로시저 하나인지, 패키지 하나인지" },
     h("option", { value: "proc" }, "처리: 프로시저"), h("option", { value: "pkg" }, "처리: 패키지"));
   private xmlSel = h("select", { title: "XML 쿼리 파일(화면)을 파일 상자 안에 쿼리 id 들로 볼지, 파일 하나를 상자 하나로 볼지", hidden: true },
     h("option", { value: "id" }, "XML: 파일·id"), h("option", { value: "file" }, "XML: 파일"));
+  private layoutSel = h("select", { title: "배치 — 흐름 순서(가로·세로·자동), 가운데 중심, 요소별 칸" },
+    ...LAYOUTS.map(([v, label, title]) => h("option", { value: v, title }, label)));
+  /** 마지막으로 그린 배치 (auto 면 고른 쪽) — 보고서에 남긴다 */
+  private placedAs: Exclude<LayoutKind, "auto"> = "right";
   private callBox = h("input", { type: "checkbox" });
   private flowBox = h("input", { type: "checkbox" });
   private hiddenBtn = h("button", { class: "small", hidden: true, title: "숨긴 노드를 모두 다시 보인다" });
@@ -64,7 +69,7 @@ export class DfdView {
     const tb = h("div", { class: "dfd-toolbar" },
       this.centerIn, this.names, this.dirSel, this.depthSel,
       h("button", { class: "small", title: "가운데 없이 전체", onclick: () => this.setCenter(null) }, "전체"),
-      h("span", { class: "sep" }), this.unitSel, this.xmlSel,
+      h("span", { class: "sep" }), this.layoutSel, this.unitSel, this.xmlSel,
       h("label", { class: "check", title: "처리 → 처리 호출선" }, this.callBox, "처리간 호출"),
       h("label", { class: "check", title: "커서로 읽어 다른 테이블에 넣는 흐름. 읽기·쓰기 선과 겹치는 내용이라 기본으로 숨긴다" }, this.flowBox, "테이블 흐름"),
       this.hiddenBtn,
@@ -81,6 +86,15 @@ export class DfdView {
       this.setCenter(id);
     });
     this.depthSel.onchange = () => this.draw();
+    try {
+      const saved = localStorage.getItem("dfd.layout");
+      if (saved && LAYOUTS.some(([v]) => v === saved)) this.layoutSel.value = saved;
+    } catch { /* 기억 못 해도 된다 */ }
+    this.layoutSel.onchange = () => {
+      try { localStorage.setItem("dfd.layout", this.layoutSel.value); } catch { /* 무시 */ }
+      this.sideHint();
+      this.draw();
+    };
     this.dirSel.onchange = () => this.draw();
     this.unitSel.onchange = () => this.rebase();
     this.xmlSel.onchange = () => this.rebase();
@@ -91,6 +105,10 @@ export class DfdView {
     this.main = [tb, body];
     this.el = h("div", { class: "dfd" }, tb, body);
     this.sideHint();
+  }
+
+  private layoutKind(): LayoutKind {
+    return (this.layoutSel.value as LayoutKind) || "auto";
   }
 
   private xmlMode(): XmlMode {
@@ -138,7 +156,7 @@ export class DfdView {
       [{ label: "취소", value: false }, { label: "만들기", value: true, kind: "primary" }]);
     if (!ok || !this.cy) return;
     const { snapshot } = await import("./dfd-report");
-    const basis = { center: this.center, dir: this.dirSel.value, depth: Number(this.depthSel.value), unit: this.unitSel.value as "proc" | "pkg", xml: this.xmlMode(),
+    const basis = { center: this.center, dir: this.dirSel.value, depth: Number(this.depthSel.value), unit: this.unitSel.value as "proc" | "pkg", xml: this.xmlMode(), layout: this.placedAs,
       calls: this.callBox.checked, flows: this.flowBox.checked, hidden: [...this.hidden] };
     await this.showReport(snapshot(this.cy, basis, profile, nameIn.value.trim() || "보고서"));
   }
@@ -213,7 +231,7 @@ export class DfdView {
     if (!L || run !== this.runId) return;
     const view = buildView(b, {
       center: this.center, depth: Number(this.depthSel.value), showCalls: this.callBox.checked, showFlows: this.flowBox.checked, hidden: this.hidden,
-      direction: this.center ? (this.dirSel.value as "up" | "down" | "both") : "both",
+      direction: this.center ? (this.dirSel.value as "up" | "down" | "both") : "both", copies: this.layoutKind() === "lanes",
     });
     this.hiddenBtn.hidden = !this.hidden.size;
     this.hiddenBtn.textContent = `숨김 ${this.hidden.size} 해제`;
@@ -228,84 +246,43 @@ export class DfdView {
     if (view.nodes.length > 400) toast(`노드 ${view.nodes.length}개 — 배치가 오래 걸릴 수 있습니다. 가운데를 고르면 빨라집니다.`, "info");
 
     const cy = this.ensureCy(L);
-    const sizes = new Map<string, [number, number]>();
-    for (const n of view.nodes) {
-      if (n.type === "xmlfile") continue;
-      let [w, hh] = boxSize(n.label, n.type, n.center);
-      // 선이 많이 붙으면 키워서 붙는 점을 벌린다
-      const inc = view.edges.filter((e) => e.target === n.id).length, out = view.edges.filter((e) => e.source === n.id).length;
-      if (n.type !== "trig") hh = Math.max(hh, Math.max(inc, out) * 14 + 12);
-      sizes.set(n.id, [w, hh]);
-    }
-    // XML 파일 상자: 안에 쿼리 id 들 (ELK 가 상자와 함께 배치한다)
-    const boxes = view.nodes.filter((n) => n.type === "xmlfile");
-    const leaf = (n: (typeof view.nodes)[number]) => ({ id: n.id, width: sizes.get(n.id)![0], height: sizes.get(n.id)![1],
-      layoutOptions: { "elk.partitioning.partition": String(LANE_POS[n.lane]) } });
-    const graph = {
-      id: "root",
-      layoutOptions: {
-        ...(boxes.length ? { "elk.hierarchyHandling": "INCLUDE_CHILDREN" } : {}),
-        "elk.algorithm": "layered", "elk.direction": "RIGHT", "elk.edgeRouting": "ORTHOGONAL",
-        "elk.partitioning.activate": "true", "elk.separateConnectedComponents": "false",
-        "elk.spacing.nodeNode": "26", "elk.layered.spacing.nodeNodeBetweenLayers": "80",
-        "elk.spacing.edgeNode": "16", "elk.spacing.edgeEdge": "12", "elk.layered.spacing.edgeEdgeBetweenLayers": "12",
-        "elk.layered.spacing.edgeNodeBetweenLayers": "16",
-        "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP", "elk.layered.thoroughness": view.nodes.length > 150 ? "7" : "30",
-        "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF", "elk.layered.nodePlacement.bk.fixedAlignment": "BALANCED",
-        "elk.layered.nodePlacement.favorStraightEdges": "true",
-        "elk.layered.mergeEdges": "false", "elk.layered.unnecessaryBendpoints": "false",
-      },
-      children: [
-        ...view.nodes.filter((n) => !n.parent && n.type !== "xmlfile").map(leaf),
-        ...boxes.map((b) => ({ id: b.id, layoutOptions: { "elk.partitioning.partition": String(LANE_POS[b.lane]), "elk.padding": `[top=${BOX_TOP},left=10,bottom=10,right=10]`,
-          "elk.spacing.nodeNode": "10" },
-          children: view.nodes.filter((n) => n.parent === b.id).map((n) => ({ id: n.id, width: sizes.get(n.id)![0], height: sizes.get(n.id)![1] })) })),
-      ],
-      edges: view.edges.map((e) => ({ id: e.id, sources: [e.source], targets: [e.target] })),
-    };
+    const kind = this.layoutKind();
+    // 중심형은 파일 상자를 쓰지 않는다 (가지가 상자를 가로지른다)
+    const shown = kind === "radial" ? flattenBoxes(view) : view;
     this.info.textContent += " · 배치 중…";
-    let laid;
+    let placed: Placed;
     try {
-      laid = await this.elk!.layout(graph);
+      const r = this.canvas.getBoundingClientRect();
+      placed = await place(this.elk! as never, shown, (n) => boxSize(n.label, n.type, n.center), kind, this.center, r.width || 1200, r.height || 700);
     } catch (e) {
       this.info.textContent = "배치 실패";
       return toast(`배치 실패: ${errOf(e).message}`, "error");
     }
     if (run !== this.runId) return;
     this.info.textContent = this.info.textContent.replace(" · 배치 중…", "");
-
-    // 상자 안의 것은 상자 기준 좌표 → 전체 좌표로
-    const pos = new Map<string, { x: number; y: number; w: number; h: number }>();
-    for (const c of laid.children ?? []) {
-      pos.set(c.id, { x: c.x ?? 0, y: c.y ?? 0, w: c.width ?? 0, h: c.height ?? 0 });
-      for (const k of c.children ?? []) pos.set(k.id, { x: (c.x ?? 0) + (k.x ?? 0), y: (c.y ?? 0) + (k.y ?? 0), w: k.width ?? 0, h: k.height ?? 0 });
-    }
+    if (kind === "auto") this.info.textContent += placed.used === "down" ? " · 세로" : " · 가로";
+    if (kind === "radial" && !this.center) this.info.textContent += " · 가운데를 고르면 중심형이 보기 좋습니다";
+    this.placedAs = placed.used;
+    const { pos, routes } = placed;
+    const boxes = shown.nodes.filter((n) => n.type === "xmlfile");
     cy.batch(() => {
       cy.elements().remove();
-      // 칸 배경 — 칸마다 노드가 차지한 가로 범위, 세로는 전체
-      const ys = [...pos.values()];
-      const y1 = Math.min(...ys.map((p) => p.y)) - 46, y2 = Math.max(...ys.map((p) => p.y + p.h)) + 16;
-      const spans: LaneSpan[] = [];
-      for (let i = 0; i < LANES.length; i++) {
-        const ps = view.nodes.filter((n) => n.lane === i).map((n) => pos.get(n.id)!);
-        if (ps.length) spans.push({ i, x1: Math.min(...ps.map((p) => p.x)), x2: Math.max(...ps.map((p) => p.x + p.w)) });
-      }
-      // 칸끼리 빈틈·겹침 없이 맞붙게
-      const lanes = fitLanes(spans);
-      cy.add(lanes.map((l) => ({ group: "nodes" as const, data: { id: `lane:${l.i}`, type: "lane", label: LANES[l.i], alt: l.i === 1, w: l.x2 - l.x1, h: y2 - y1 },
-        position: { x: (l.x1 + l.x2) / 2, y: (y1 + y2) / 2 }, selectable: false, grabbable: false })));
+      // 배경: 칸·단계 띠 또는 고리
+      cy.add(placed.bands.map((b) => ({ group: "nodes" as const,
+        data: { id: b.id, type: "lane", label: b.label, alt: b.alt, vert: b.vert, ring: b.ring, tag: b.tag, w: b.w, h: b.h },
+        position: { x: b.x + b.w / 2, y: b.y + b.h / 2 }, selectable: false, grabbable: false })));
       // 상자 먼저 (Cytoscape 는 부모가 있어야 자식을 붙인다). 상자 크기는 자식에 맞춰 Cytoscape 가 정한다 — 여백은 ELK 와 같게
-      cy.add([...boxes, ...view.nodes.filter((n) => n.type !== "xmlfile")].map((n) => {
+      cy.add([...boxes, ...shown.nodes.filter((n) => n.type !== "xmlfile")].map((n) => {
         const p = pos.get(n.id)!;
-        return { group: "nodes" as const, data: { ...n, w: p.w, h: p.h }, position: { x: p.x + p.w / 2, y: p.y + p.h / 2 }, grabbable: false };
+        return { group: "nodes" as const, data: { ...n, w: p.w, h: p.h, ...(n.type === "xmlfile" && placed.used === "down" ? { below: true } : {}) },
+          position: { x: p.x + p.w / 2, y: p.y + p.h / 2 }, grabbable: false };
       }));
-      cy.add(view.edges.map((e) => ({ group: "edges" as const, data: { ...e, tag: e.kind === "read" || e.kind === "call" ? "" : e.label } })));
-      // ELK 가 낸 꺾이는 점 → Cytoscape segments (시작→끝 직선 기준 비율과 수직 거리)
-      for (const le of laid.edges ?? []) {
-        const sec = le.sections?.[0];
-        const ce = cy.getElementById(le.id);
-        if (!sec || !ce.length) continue;
-        const S = sec.startPoint, T = sec.endPoint, B = sec.bendPoints ?? [];
+      cy.add(shown.edges.map((e) => ({ group: "edges" as const, data: { ...e, tag: e.kind === "read" || e.kind === "call" ? "" : e.label } })));
+      // ELK 가 낸 꺾이는 점 → Cytoscape segments (시작→끝 직선 기준 비율과 수직 거리). 경로가 없으면(중심형) 곧은 선
+      for (const ce of cy.edges().toArray() as EdgeSingular[]) {
+        const rt = routes.get(ce.id());
+        if (!rt) { ce.addClass("straight"); continue; }
+        const { S, T, B } = rt;
         const sc = ce.source().position(), tc = ce.target().position();
         const st: Record<string, string> = { "source-endpoint": `${S.x - sc.x}px ${S.y - sc.y}px`, "target-endpoint": `${T.x - tc.x}px ${T.y - tc.y}px` };
         if (!B.length) { ce.addClass("straight"); ce.style(st); continue; }
@@ -356,7 +333,13 @@ export class DfdView {
 
   private sideHint() {
     this.side.replaceChildren(h("h4", {}, "보는 법"),
-      h("div", { class: "hint" }, "왼쪽 입력 테이블 → 가운데 처리 → 오른쪽 출력 테이블. 읽히고 쓰이기도 하는 테이블은 입력 칸에 점선 사본으로 한 번 더 나옵니다."),
+      h("div", { class: "hint" }, {
+        lanes: "요소별 칸: 왼쪽 입력 테이블 → 처리 → 오른쪽 출력 테이블. 읽히고 쓰이기도 하는 테이블은 입력 칸에 점선 사본으로 한 번 더 나옵니다.",
+        right: "가로 흐름: 데이터가 흐르는 순서대로 왼쪽 → 오른쪽. 테이블은 한 번만 나오고, 띠 위에 그 단계에 있는 것(테이블·처리·화면)을 적습니다.",
+        down: "세로 흐름: 데이터가 흐르는 순서대로 위 → 아래. 띠 왼쪽에 그 단계에 있는 것을 적습니다.",
+        auto: "자동: 가로·세로 흐름을 둘 다 놓아 보고 화면에 더 크게 보이는 쪽으로 그립니다 (오른쪽 위에 고른 쪽).",
+        radial: "중심형: 가운데를 한가운데에, 단계마다 점선 고리. 가운데로 들어오는 쪽(어디서 오나)은 왼쪽, 나가는 쪽은 오른쪽. 가운데를 고르고 1~2단계로 볼 때 좋습니다.",
+      }[this.layoutKind()]),
       this.xmlSel.hidden ? "" : h("div", { class: "hint" }, h("span", { class: "dfd-sw", style: `background:${XML_COLOR}` }),
         " 화면 (XML): XML 쿼리 파일의 SQL — 처리(PL/SQL·Pro*C)와 칸을 나눴습니다. 'XML: 파일·id' 면 파일 상자 안에 쿼리 id 들, 'XML: 파일' 이면 파일 하나가 상자 하나. 파일 상자 더블클릭: 그 파일을 가운데로."),
       h("div", { class: "dfd-legend" },
@@ -446,6 +429,8 @@ export function dfdStyle(): unknown[] {
       "background-color": XML_COLOR, "background-opacity": 0.06, label: "data(label)", "text-valign": "top", "text-halign": "center",
       "text-margin-y": BOX_TOP - 4, "font-weight": "bold", "font-size": 11, color: XML_COLOR, padding: "10px",
       "padding-top": `${BOX_TOP}px` as never, "z-index": 6 } },
+    { selector: "node[type='xmlfile'][?below]", style: { "text-valign": "bottom", "text-margin-y": -(BOX_TOP - 4), "padding-top": "10px" as never,
+      "padding-bottom": `${BOX_TOP}px` as never } },
     { selector: "node[type='trig']", style: { shape: "diamond", "border-color": COLORS.trig, "background-color": "#fdeaec" } },
     { selector: "node[?copy]", style: { "border-style": "dashed", "border-width": 2 } },
     { selector: "node[?center]", style: { "border-width": 4, "font-weight": "bold", "font-size": 13 } },
@@ -454,6 +439,15 @@ export function dfdStyle(): unknown[] {
       "border-width": 0, label: "data(label)", "text-valign": "top", "text-margin-y": 26, "font-size": 13, "font-weight": "bold", color: v("--dim") } },
     // 맞붙은 칸을 가려 보이게 — 가운데(처리) 칸을 조금 진하게
     { selector: "node[type='lane'][?alt]", style: { "background-opacity": 0.09 } },
+    // 세로 흐름의 단계 띠: 이름은 왼쪽에
+    { selector: "node[type='lane'][?vert]", style: { "text-valign": "center", "text-halign": "left", "text-margin-x": VERT_LABEL - 14, "text-margin-y": 0,
+      "text-wrap": "wrap", "text-max-width": `${VERT_LABEL - 24}px`, "text-justification": "right", "font-size": 12 } },
+    // 고리 이름 (고리 위 빈 자리의 점)
+    { selector: "node[type='lane'][?tag]", style: { "background-opacity": 0, "border-width": 0, "text-valign": "center", "text-halign": "center",
+      "text-margin-y": 0, "font-size": 11, "font-weight": "normal", "text-background-color": v("--bg"), "text-background-opacity": 1, "text-background-padding": "2px" } },
+    // 중심형의 고리
+    { selector: "node[type='lane'][?ring]", style: { shape: "ellipse", "background-opacity": 0, "border-width": 1, "border-style": "dashed",
+      "border-color": v("--dim"), "border-opacity": 0.5, "text-valign": "top", "text-margin-y": 16, "font-size": 11, "font-weight": "normal" } },
     { selector: "node:selected", style: { "overlay-color": v("--accent"), "overlay-opacity": 0.18 } },
     { selector: "edge", style: { width: 2, "curve-style": "segments", "edge-distances": "endpoints" as never, // @types 에 아직 없는 값 (3.30 은 지원) "segment-radius": 6,
       "target-arrow-shape": "triangle", "arrow-scale": 0.9, "z-index-compare": "manual", "z-index": 5,
@@ -468,9 +462,6 @@ export function dfdStyle(): unknown[] {
     { selector: ".dim", style: { opacity: 0.12 } },
   ];
 }
-
-/** 파일 상자 위쪽 여백 (파일 이름 자리) */
-const BOX_TOP = 24;
 
 const measure = document.createElement("canvas").getContext("2d")!;
 export function boxSize(label: string, type: string, center: boolean): [number, number] {

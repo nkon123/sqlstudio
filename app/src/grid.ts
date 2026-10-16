@@ -106,6 +106,9 @@ export class ResultGrid {
   private picked = new Set<number>();
   /** 고른 행만 보기(keep) / 고른 행 빼고 보기 — 화면에서만 거른다. 값은 rows 인덱스 */
   private rowMask: { keep: boolean; ids: Set<number> } | null = null;
+  /** 머리 끝의 빈칸 — 본문의 세로 스크롤바 폭만큼. 없으면 오른쪽 끝에서 머리가 그만큼 덜 스크롤되어 열과 어긋난다 */
+  private filler = div("grid-filler");
+  private fillerW = -1;
 
   constructor(private opts: GridOptions = {}) {
     this.el = document.createElement("div");
@@ -476,6 +479,7 @@ export class ResultGrid {
       cell.append(grip);
       row.append(cell);
     });
+    row.append(this.filler);
     this.header.replaceChildren(row);
   }
 
@@ -502,7 +506,12 @@ export class ResultGrid {
   }
 
   private update() {
-    // 헤더는 가로 스크롤만 따라간다
+    // 헤더는 가로 스크롤만 따라간다 — 본문의 세로 스크롤바 폭만큼 머리 끝을 늘려 끝까지 같이 가게
+    const sbw = this.viewport.offsetWidth - this.viewport.clientWidth;
+    if (sbw !== this.fillerW) {
+      this.fillerW = sbw;
+      this.filler.style.width = `${sbw}px`;
+    }
     this.header.scrollLeft = this.viewport.scrollLeft;
     const n = this.view.length;
     this.spacer.style.height = `${n * ROW_H}px`;

@@ -376,55 +376,85 @@ fn korean_finds_by_comment() {
     assert_eq!(notes.get("CUST_ID").map(String::as_str), Some("고객 ID"));
 }
 
-fn origin(sql: &str, pos: Option<usize>, name: &str) -> Origin {
-    column_origin(sql, pos, name, &cache()).origin
+fn lin(sql: &str, pos: Option<usize>, name: &str) -> Lineage {
+    column_lineage(sql, pos, name, &cache()).0
 }
 
-fn col_of(owner: &str, table: &str, column: &str) -> Origin {
-    Origin::Column { owner: Some(owner.into()), table: table.into(), column: column.into() }
-}
-
-#[test]
-fn origin_plain_and_alias() {
-    assert_eq!(origin("select ename, sal from emp", Some(1), "SAL"), col_of("SCOTT", "EMP", "SAL"));
-    assert_eq!(origin("select e.ename nm, d.dname as dept from emp e join dept d on d.deptno = e.deptno", Some(1), "DEPT"), col_of("SCOTT", "DEPT", "DNAME"));
-    // 별칭 없이 이름만 — 그 열이 있는 테이블
-    assert_eq!(origin("select ename, loc from emp e, dept d where d.deptno = e.deptno", Some(1), "LOC"), col_of("SCOTT", "DEPT", "LOC"));
-    // 스키마.테이블.열
-    assert_eq!(origin("select scott.emp.job from scott.emp", Some(0), "JOB"), col_of("SCOTT", "EMP", "JOB"));
-    // 함수 뒤 별칭, 위치 없이 이름으로
-    assert!(matches!(origin("select nvl(comm, 0) c, empno from emp", None, "C"), Origin::Computed { .. }));
-    assert_eq!(origin("select nvl(comm, 0) c, empno from emp", None, "EMPNO"), col_of("SCOTT", "EMP", "EMPNO"));
+/// 닿은 테이블 열들 "TABLE.COLUMN"
+fn srcs(l: &Lineage) -> Vec<String> {
+    l.sources().iter().map(|s| format!("{}.{}", s.table, s.column)).collect()
 }
 
 #[test]
-fn origin_star_and_computed() {
-    // * 는 캐시의 열 순서로 편다
-    assert_eq!(origin("select * from dept", Some(2), "LOC"), col_of("SCOTT", "DEPT", "LOC"));
-    assert_eq!(origin("select d.*, e.ename from dept d, emp e", Some(3), "ENAME"), col_of("SCOTT", "EMP", "ENAME"));
-    assert_eq!(origin("select e.*, d.* from emp e, dept d", Some(9), "DNAME"), col_of("SCOTT", "DEPT", "DNAME"));
-    assert!(matches!(origin("select sal * 12 from emp", Some(0), "SAL*12"), Origin::Computed { .. }));
-    assert!(matches!(origin("select case when sal > 1 then 'Y' end from emp", Some(0), "X"), Origin::Computed { .. }));
-    assert!(matches!(origin("select sysdate, rownum from emp", Some(0), "SYSDATE"), Origin::Computed { .. }));
-    assert!(matches!(origin("select count(*) n from emp", Some(0), "N"), Origin::Computed { .. }));
+fn lineage_plain_and_alias() {
+    let l = lin("select ename, sal from emp", Some(1), "SAL");
+    assert_eq!((l.kind.as_str(), srcs(&l)), ("column", vec!["EMP.SAL".to_string()]));
+    assert_eq!(l.source.as_ref().unwrap().owner.as_deref(), Some("SCOTT"));
+    assert_eq!(l.from.as_deref(), Some("emp"));
+    let l = lin("select e.ename nm, d.dname as dept from emp e join dept d on d.deptno = e.deptno where e.sal > 10", Some(1), "DEPT");
+    assert_eq!(srcs(&l), vec!["DEPT.DNAME"]);
+    assert_eq!(l.name, "DEPT");
+    assert_eq!(l.source.as_ref().unwrap().alias.as_deref(), Some("D"));
+    assert_eq!(l.filter.as_deref(), Some("e.sal > 10"));
+    assert_eq!(srcs(&lin("select ename, loc from emp e, dept d where d.deptno = e.deptno", Some(1), "LOC")), vec!["DEPT.LOC"]);
+    assert_eq!(srcs(&lin("select scott.emp.job from scott.emp", Some(0), "JOB")), vec!["EMP.JOB"]);
+    // 열 타입
+    assert_eq!(lin("select dname from dept", Some(0), "DNAME").source.unwrap().data_type.as_deref(), Some("VARCHAR2(14)"));
 }
 
 #[test]
-fn origin_through_inline_views() {
-    // 인라인 뷰·WITH 안쪽으로 따라 들어간다 (별칭도 풀어서)
-    assert_eq!(origin("select x.nm from (select ename nm from emp) x", Some(0), "NM"), col_of("SCOTT", "EMP", "ENAME"));
-    assert_eq!(origin("select * from (select d.loc from dept d) where loc = 'A'", Some(0), "LOC"), col_of("SCOTT", "DEPT", "LOC"));
-    assert_eq!(origin("with v as (select e.ename who from emp e) select who from v", Some(0), "WHO"), col_of("SCOTT", "EMP", "ENAME"));
-    assert_eq!(origin("with a as (select deptno, dname from dept), b as (select empno from emp) select a.dname, b.empno from a, b", Some(1), "EMPNO"), col_of("SCOTT", "EMP", "EMPNO"));
-    // 조건 추가가 감싼 꼴
-    assert_eq!(origin("SELECT * FROM (select ename, sal * 2 s2 from emp) WHERE ENAME = 'A'", Some(0), "ENAME"), col_of("SCOTT", "EMP", "ENAME"));
+fn lineage_expressions() {
+    // 식 — 쓰인 열이 입력으로
+    let l = lin("select nvl(e.comm, 0) + e.sal * 12 yearly, empno from emp e", Some(0), "YEARLY");
+    assert_eq!(l.kind, "computed");
+    assert_eq!(l.expr.as_deref(), Some("nvl(e.comm, 0) + e.sal * 12"));
+    assert_eq!(srcs(&l), vec!["EMP.COMM", "EMP.SAL"]);
+    let l = lin("select decode(d.loc, 'A', e.ename, d.dname) x from emp e, dept d", Some(0), "X");
+    assert_eq!(srcs(&l), vec!["DEPT.LOC", "EMP.ENAME", "DEPT.DNAME"]);
+    // 이름 없는 열도 테이블에 있는 열이면 (함수 이름·키워드는 빼고)
+    assert_eq!(srcs(&lin("select case when sal > 1 then job else 'N' end from emp", Some(0), "X")), vec!["EMP.SAL", "EMP.JOB"]);
+    let l = lin("select deptno, sum(sal) total, count(*) n from emp group by deptno", Some(1), "TOTAL");
+    assert_eq!((l.kind.as_str(), srcs(&l)), ("aggregate", vec!["EMP.SAL".to_string()]));
+    assert_eq!(lin("select deptno, sum(sal) total, count(*) n from emp group by deptno", Some(2), "N").kind, "aggregate");
+    assert_eq!(lin("select row_number() over (partition by deptno order by sal) rn from emp", Some(0), "RN").kind, "analytic");
+    assert_eq!(lin("select sysdate, rownum from emp", Some(0), "SYSDATE").kind, "constant");
+    // 스칼라 서브쿼리
+    let l = lin("select e.ename, (select d.dname from dept d where d.deptno = e.deptno) dn from emp e", Some(1), "DN");
+    assert_eq!(l.kind, "computed");
+    assert_eq!(l.inputs[0].via.as_deref(), Some("스칼라 서브쿼리"));
+    assert_eq!(srcs(&l), vec!["DEPT.DNAME"]);
 }
 
 #[test]
-fn origin_unknown() {
-    assert!(matches!(origin("select ename from emp union all select ename from bonus", Some(0), "ENAME"), Origin::Unknown { .. }));
-    assert!(matches!(origin("select x.nm from (select sal + 1 nm from emp) x", Some(0), "NM"), Origin::Computed { .. }));
+fn lineage_star_views_union() {
+    assert_eq!(srcs(&lin("select * from dept", Some(2), "LOC")), vec!["DEPT.LOC"]);
+    assert_eq!(srcs(&lin("select d.*, e.ename from dept d, emp e", Some(3), "ENAME")), vec!["EMP.ENAME"]);
+    assert_eq!(srcs(&lin("select e.*, d.* from emp e, dept d", Some(9), "DNAME")), vec!["DEPT.DNAME"]);
+    // 인라인 뷰 — 단계가 남는다 (별칭으로 이름이 바뀐 것도)
+    let l = lin("select x.nm from (select ename nm from emp where job = 'A') x", Some(0), "NM");
+    assert_eq!((l.kind.as_str(), l.via.as_deref()), ("view", Some("인라인 뷰 X")));
+    assert_eq!(l.inputs[0].name, "NM");
+    assert_eq!(l.inputs[0].filter.as_deref(), Some("job = 'A'"));
+    assert_eq!(l.from.as_deref(), Some("(…) x"));
+    assert_eq!(srcs(&l), vec!["EMP.ENAME"]);
+    let l = lin("with v as (select e.ename who, e.sal * 2 s2 from emp e) select who, s2 from v", Some(1), "S2");
+    assert_eq!(l.via.as_deref(), Some("WITH V"));
+    assert_eq!(l.inputs[0].kind, "computed");
+    assert_eq!(srcs(&l), vec!["EMP.SAL"]);
+    assert_eq!(srcs(&lin("SELECT * FROM (select ename, sal * 2 s2 from emp) WHERE ENAME = 'A'", Some(0), "ENAME")), vec!["EMP.ENAME"]);
+    // UNION — 갈래마다 같은 자리의 열
+    let l = lin("select ename from emp union all select dname from dept", Some(0), "ENAME");
+    assert_eq!(l.kind, "union");
+    assert_eq!(srcs(&l), vec!["EMP.ENAME", "DEPT.DNAME"]);
+    assert_eq!(srcs(&lin("select ename, sal from emp union select ename, sal from bonus", None, "SAL")), vec!["EMP.SAL", "BONUS.SAL"]);
+}
+
+#[test]
+fn lineage_missing_columns() {
     // 캐시에 열이 없는 테이블의 * — 채울 것을 알려 준다
-    let r = column_origin("select * from erp.orders", Some(0), "ID", &cache());
-    assert!(r.missing.contains(&Missing::Columns { owner: "ERP".into(), table: "ORDERS".into() }));
+    let (_, missing) = column_lineage("select * from erp.orders", Some(0), "ID", &cache());
+    assert!(missing.contains(&Missing::Columns { owner: "ERP".into(), table: "ORDERS".into() }));
+    // 테이블 하나면 이름만으로도
+    assert_eq!(srcs(&lin("select id, amt * 2 from erp.orders", Some(1), "X")), vec!["ORDERS.AMT"]);
 }
+

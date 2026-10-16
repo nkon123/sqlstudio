@@ -229,6 +229,10 @@ enum Cmd {
     Ping { reply: Reply<()> },
     /// 여러 행을 한 번에 (array DML) — 데이터 가져오기
     Batch { sql: String, rows: Vec<Vec<Option<String>>>, skip_errors: bool, reply: Reply<BatchResult> },
+    /// 따로 읽는 커서 — 결과 커서와 별개로 (접속 간 데이터 복사). 열기 / 다음 행들 / 닫기
+    SideOpen { sql: String, binds: Vec<(String, Option<String>)>, reply: Reply<Vec<Column>> },
+    SideFetch { rows: usize, reply: Reply<(Vec<Vec<Option<String>>>, bool)> },
+    SideClose,
     /// PL/SQL 호출 — OUT 바인드 값을 문자열로 돌려준다 (디버거·내부 도구용)
     Call { sql: String, ins: Vec<(String, Option<String>)>, outs: Vec<String>, reply: Reply<Vec<Option<String>>> },
     Shutdown,
@@ -455,6 +459,21 @@ impl Session {
         self.call(|reply| Cmd::Query { sql, binds, max_rows, reply }).await
     }
 
+    /// 따로 읽는 커서를 연다 (SELECT 만). 결과 그리드의 커서는 그대로 둔다. 열 정보를 돌려준다
+    pub async fn open_side(&self, sql: &str, binds: Vec<(String, Option<String>)>) -> Result<Vec<Column>> {
+        let sql = sql.to_string();
+        self.call(|reply| Cmd::SideOpen { sql, binds, reply }).await
+    }
+
+    /// 따로 읽는 커서에서 다음 `rows` 행. (행들, 더 있는지) — 끝나면 커서를 닫는다
+    pub async fn fetch_side(&self, rows: usize) -> Result<(Vec<Vec<Option<String>>>, bool)> {
+        self.call(|reply| Cmd::SideFetch { rows, reply }).await
+    }
+
+    pub fn close_side(&self) {
+        let _ = self.tx.send(Cmd::SideClose);
+    }
+
     /// 실행계획 (DBMS_XPLAN 텍스트 줄)
     pub async fn explain(&self, sql: &str) -> Result<Vec<String>> {
         let sql = sql.to_string();
@@ -556,6 +575,8 @@ struct Worker {
     /// 마지막으로 명령을 받은 때 — keepalive 로 끊김을 알았을 때 얼마나 쉬었는지
     last_cmd: Instant,
     cursor: Option<OpenCursor>,
+    /// 따로 읽는 커서 (open_side)
+    side: Option<OpenCursor>,
 }
 
 impl Worker {
@@ -569,7 +590,7 @@ impl Worker {
         sid: i64,
         txn: Arc<std::sync::atomic::AtomicI8>,
     ) -> Self {
-        Self { conn, spec, busy, abandoned, lost, pings, sid, txn, last_cmd: Instant::now(), cursor: None }
+        Self { conn, spec, busy, abandoned, lost, pings, sid, txn, last_cmd: Instant::now(), cursor: None, side: None }
     }
 
     /// 쉬는 동안 ping — 작업 스레드 안에서 하므로 사용자의 호출과 겹치지 않는다.
@@ -639,6 +660,7 @@ impl Worker {
             }
         }
         self.cursor = None;
+        self.side = None;
         let _ = self.conn.close();
     }
 
@@ -670,6 +692,13 @@ impl Worker {
             Cmd::Explain { sql, reply } => {
                 let _ = reply.send(self.explain(&sql));
             }
+            Cmd::SideOpen { sql, binds, reply } => {
+                let _ = reply.send(self.side_open(&sql, &binds));
+            }
+            Cmd::SideFetch { rows, reply } => {
+                let _ = reply.send(self.side_fetch(rows));
+            }
+            Cmd::SideClose => self.side = None,
             Cmd::Commit { reply } => {
                 let r = self.conn.commit().map_err(Error::from);
                 self.note_txn();
@@ -827,6 +856,36 @@ impl Worker {
             self.cursor = None;
         }
         Ok(page)
+    }
+
+    fn side_open(&mut self, sql_text: &str, binds: &[(String, Option<String>)]) -> Result<Vec<Column>> {
+        self.side = None;
+        if !sql::is_read_only(sql_text) {
+            return Err(Error::ReadOnly("따로 읽는 커서는 SELECT 만 허용".into()));
+        }
+        let mut stmt = self.conn.statement(sql_text).fetch_array_size(500).prefetch_rows(500).build()?;
+        bind_all(&mut stmt, binds)?;
+        let rs = stmt.into_result_set::<Row>(&[])?;
+        let columns = columns_of(rs.column_info());
+        self.side = Some(OpenCursor { rs, columns: columns.clone(), fetched: 0, max_cell_chars: 1_000_000 });
+        Ok(columns)
+    }
+
+    fn side_fetch(&mut self, n: usize) -> Result<(Vec<Vec<Option<String>>>, bool)> {
+        let cur = self.side.as_mut().ok_or_else(|| Error::Invalid("열린 커서가 없습니다".into()))?;
+        let r = take_rows(&mut cur.rs, n, cur.max_cell_chars);
+        match r {
+            Ok((rows, more)) => {
+                if !more {
+                    self.side = None;
+                }
+                Ok((rows, more))
+            }
+            Err(e) => {
+                self.side = None;
+                Err(e)
+            }
+        }
     }
 
     fn side_query(

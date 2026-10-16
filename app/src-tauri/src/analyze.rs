@@ -521,11 +521,20 @@ pub fn analysis_unit(st: State<'_, AppState>, id: Option<u64>, set: Option<Strin
 }
 
 #[derive(Serialize)]
+pub struct ColumnWrites {
+    owner: Option<String>,
+    table: String,
+    column: String,
+    writes: Vec<sqls_analyze::colwrite::ColWrite>,
+}
+
+#[derive(Serialize)]
 pub struct ColumnSource {
-    origin: sqls_core::complete::Origin,
+    lineage: sqls_core::complete::Lineage,
     /// 분석 결과(문장 목록)가 있는지 — 없으면 writes 는 비어 있다
     analyzed: bool,
-    writes: Vec<sqls_analyze::colwrite::ColWrite>,
+    /// 닿은 테이블 열마다 그 열에 값을 넣는 문장
+    writes: Vec<ColumnWrites>,
 }
 
 /// 읽어 둔 문장 목록 (파일과 고친 때가 같으면 다시 읽지 않는다)
@@ -546,22 +555,30 @@ fn statements(path: &std::path::Path) -> Option<Stmts> {
     Some(v)
 }
 
-/// 결과 그리드 열의 출처 — 어느 테이블.열인지(쿼리를 캐시로 풀어서), 분석 결과에서 그 열에 값을 넣는 문장들.
-/// 우클릭으로 고를 때만 돈다. 문장 목록은 처음 한 번 읽어 두고 파일이 바뀔 때만 다시 읽는다
+/// 결과 그리드 열이 만들어진 길 — 어느 테이블의 어느 열을 어떤 식으로(쿼리를 캐시로 풀어서),
+/// 그리고 분석 결과에서 그 열들에 값을 넣는 문장들. 우클릭으로 고를 때만 돈다.
+/// 문장 목록은 처음 한 번 읽어 두고 파일이 바뀔 때만 다시 읽는다
 #[tauri::command]
 pub async fn column_source(st: State<'_, AppState>, id: u64, sql: String, pos: Option<usize>, name: String) -> R<ColumnSource> {
-    let origin = crate::complete::column_origin(&st, id, &sql, pos, &name).await?;
-    let sqls_core::complete::Origin::Column { owner, table, column } = &origin else {
-        return Ok(ColumnSource { origin, analyzed: false, writes: vec![] });
-    };
+    let lineage = crate::complete::column_lineage(&st, id, &sql, pos, &name).await?;
+    let cols: Vec<(Option<String>, String, String)> = lineage.sources().into_iter().map(|s| (s.owner.clone(), s.table.clone(), s.column.clone())).collect();
+    if cols.is_empty() {
+        return Ok(ColumnSource { lineage, analyzed: false, writes: vec![] });
+    }
     let path = store_for(&st, id)?.root().join("integrated").join("statements.json");
-    let (owner, table, column) = (owner.clone(), table.clone(), column.clone());
     let found = tauri::async_runtime::spawn_blocking(move || {
-        statements(&path).map(|v| sqls_analyze::colwrite::column_writes(&v, owner.as_deref(), &table, &column))
+        statements(&path).map(|v| {
+            cols.into_iter()
+                .map(|(owner, table, column)| {
+                    let writes = sqls_analyze::colwrite::column_writes(&v, owner.as_deref(), &table, &column);
+                    ColumnWrites { owner, table, column, writes }
+                })
+                .collect::<Vec<_>>()
+        })
     })
     .await
     .map_err(|e| ErrView::msg("io", e.to_string()))?;
-    Ok(ColumnSource { origin, analyzed: found.is_some(), writes: found.unwrap_or_default() })
+    Ok(ColumnSource { lineage, analyzed: found.is_some(), writes: found.unwrap_or_default() })
 }
 
 /// 결과 폴더 경로

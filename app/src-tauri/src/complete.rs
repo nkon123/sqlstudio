@@ -334,15 +334,21 @@ pub fn column_notes(st: State<'_, AppState>, id: u64, sql: String) -> Result<std
     Ok(complete::column_notes(&sql, &cache))
 }
 
-/// 결과 열의 출처 (테이블.열). 캐시로 풀고, 모자라면 메타 세션으로 그 테이블의 열을 채워 한 번 더 (우클릭할 때만)
-pub async fn column_origin(st: &AppState, id: u64, sql: &str, pos: Option<usize>, name: &str) -> Result<complete::Origin, ErrView> {
+/// 결과 열이 만들어진 길 (테이블.열까지). 캐시로 풀고, 모자라면 메타 세션으로 그 테이블들의 열을 채워 한 번 더 (우클릭할 때만)
+pub async fn column_lineage(st: &AppState, id: u64, sql: &str, pos: Option<usize>, name: &str) -> Result<complete::Lineage, ErrView> {
     let hub = hub_for(st, id)?;
-    let first = complete::column_origin(sql, pos, name, &hub.cache.read().unwrap());
-    if first.missing.is_empty() {
-        return Ok(first.origin);
+    let (first, missing) = complete::column_lineage(sql, pos, name, &hub.cache.read().unwrap());
+    if missing.is_empty() {
+        return Ok(first);
     }
-    let Some(s) = hub.session() else { return Ok(first.origin) };
-    let todo: Vec<Missing> = first.missing.into_iter().take(4).collect();
+    let Some(s) = hub.session() else { return Ok(first) };
+    let mut todo: Vec<Missing> = Vec::new();
+    for m in missing {
+        if !todo.contains(&m) {
+            todo.push(m);
+        }
+    }
+    todo.truncate(8);
     let fill = async {
         for m in &todo {
             if let Ok(fills) = load::fill(&s, m).await {
@@ -356,8 +362,8 @@ pub async fn column_origin(st: &AppState, id: u64, sql: &str, pos: Option<usize>
     if tokio::time::timeout(Duration::from_secs(5), fill).await.is_err() {
         tracing::debug!("열 출처: 열 채우기가 늦어 있는 것으로 답함");
     }
-    let again = complete::column_origin(sql, pos, name, &hub.cache.read().unwrap());
-    Ok(again.origin)
+    let (again, _) = complete::column_lineage(sql, pos, name, &hub.cache.read().unwrap());
+    Ok(again)
 }
 
 #[tauri::command]

@@ -1784,251 +1784,542 @@ pub fn column_notes(sql: &str, cache: &SchemaCache) -> std::collections::BTreeMa
     out
 }
 
-/// 결과 열 하나가 어디서 왔는지
+/// 테이블 열 하나 (계보의 끝)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Origin {
-    /// 테이블의 열 그대로. owner 는 캐시로 풀었을 때만
-    Column { owner: Option<String>, table: String, column: String },
-    /// 식·함수·상수
-    Computed { expr: String },
-    /// 찾지 못함 (UNION, 인라인 뷰 등)
-    Unknown { reason: String },
+pub struct SourceCol {
+    /// 캐시로 풀었을 때만
+    pub owner: Option<String>,
+    pub table: String,
+    pub column: String,
+    /// 쿼리에서 붙인 테이블 별칭
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct OriginResult {
-    #[serde(flatten)]
-    pub origin: Origin,
-    /// 캐시에 없어 채우면 더 정확해지는 것 (채운 뒤 다시 부른다)
-    #[serde(skip)]
-    pub missing: Vec<Missing>,
+/// 결과 열이 만들어진 길 — 결과 열에서 테이블 열까지 단계마다 하나
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Lineage {
+    /// 이 단계에서의 열 이름
+    pub name: String,
+    /// column(테이블 열 그대로) | view(인라인 뷰·WITH 의 열) | computed(식) | aggregate(집계) | analytic(분석 함수)
+    /// | constant(상수·의사 열) | union | subquery(스칼라 서브쿼리) | unknown
+    pub kind: String,
+    /// 식 (column 이 아니면)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expr: Option<String>,
+    /// 거쳐 온 곳 — 인라인 뷰·WITH 이름, UNION 의 몇 번째
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    /// kind = column 이면 그 테이블 열
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceCol>,
+    /// 이 단계 쿼리의 FROM 과 WHERE (짧게)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// 이 값을 만드는 데 쓴 것들
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<Lineage>,
+}
+
+impl Lineage {
+    fn new(name: &str, kind: &str) -> Self {
+        Lineage { name: name.into(), kind: kind.into(), expr: None, via: None, source: None, from: None, filter: None, reason: None, inputs: vec![] }
+    }
+    fn unknown(name: &str, reason: impl Into<String>) -> Self {
+        Lineage { reason: Some(reason.into()), ..Self::new(name, "unknown") }
+    }
+
+    /// 닿은 테이블 열 전부 (중복 없이, 나온 순서)
+    pub fn sources(&self) -> Vec<&SourceCol> {
+        let mut out: Vec<&SourceCol> = Vec::new();
+        fn walk<'a>(l: &'a Lineage, out: &mut Vec<&'a SourceCol>) {
+            if let Some(s) = &l.source {
+                if !out.iter().any(|x| x.owner == s.owner && x.table == s.table && x.column == s.column) {
+                    out.push(s);
+                }
+            }
+            for i in &l.inputs {
+                walk(i, out);
+            }
+        }
+        walk(self, &mut out);
+        out
+    }
 }
 
 /// 테이블 열이 아닌 낱말 (열처럼 보여도)
 const PSEUDO: &[&str] = &["SYSDATE", "SYSTIMESTAMP", "CURRENT_DATE", "CURRENT_TIMESTAMP", "LOCALTIMESTAMP", "ROWNUM", "ROWID", "LEVEL", "USER", "UID", "NULL", "TRUE", "FALSE"];
+const AGGREGATES: &[&str] = &["SUM", "COUNT", "AVG", "MIN", "MAX", "LISTAGG", "STDDEV", "VARIANCE", "MEDIAN", "WM_CONCAT", "XMLAGG", "COLLECT"];
 
-/// 조회 결과의 `pos` 번째(0부터) 열 `name` 이 어느 테이블의 어느 열인지. 캐시로만 푼다 (DB 왕복 없음).
-/// 위치로 먼저 찾고(`*` 는 캐시의 열 순서로 편다), 안 되면 이름으로 찾는다
-pub fn column_origin(sql: &str, pos: Option<usize>, name: &str, cache: &SchemaCache) -> OriginResult {
-    let missing = std::cell::RefCell::new(Vec::new());
-    let origin = origin_in(sql, pos, name, cache, &missing, 0);
-    OriginResult { origin, missing: missing.into_inner() }
+/// 조회 결과의 `pos` 번째(0부터) 열 `name` 이 만들어진 길. 캐시로만 푼다 (DB 왕복 없음).
+/// 위치로 먼저 찾고(`*` 는 캐시의 열 순서로 편다), 안 되면 이름으로 찾는다.
+/// 두 번째 값은 캐시에 없어 채우면 더 정확해지는 것 (채운 뒤 다시 부른다)
+pub fn column_lineage(sql: &str, pos: Option<usize>, name: &str, cache: &SchemaCache) -> (Lineage, Vec<Missing>) {
+    let cx = LineageCx { cache, missing: std::cell::RefCell::new(Vec::new()) };
+    let l = cx.query(sql, pos, &name.trim().trim_matches('"').to_uppercase(), 0);
+    (l, cx.missing.into_inner())
 }
 
-fn origin_in(sql: &str, pos: Option<usize>, name: &str, cache: &SchemaCache, missing: &std::cell::RefCell<Vec<Missing>>, nest: u8) -> Origin {
-    let text = format!("{} ", sql.trim_end().trim_end_matches(';'));
-    let (mut toks, _) = tokenize(&text);
-    if let Some(base) = toks.first().map(|t| t.depth) {
-        for t in &mut toks {
-            t.depth -= base;
-        }
-    }
-    let name = name.trim().trim_matches('"').to_uppercase();
-    let unknown = |r: &str| Origin::Unknown { reason: r.into() };
-    if toks.iter().any(|t| t.depth == 0 && matches!(word(t), Some("UNION" | "INTERSECT" | "MINUS"))) {
-        return unknown("UNION 등으로 합친 결과라 열마다 출처가 여럿입니다");
-    }
-    let Some(sel) = toks.iter().position(|t| t.depth == 0 && is_w(Some(t), "SELECT")) else {
-        return unknown("SELECT 문이 아닙니다");
-    };
-    let ctes = parse_ctes(&toks);
-    let refs = parse_refs(&toks, 0, &ctes);
+struct LineageCx<'c> {
+    cache: &'c SchemaCache,
+    missing: std::cell::RefCell<Vec<Missing>>,
+}
 
-    // SELECT 목록을 항목(같은 깊이의 쉼표로 나눈 토큰 범위)으로
-    let mut i = sel + 1;
-    if matches!(toks.get(i).and_then(word), Some("DISTINCT" | "UNIQUE" | "ALL")) {
-        i += 1;
-    }
-    let mut items: Vec<&[Tok]> = Vec::new();
-    let mut start = i;
-    while i < toks.len() {
-        let t = &toks[i];
-        if t.depth == 0 && (is_w(Some(t), "FROM") || is_w(Some(t), "INTO")) {
-            break;
-        }
-        if t.depth == 0 && t.t == T::P(',') {
-            items.push(&toks[start..i]);
-            start = i + 1;
-        }
-        i += 1;
-    }
-    items.push(&toks[start..i]);
+/// SELECT 목록 항목 하나의 출처
+enum Src<'a> {
+    Col(Option<&'a TableRef>, String),
+    Star(Option<&'a TableRef>),
+    Expr,
+}
 
-    let ctes_at = cte_bodies(&toks);
-    // 참조의 열 목록 (인라인 뷰·WITH 는 SELECT 목록 이름)
-    let cols_of = |r: &TableRef| -> Option<Vec<String>> {
-        if let Some(d) = &r.derived {
-            return Some(d.clone());
-        }
-        let key = cache.resolve(r.owner.as_deref(), r.name.as_deref()?)?;
-        match cache.cols(&key) {
-            Some(c) => Some(c.iter().map(|c| c.name.clone()).collect()),
-            None => {
-                missing.borrow_mut().push(Missing::Columns { owner: key.0, table: key.1 });
-                None
-            }
-        }
-    };
-    let ref_named = |q: &str, owner: Option<&str>| {
-        refs.iter().find(|r| r.alias.as_deref() == Some(q) && owner.is_none()).or_else(|| {
-            refs.iter().find(|r| r.name.as_deref() == Some(q) && (owner.is_none() || r.owner.as_deref() == owner))
-        })
-    };
+struct SelItem<'a> {
+    /// 별칭 또는 열 이름 (식이면 별칭만)
+    out: Option<String>,
+    src: Src<'a>,
+    /// 별칭을 뗀 식 토큰
+    body: &'a [Tok],
+}
 
-    // 항목 하나: (출력 이름, 출처). 출처는 Ok(참조, 열) 또는 Err(식)
-    enum Src<'a> {
-        Col(Option<&'a TableRef>, String),
-        Star(Option<&'a TableRef>),
-        Expr(String),
-    }
-    let parse = |it: &[Tok]| -> (Option<String>, Src) {
-        let mut body: &[Tok] = it;
-        let mut alias = None;
-        if let [.., prev, last] = it {
-            // 별칭: `식 AS 별칭`, `열 별칭`, `f(x) 별칭`, `'a' 별칭` — `a.b`, `a + b`, `CASE … END` 는 아니다
-            let last_ident = last.depth == 0 && matches!(last.t, T::Word(_) | T::QWord(_));
-            let after_value = matches!(prev.t, T::Word(_) | T::QWord(_) | T::Str | T::Num | T::P(')')) && !is_w(Some(last), "END");
-            if last_ident && is_w(Some(prev), "AS") {
-                alias = ident(last);
-                body = &it[..it.len() - 2];
-            } else if last_ident && after_value && prev.depth == 0 || (last_ident && prev.t == T::P(')')) {
-                alias = ident(last);
-                body = &it[..it.len() - 1];
-            }
-        }
-        let expr = || match (body.first(), body.last()) {
-            (Some(a), Some(b)) => text[a.s..b.e].trim().to_string(),
+impl LineageCx<'_> {
+    fn text_of(text: &str, toks: &[Tok]) -> String {
+        match (toks.first(), toks.last()) {
+            (Some(a), Some(b)) => text[a.s..b.e].split_whitespace().collect::<Vec<_>>().join(" "),
             _ => String::new(),
-        };
-        // a / a.b / a.b.c — 낱말과 점이 번갈아
-        let parts: Option<Vec<String>> = (body.len() % 2 == 1)
-            .then(|| body.iter().enumerate().map(|(k, t)| if k % 2 == 0 { ident(t) } else { (t.t == T::P('.')).then(String::new) }).collect::<Option<Vec<_>>>())
-            .flatten()
-            .map(|v| v.into_iter().step_by(2).collect());
-        // t.* / *
-        if body.len() == 1 && body[0].t == T::P('*') {
-            return (None, Src::Star(None));
         }
-        if body.len() == 3 && body[2].t == T::P('*') && body[1].t == T::P('.') {
-            let q = ident(&body[0]).unwrap_or_default();
-            return (None, Src::Star(ref_named(&q, None)));
-        }
-        if body.len() == 5 && body[4].t == T::P('*') {
-            let (o, q) = (ident(&body[0]).unwrap_or_default(), ident(&body[2]).unwrap_or_default());
-            return (None, Src::Star(ref_named(&q, Some(&o))));
-        }
-        match parts.as_deref() {
-            Some([c]) if !PSEUDO.contains(&c.as_str()) => (Some(alias.unwrap_or_else(|| c.clone())), Src::Col(None, c.clone())),
-            Some([q, c]) => (Some(alias.unwrap_or_else(|| c.clone())), match ref_named(q, None) {
-                Some(r) => Src::Col(Some(r), c.clone()),
-                None => Src::Expr(expr()),
-            }),
-            Some([o, q, c]) => (Some(alias.unwrap_or_else(|| c.clone())), match ref_named(q, Some(o)) {
-                Some(r) => Src::Col(Some(r), c.clone()),
-                None => Src::Expr(expr()),
-            }),
-            // 식 — 별칭이 없으면 Oracle 이 붙인 이름은 맞춰 보지 않는다 (공백 등이 다르다)
-            _ => (alias, Src::Expr(expr())),
-        }
-    };
-    let parsed: Vec<(Option<String>, Src)> = items.iter().map(|it| parse(it)).collect();
+    }
 
-    // 참조에서 열을 찾아 결과로
-    let finish = |r: Option<&TableRef>, col: &str| -> Origin {
-        let r = match r {
-            Some(r) => r,
-            None => {
-                // 이름만 — 그 열이 있는 첫 참조 (하나뿐이면 그것)
-                if refs.len() == 1 {
-                    &refs[0]
-                } else {
-                    match refs.iter().find(|r| cols_of(r).is_some_and(|c| c.iter().any(|x| x == col))) {
-                        Some(r) => r,
-                        None => return Origin::Unknown { reason: format!("{col} 열이 어느 테이블의 것인지 모릅니다 (별칭을 붙여 보세요)") },
-                    }
+    /// 글로 — 안쪽 (SELECT …) 는 (…) 로 줄인다 (그 단계는 나무에 따로 나온다)
+    fn without_subqueries(text: &str, toks: &[Tok]) -> String {
+        let mut out = String::new();
+        let mut seg: Option<usize> = None;
+        let mut i = 0;
+        while i < toks.len() {
+            let t = &toks[i];
+            if t.t == T::P('(') && is_w(toks.get(i + 1), "SELECT") {
+                if let Some(a) = seg.take() {
+                    out.push_str(&Self::text_of(text, &toks[a..i]));
+                    out.push(' ');
                 }
+                out.push_str("(…) ");
+                let d = t.depth;
+                i += 1;
+                while i < toks.len() && !(toks[i].t == T::P(')') && toks[i].depth == d) {
+                    i += 1;
+                }
+                i += 1;
+                continue;
             }
-        };
-        if r.derived.is_some() {
-            // 인라인 뷰·WITH 면 안쪽 쿼리에서 그 이름을 다시 찾는다
-            let inner = r.body.or_else(|| r.name.as_ref().and_then(|n| ctes_at.get(n).copied()));
-            if let Some((a, b)) = inner.filter(|_| nest < 8) {
-                return origin_in(&text[a..b], None, col, cache, missing, nest + 1);
-            }
-            let via = r.alias.clone().or_else(|| r.name.clone()).unwrap_or_else(|| "인라인 뷰".into());
-            return Origin::Unknown { reason: format!("{via}(인라인 뷰·WITH) 를 거친 열입니다 — 안쪽 쿼리에서 찾아 주세요") };
+            seg.get_or_insert(i);
+            i += 1;
         }
-        let n = r.name.clone().unwrap_or_default();
-        match cache.resolve(r.owner.as_deref(), &n) {
-            Some((o, t)) => Origin::Column { owner: Some(o), table: t, column: col.to_string() },
-            None => Origin::Column { owner: r.owner.clone(), table: n, column: col.to_string() },
+        if let Some(a) = seg {
+            out.push_str(&Self::text_of(text, &toks[a..]));
         }
-    };
+        out.trim().to_string()
+    }
 
-    // 위치로: `*` 를 펴 가며 pos 번째 항목
-    if let Some(pos) = pos {
-        let mut k = 0usize;
-        let mut ok = true;
-        for (out, src) in &parsed {
-            match src {
+    fn clip(s: String, n: usize) -> String {
+        if s.chars().count() > n { format!("{}…", s.chars().take(n).collect::<String>()) } else { s }
+    }
+
+    /// 쿼리 하나 (UNION 이면 갈래마다)
+    fn query(&self, sql: &str, pos: Option<usize>, name: &str, nest: u8) -> Lineage {
+        let label = if name.is_empty() { "?" } else { name };
+        if nest > 8 {
+            return Lineage::unknown(label, "쿼리가 너무 깊게 겹쳐 있습니다");
+        }
+        let text = format!("{} ", sql.trim_end().trim_end_matches(';'));
+        let (mut toks, _) = tokenize(&text);
+        if let Some(base) = toks.first().map(|t| t.depth) {
+            for t in &mut toks {
+                t.depth -= base;
+            }
+        }
+        // UNION · INTERSECT · MINUS — 갈래마다 같은 위치의 열. 이름은 첫 갈래의 것이다
+        let cuts: Vec<usize> = (0..toks.len()).filter(|&i| toks[i].depth == 0 && matches!(word(&toks[i]), Some("UNION" | "INTERSECT" | "MINUS"))).collect();
+        if !cuts.is_empty() {
+            let mut node = Lineage::new(label, "union");
+            node.expr = Some(cuts.iter().map(|&i| if is_w(toks.get(i + 1), "ALL") { format!("{} ALL", word(&toks[i]).unwrap()) } else { word(&toks[i]).unwrap().to_string() }).collect::<Vec<_>>().join(" · "));
+            let mut starts = vec![0usize];
+            starts.extend(cuts.iter().map(|&i| if is_w(toks.get(i + 1), "ALL") { i + 2 } else { i + 1 }));
+            let mut ends: Vec<usize> = cuts.clone();
+            ends.push(toks.len());
+            // 첫 갈래에서 위치를 정하고, 나머지는 그 위치로
+            let mut at = pos;
+            for (k, (&a, &b)) in starts.iter().zip(&ends).enumerate() {
+                let part = &toks[a..b];
+                let (Some(f), Some(l)) = (part.first(), part.last()) else { continue };
+                // 갈래를 감싼 괄호 (SELECT …) UNION (SELECT …)
+                let (s, e) = if f.t == T::P('(') && l.t == T::P(')') { (part[1].s, part[part.len() - 2].e) } else { (f.s, l.e) };
+                let branch = &text[s..e];
+                if k == 0 && at.is_none() {
+                    at = self.position_of(branch, name);
+                }
+                let mut sub = self.query(branch, at, if k == 0 { name } else { "" }, nest + 1);
+                sub.via = Some(format!("{}번째 SELECT", k + 1));
+                node.inputs.push(sub);
+            }
+            return node;
+        }
+        let Some(sel) = toks.iter().position(|t| t.depth == 0 && is_w(Some(t), "SELECT")) else {
+            return Lineage::unknown(label, "SELECT 문이 아닙니다");
+        };
+        let ctes = parse_ctes(&toks);
+        let ctes_at = cte_bodies(&toks);
+        let refs = parse_refs(&toks, 0, &ctes);
+        let items = Self::items(&toks, sel, &refs);
+        let (from, filter) = Self::from_where(&toks, sel, &text);
+
+        let found = self.locate(&items, &refs, pos, name);
+        let Some((item, col)) = found else {
+            return Lineage::unknown(label, format!("SELECT 목록에서 {label} 을 찾지 못했습니다"));
+        };
+        let out = item.out.clone().or_else(|| col.clone()).unwrap_or_else(|| label.to_string());
+        let mut node = match &item.src {
+            Src::Col(r, c) => self.column(*r, c, &refs, &ctes_at, &text, nest),
+            Src::Star(r) => match col.as_deref() {
+                Some(c) => self.column(*r, c, &refs, &ctes_at, &text, nest),
+                None => Lineage::unknown(label, "* 로 온 열인데 어느 테이블의 것인지 모릅니다"),
+            },
+            Src::Expr => self.expr(item.body, &refs, &ctes_at, &text, nest),
+        };
+        node.name = out;
+        if node.from.is_none() {
+            node.from = from;
+            node.filter = filter;
+        }
+        node
+    }
+
+    /// 이름으로 몇 번째 열인지 (UNION 의 첫 갈래에서 위치를 정할 때)
+    fn position_of(&self, sql: &str, name: &str) -> Option<usize> {
+        let text = format!("{sql} ");
+        let (toks, _) = tokenize(&text);
+        let sel = toks.iter().position(|t| t.depth == toks[0].depth && is_w(Some(t), "SELECT"))?;
+        let ctes = parse_ctes(&toks);
+        let refs = parse_refs(&toks, toks[0].depth, &ctes);
+        let items = Self::items(&toks, sel, &refs);
+        let mut k = 0;
+        for it in &items {
+            match &it.src {
                 Src::Star(r) => {
                     let targets: Vec<&TableRef> = match r { Some(r) => vec![*r], None => refs.iter().collect() };
                     for t in targets {
-                        let Some(cols) = cols_of(t) else { ok = false; break };
-                        if pos < k + cols.len() {
-                            let col = cols[pos - k].clone();
-                            if col == name {
-                                let o = finish(Some(t), &col);
-                                return o;
-                            }
-                            ok = false;
-                            break;
+                        let cols = self.cols_of(t)?;
+                        if let Some(i) = cols.iter().position(|c| c == name) {
+                            return Some(k + i);
                         }
                         k += cols.len();
                     }
                 }
                 _ => {
-                    if k == pos {
-                        if out.as_deref() == Some(name.as_str()) || out.is_none() {
-                            let o = match src {
-                                Src::Col(r, c) => finish(*r, c),
-                                Src::Expr(e) => Origin::Computed { expr: e.clone() },
-                                Src::Star(_) => unreachable!(),
-                            };
-                            return o;
-                        }
-                        ok = false;
+                    if it.out.as_deref() == Some(name) {
+                        return Some(k);
                     }
                     k += 1;
                 }
             }
-            if !ok || k > pos {
+        }
+        None
+    }
+
+    /// SELECT 목록 → 항목들
+    fn items<'a>(toks: &'a [Tok], sel: usize, refs: &'a [TableRef]) -> Vec<SelItem<'a>> {
+        let depth = toks[sel].depth;
+        let mut i = sel + 1;
+        if matches!(toks.get(i).and_then(word), Some("DISTINCT" | "UNIQUE" | "ALL")) {
+            i += 1;
+        }
+        let mut spans: Vec<&[Tok]> = Vec::new();
+        let mut start = i;
+        while i < toks.len() {
+            let t = &toks[i];
+            if t.depth == depth && (is_w(Some(t), "FROM") || is_w(Some(t), "INTO")) {
                 break;
+            }
+            if t.depth == depth && t.t == T::P(',') {
+                spans.push(&toks[start..i]);
+                start = i + 1;
+            }
+            i += 1;
+        }
+        spans.push(&toks[start..i]);
+        spans.into_iter().filter(|s| !s.is_empty()).map(|it| Self::item(it, refs, depth)).collect()
+    }
+
+    fn ref_named<'a>(refs: &'a [TableRef], q: &str, owner: Option<&str>) -> Option<&'a TableRef> {
+        refs.iter().find(|r| r.alias.as_deref() == Some(q) && owner.is_none()).or_else(|| {
+            refs.iter().find(|r| r.name.as_deref() == Some(q) && (owner.is_none() || r.owner.as_deref() == owner))
+        })
+    }
+
+    /// 낱말과 점이 번갈아 (a / a.b / a.b.c) 면 그 낱말들
+    fn dotted(body: &[Tok]) -> Option<Vec<String>> {
+        if body.len().is_multiple_of(2) {
+            return None;
+        }
+        let mut out = Vec::new();
+        for (k, t) in body.iter().enumerate() {
+            if k % 2 == 0 {
+                out.push(ident(t)?);
+            } else if t.t != T::P('.') {
+                return None;
+            }
+        }
+        Some(out)
+    }
+
+    fn item<'a>(it: &'a [Tok], refs: &'a [TableRef], depth: i32) -> SelItem<'a> {
+        let mut body: &[Tok] = it;
+        let mut alias = None;
+        if let [.., prev, last] = it {
+            // 별칭: `식 AS 별칭`, `열 별칭`, `f(x) 별칭`, `'a' 별칭` — `a.b`, `a + b`, `CASE … END` 는 아니다
+            let last_ident = last.depth == depth && matches!(last.t, T::Word(_) | T::QWord(_));
+            let after_value = matches!(prev.t, T::Word(_) | T::QWord(_) | T::Str | T::Num | T::P(')')) && !is_w(Some(last), "END");
+            if last_ident && is_w(Some(prev), "AS") {
+                alias = ident(last);
+                body = &it[..it.len() - 2];
+            } else if last_ident && after_value && prev.depth == depth {
+                alias = ident(last);
+                body = &it[..it.len() - 1];
+            }
+        }
+        let star = |src| SelItem { out: None, src, body };
+        if body.len() == 1 && body[0].t == T::P('*') {
+            return star(Src::Star(None));
+        }
+        if body.len() == 3 && body[2].t == T::P('*') && body[1].t == T::P('.') {
+            return star(Src::Star(ident(&body[0]).and_then(|q| Self::ref_named(refs, &q, None))));
+        }
+        if body.len() == 5 && body[4].t == T::P('*') {
+            let r = ident(&body[0]).zip(ident(&body[2])).and_then(|(o, q)| Self::ref_named(refs, &q, Some(&o)));
+            return star(Src::Star(r));
+        }
+        let col = |c: &String, r| SelItem { out: Some(alias.clone().unwrap_or_else(|| c.clone())), src: Src::Col(r, c.clone()), body };
+        match Self::dotted(body).as_deref() {
+            Some([c]) if !PSEUDO.contains(&c.as_str()) => col(c, None),
+            Some([q, c]) if Self::ref_named(refs, q, None).is_some() => col(c, Self::ref_named(refs, q, None)),
+            Some([o, q, c]) if Self::ref_named(refs, q, Some(o)).is_some() => col(c, Self::ref_named(refs, q, Some(o))),
+            // 식 — 별칭이 없으면 Oracle 이 붙인 이름은 맞춰 보지 않는다 (공백 등이 다르다)
+            _ => SelItem { out: alias, src: Src::Expr, body },
+        }
+    }
+
+    /// FROM … 과 WHERE … (같은 깊이, 짧게)
+    fn from_where(toks: &[Tok], sel: usize, text: &str) -> (Option<String>, Option<String>) {
+        let depth = toks[sel].depth;
+        let at = |w: &str| (sel..toks.len()).find(|&i| toks[i].depth == depth && is_w(toks.get(i), w));
+        let end_of = |from: usize| {
+            (from + 1..toks.len())
+                .find(|&i| (toks[i].depth == depth && matches!(word(&toks[i]), Some("WHERE" | "GROUP" | "ORDER" | "HAVING" | "CONNECT" | "START" | "UNION" | "INTERSECT" | "MINUS" | "FOR"))) || toks[i].depth < depth)
+                .unwrap_or(toks.len())
+        };
+        let from = at("FROM").map(|f| Self::clip(Self::without_subqueries(text, &toks[f + 1..end_of(f)]), 300));
+        let filter = at("WHERE").map(|w| Self::clip(Self::text_of(text, &toks[w + 1..end_of(w)]), 300));
+        (from.filter(|s| !s.is_empty()), filter.filter(|s| !s.is_empty()))
+    }
+
+    /// 참조의 열 이름들 (인라인 뷰·WITH 는 SELECT 목록 이름). 캐시에 없으면 채울 것으로 적어 둔다
+    fn cols_of(&self, r: &TableRef) -> Option<Vec<String>> {
+        if let Some(d) = &r.derived {
+            return Some(d.clone());
+        }
+        let key = self.cache.resolve(r.owner.as_deref(), r.name.as_deref()?)?;
+        match self.cache.cols(&key) {
+            Some(c) => Some(c.iter().map(|c| c.name.clone()).collect()),
+            None => {
+                self.missing.borrow_mut().push(Missing::Columns { owner: key.0, table: key.1 });
+                None
             }
         }
     }
-    // 이름으로
-    if let Some((_, src)) = parsed.iter().find(|(o, _)| o.as_deref() == Some(name.as_str())) {
-        let o = match src {
-            Src::Col(r, c) => finish(*r, c),
-            Src::Expr(e) => Origin::Computed { expr: e.clone() },
-            Src::Star(_) => unreachable!(),
-        };
-        return o;
-    }
-    for (_, src) in &parsed {
-        if let Src::Star(r) = src {
-            let targets: Vec<&TableRef> = match r { Some(r) => vec![*r], None => refs.iter().collect() };
-            for t in targets {
-                if cols_of(t).is_some_and(|c| c.contains(&name)) {
-                    let o = finish(Some(t), &name);
-                    return o;
+
+    /// 위치(또는 이름)로 항목 찾기. `*` 면 펴서 그 자리의 열 이름도
+    fn locate<'a, 'b>(&self, items: &'b [SelItem<'a>], refs: &'a [TableRef], pos: Option<usize>, name: &str) -> Option<(&'b SelItem<'a>, Option<String>)> {
+        let name_ok = |n: Option<&str>| name.is_empty() || n.is_none() || n == Some(name);
+        if let Some(pos) = pos {
+            let mut k = 0usize;
+            'items: for it in items {
+                match &it.src {
+                    Src::Star(r) => {
+                        let targets: Vec<&TableRef> = match r { Some(r) => vec![*r], None => refs.iter().collect() };
+                        for t in targets {
+                            let Some(cols) = self.cols_of(t) else { break 'items };
+                            if pos < k + cols.len() {
+                                let c = cols[pos - k].clone();
+                                if name_ok(Some(&c)) {
+                                    // 펼친 그 테이블로 좁힌 Star 를 돌려줄 수 없으니 열 이름으로 찾게 한다
+                                    return Some((it, Some(c)));
+                                }
+                                break 'items;
+                            }
+                            k += cols.len();
+                        }
+                    }
+                    _ => {
+                        if k == pos {
+                            if name_ok(it.out.as_deref()) {
+                                return Some((it, None));
+                            }
+                            break;
+                        }
+                        k += 1;
+                    }
                 }
             }
         }
+        if name.is_empty() {
+            return None;
+        }
+        if let Some(it) = items.iter().find(|it| it.out.as_deref() == Some(name)) {
+            return Some((it, None));
+        }
+        for it in items {
+            if let Src::Star(r) = &it.src {
+                let targets: Vec<&TableRef> = match r { Some(r) => vec![*r], None => refs.iter().collect() };
+                if targets.iter().any(|t| self.cols_of(t).is_some_and(|c| c.iter().any(|x| x == name))) {
+                    return Some((it, Some(name.to_string())));
+                }
+            }
+        }
+        None
     }
-    Origin::Unknown { reason: format!("SELECT 목록에서 {name} 을 찾지 못했습니다") }
+
+    /// 열 하나를 테이블까지 (인라인 뷰·WITH 면 안쪽으로)
+    fn column(&self, r: Option<&TableRef>, col: &str, refs: &[TableRef], ctes_at: &HashMap<String, (usize, usize)>, text: &str, nest: u8) -> Lineage {
+        let r = match r {
+            Some(r) => r,
+            None if refs.len() == 1 => &refs[0],
+            None => match refs.iter().find(|r| self.cols_of(r).is_some_and(|c| c.iter().any(|x| x == col))) {
+                Some(r) => r,
+                None => return Lineage::unknown(col, format!("{col} 열이 어느 테이블의 것인지 모릅니다 (테이블 별칭을 붙여 보세요)")),
+            },
+        };
+        if r.derived.is_some() {
+            let via = match (&r.name, &r.alias) {
+                (Some(n), Some(a)) => format!("WITH {n} ({a})"),
+                (Some(n), None) => format!("WITH {n}"),
+                (None, Some(a)) => format!("인라인 뷰 {a}"),
+                (None, None) => "인라인 뷰".to_string(),
+            };
+            let inner = r.body.or_else(|| r.name.as_ref().and_then(|n| ctes_at.get(n).copied()));
+            let mut node = Lineage { via: Some(via), ..Lineage::new(col, "view") };
+            match inner {
+                Some((a, b)) => node.inputs.push(self.query(&text[a..b], None, col, nest + 1)),
+                None => node.reason = Some("안쪽 쿼리를 찾지 못했습니다".into()),
+            }
+            return node;
+        }
+        let n = r.name.clone().unwrap_or_default();
+        let (owner, table) = match self.cache.resolve(r.owner.as_deref(), &n) {
+            Some((o, t)) => (Some(o), t),
+            None => (r.owner.clone(), n),
+        };
+        let info = owner.as_ref().and_then(|o| self.cache.cols(&(o.clone(), table.clone()))).and_then(|cs| cs.iter().find(|c| c.name == col).cloned());
+        let source = SourceCol {
+            owner,
+            table,
+            column: col.to_string(),
+            alias: r.alias.clone(),
+            data_type: info.as_ref().map(|c| c.data_type.clone()),
+            comment: info.and_then(|c| c.comment).filter(|c| !c.trim().is_empty()),
+        };
+        Lineage { source: Some(source), ..Lineage::new(col, "column") }
+    }
+
+    /// 식 — 그 안에 나오는 열들과 스칼라 서브쿼리를 입력으로
+    fn expr(&self, body: &[Tok], refs: &[TableRef], ctes_at: &HashMap<String, (usize, usize)>, text: &str, nest: u8) -> Lineage {
+        let mut node = Lineage::new("", "computed");
+        node.expr = Some(Self::clip(Self::text_of(text, body), 500));
+        let base = body.first().map(|t| t.depth).unwrap_or(0);
+        let mut agg = false;
+        let mut analytic = false;
+        let mut seen: Vec<(Option<String>, String)> = Vec::new();
+        let mut i = 0;
+        while i < body.len() {
+            let t = &body[i];
+            // 스칼라 서브쿼리 (SELECT …)
+            if t.t == T::P('(') && is_w(body.get(i + 1), "SELECT") {
+                let d = t.depth;
+                let mut j = i + 1;
+                while j < body.len() && !(body[j].t == T::P(')') && body[j].depth == d) {
+                    j += 1;
+                }
+                if let (Some(a), Some(b)) = (body.get(i + 1), body.get(j - 1)) {
+                    let mut sub = self.query(&text[a.s..b.e], Some(0), "", nest + 1);
+                    sub.kind = if sub.kind == "column" { "subquery".into() } else { sub.kind };
+                    sub.via = Some("스칼라 서브쿼리".into());
+                    if sub.kind == "subquery" {
+                        // 서브쿼리가 열 하나를 그대로 고르면 그 열을 입력으로
+                        let leaf = Lineage { source: sub.source.take(), ..Lineage::new(&sub.name, "column") };
+                        sub.inputs.push(leaf);
+                        sub.expr = Some(Self::clip(Self::text_of(text, &body[i + 1..j]), 300));
+                    }
+                    node.inputs.push(sub);
+                }
+                i = j + 1;
+                continue;
+            }
+            if is_w(Some(t), "OVER") {
+                analytic = true;
+            }
+            let Some(first) = ident(t).filter(|_| matches!(t.t, T::Word(_) | T::QWord(_))) else {
+                i += 1;
+                continue;
+            };
+            // a / a.b / a.b.c 를 모은다
+            let mut parts = vec![first];
+            let mut j = i + 1;
+            while body.get(j).is_some_and(|x| x.t == T::P('.')) && body.get(j + 1).and_then(ident).is_some() {
+                parts.push(ident(&body[j + 1]).unwrap());
+                j += 2;
+            }
+            // 함수 부르기
+            if body.get(j).is_some_and(|x| x.t == T::P('(')) {
+                if parts.len() == 1 && AGGREGATES.contains(&parts[0].as_str()) && t.depth == base {
+                    agg = true;
+                }
+                i = j;
+                continue;
+            }
+            let hit = match parts.as_slice() {
+                [c] => {
+                    let c = c.clone();
+                    let known = refs.iter().any(|r| self.cols_of(r).is_some_and(|cs| cs.contains(&c)));
+                    let lone = refs.len() == 1 && self.cols_of(&refs[0]).is_none();
+                    let word_like = matches!(t.t, T::Word(_)) && (KEYWORDS.contains(&c.as_str()) || PSEUDO.contains(&c.as_str()));
+                    (known || (lone && !word_like)).then_some((None, c))
+                }
+                [q, c] => Self::ref_named(refs, q, None).map(|_| (Some(q.clone()), c.clone())),
+                [o, q, c] => Self::ref_named(refs, q, Some(o)).map(|_| (Some(format!("{o}.{q}")), c.clone())),
+                _ => None,
+            };
+            if let Some((q, c)) = hit {
+                if !seen.contains(&(q.clone(), c.clone())) {
+                    seen.push((q.clone(), c.clone()));
+                    let r = match &q {
+                        Some(q) => match q.split_once('.') {
+                            Some((o, t)) => Self::ref_named(refs, t, Some(o)),
+                            None => Self::ref_named(refs, q, None),
+                        },
+                        None => None,
+                    };
+                    node.inputs.push(self.column(r, &c, refs, ctes_at, text, nest));
+                }
+            }
+            i = j;
+        }
+        node.kind = if analytic { "analytic" } else if agg { "aggregate" } else if node.inputs.is_empty() { "constant" } else { "computed" }.into();
+        node
+    }
 }
 
 /// WITH 이름 → 그 쿼리의 바이트 범위

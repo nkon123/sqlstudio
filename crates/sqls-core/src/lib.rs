@@ -12,6 +12,7 @@
 pub mod complete;
 pub mod config;
 pub mod connlog;
+pub mod copydata;
 pub mod debug;
 pub mod dml;
 pub mod edit;

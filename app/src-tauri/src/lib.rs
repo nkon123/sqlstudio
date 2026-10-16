@@ -6,6 +6,7 @@
 mod ai;
 mod analyze;
 mod complete;
+mod copydata;
 mod db;
 mod debug;
 mod export;
@@ -200,6 +201,8 @@ pub fn run() {
             export::export_xlsx,
             import::import_read,
             import::import_run,
+            copydata::copy_plan,
+            copydata::copy_run,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

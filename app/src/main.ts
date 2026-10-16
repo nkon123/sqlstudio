@@ -29,6 +29,7 @@ import { SchemaCompareView } from "./schemacmp";
 import { showUsage } from "./usage";
 import { showColumnSource } from "./colsource";
 import { showDiff, type Snapshot } from "./resultdiff";
+import { openCopyData } from "./copydata";
 import { openHistory } from "./history";
 import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
@@ -469,6 +470,7 @@ class App {
       b("dfd", "흐름도", "데이터 흐름도를 별도 창으로 — 분석 결과에서 테이블 ← 처리 ← 테이블 흐름 (테이블 상세의 '흐름도'로 열면 그 테이블 기준)", () => this.openDfd()),
       b("analyze", "분석", "PL/SQL 분석 — 패키지·프로시저를 조각내어 (로컬) 모델로 분석하고 호출 관계·테이블 CRUD 를 통합한다", () => this.analyzeActive()),
       b("compare", "비교", "스키마 비교 — 이 탭(원본)과 다른 접속(대상)의 테이블·뷰·시퀀스·소스를 맞대고 맞추는 스크립트를 만든다", () => this.compareActive()),
+      b("copy", "데이터 복사", "다른 접속으로 데이터 복사 — 이 탭(원본)의 테이블 행을 다른 접속 탭(대상)의 테이블로 (추가 · 지우고 넣기 · MERGE). 커밋은 대상 탭에서", () => this.copyDataFrom(this.active)),
       b("space", "용량", "용량 — 테이블별 크기(테이블+인덱스+LOB)와 테이블스페이스별 사용량을 그리드로", () => this.spaceActive()),
       b("monitor", "세션", "세션·락 모니터 — 누가 무엇을 막고 있는지, 세션의 SQL·트랜잭션, 세션 종료(확인 후)", () => this.monitorActive()),
       b("cancel", "중지", "실행 중인 쿼리를 취소", () => this.cancel(), "danger"),
@@ -1593,6 +1595,7 @@ class App {
         { sep: true },
         { label: "흐름도 — 어디서 오나", hint: "출력 기준", run: () => this.openDfd(`${o.owner}.${o.name}`, "up") },
         { label: "흐름도 — 어디로 가나", hint: "입력 기준", run: () => this.openDfd(`${o.owner}.${o.name}`, "down") },
+        { label: "다른 접속으로 데이터 복사…", hint: "QA → DEV 등", run: () => this.copyDataFrom(t, `${o.owner}.${o.name}`) },
         ...(type === "TABLE" ? [{ label: "데이터 가져오기…", hint: "엑셀·CSV", run: () => openImport({ id, owner: o.owner, table: o.name, done: (r) => { t.txnPending = r.txn_pending; this.refresh(); } }) }] : []),
         { sep: true },
         copyName,
@@ -1699,6 +1702,22 @@ class App {
       { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(t.grid.selectionText(true)).catch(() => {}) },
     );
     showMenu(e.clientX, e.clientY, items);
+  }
+
+  /** 접속 간 데이터 복사 — 접속한 탭들이 원본·대상 후보 (같은 접속을 연 탭이 여럿이면 하나만) */
+  private copyDataFrom(t: Tab | null, table?: string) {
+    if (!t?.conn) return toast("먼저 원본에 접속하세요", "error");
+    const seen = new Set<number>();
+    const conns = this.tabs.filter((x) => x.conn && !seen.has(x.conn.id) && seen.add(x.conn.id)).map((x) => ({
+      id: x.conn!.id, label: `${x.conn!.profile} (${x.conn!.user})`, readOnly: x.conn!.read_only, production: !!x.conn!.production,
+    }));
+    openCopyData({
+      conns, srcId: t.conn.id, srcTable: table,
+      done: (dstId, pending) => {
+        for (const x of this.tabs) if (x.conn?.id === dstId) { x.txnPending = pending; x.refreshTitle(); }
+        this.refresh();
+      },
+    });
   }
 
   /** 결과 비교의 기준 (담아 둔 결과) — 탭을 건너 쓴다 (다른 접속의 결과와도) */
@@ -2009,7 +2028,7 @@ class App {
     const busy = !!t?.running;
     this.btn.connect.disabled = busy;
     this.btn.disconnect.disabled = !c || busy;
-    for (const k of ["run", "script", "explain", "debug", "monitor", "compare", "space"]) this.btn[k].disabled = !c || busy;
+    for (const k of ["run", "script", "explain", "debug", "monitor", "compare", "space", "copy"]) this.btn[k].disabled = !c || busy;
     // 분석은 접속 없이도 — 가져온 결과를 본다
     this.btn.analyze.disabled = busy;
     this.btn.cancel.disabled = !busy;

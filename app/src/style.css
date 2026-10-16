@@ -142,6 +142,7 @@ body.row-resizing { cursor: row-resize; user-select: none; }
 .grid-num { width: 56px; color: var(--dim); text-align: right; background: var(--bg); }
 .grid-cell.null { color: var(--dim); font-style: italic; }
 .grid-cell.sel { background: var(--sel); }
+.grid-filler { flex: none; }
 .grid-grip { position: absolute; right: -3px; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 1; }
 .grid-empty { color: var(--dim); padding: 12px; }
 
@@ -600,6 +601,44 @@ button.danger.running-btn { animation: pulse 1.2s infinite; }
 
 .usage-grid { height: min(52vh, 460px); border: 1px solid var(--line); border-radius: 4px; display: flex; }
 .usage-grid > .grid { flex: 1; min-width: 0; }
+
+/* 값의 출처 — 계보 나무 */
+.colsrc { min-width: 760px; }
+.lin-box { max-height: 34vh; overflow: auto; border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; margin-bottom: 8px; }
+.lin-tree, .lin-tree ul { list-style: none; margin: 0; padding: 0; }
+.lin-tree ul { margin-left: 10px; padding-left: 14px; border-left: 1px solid var(--line); }
+.lin-tree li { margin: 4px 0; }
+.lin-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.lin-kind { font-size: 11px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line); color: var(--dim); white-space: nowrap; }
+.lin-kind.lin-column { color: var(--ok); border-color: var(--ok); }
+.lin-kind.lin-computed, .lin-kind.lin-aggregate, .lin-kind.lin-analytic { color: var(--accent); border-color: var(--accent); }
+.lin-kind.lin-unknown { color: var(--warn); border-color: var(--warn); }
+.lin-via { font-size: 12px; color: var(--dim); }
+.lin-via::after { content: " ›"; }
+.lin-src { cursor: pointer; padding: 0 4px; border-radius: 4px; }
+.lin-src:hover, .lin-src.on { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.lin-type { margin-left: 6px; font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.lin-note { margin-left: 6px; font-size: 12px; }
+.lin-note::before { content: "· "; color: var(--dim); }
+.lin-count { margin-left: 8px; font-size: 11px; color: var(--accent); }
+.lin-expr { display: block; margin: 2px 0 0 4px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+.lin-reason { margin: 2px 0 0 4px; font-size: 12px; color: var(--warn); }
+.lin-scope { margin: 2px 0 0 4px; font-family: var(--mono); font-size: 11px; color: var(--dim); white-space: pre-wrap; word-break: break-all; }
+.colsrc-title { margin: 0; font-size: 13px; }
+.colsrc-grid { height: min(30vh, 300px); }
+
+/* 접속 간 데이터 복사 */
+.copy-data { min-width: 820px; }
+.copy-data > .row { margin: 3px 0; flex-wrap: wrap; }
+.copy-lbl { width: 36px; color: var(--dim); }
+.copy-cols-box { max-height: 30vh; overflow: auto; border: 1px solid var(--line); border-radius: 4px; margin: 6px 0; }
+.copy-cols { border-collapse: collapse; width: 100%; font-size: 12px; }
+.copy-cols th, .copy-cols td { padding: 2px 6px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+.copy-cols th { position: sticky; top: 0; background: var(--bg); }
+.copy-cols td:last-child { white-space: normal; }
+.copy-cols tr.copy-unsupported td, .copy-cols tr.copy-src_only td { color: var(--dim); }
+.copy-cols tr.copy-dst_only td:nth-last-child(2) { color: var(--warn); }
+.copy-run { margin-top: 6px; }
 
 /* 결과 비교 */
 .rdiff .grid-row.rdiff-add .grid-cell:not(.grid-num) { background: color-mix(in srgb, var(--ok, #2e9d5b) 16%, transparent); }

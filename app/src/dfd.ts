@@ -7,11 +7,13 @@ import type { Core, EdgeSingular, NodeSingular } from "cytoscape";
 import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { errOf } from "./api";
-import { type Base, type DfdSource, type EdgeKind, LANES, type LaneSpan, buildBase, buildView, busiest, edgesOf, fitLanes, packageOf } from "./dfd-model";
+import { type Base, type DfdSource, type EdgeKind, LANES, LANE_POS, type LaneSpan, type XmlMode, buildBase, buildView, busiest, edgesOf, fileBoxId, fitLanes, hasXml, packageOf } from "./dfd-model";
 import { field, h, modal, toast } from "./ui";
 import { showMenu } from "./ctxmenu";
 import type { DfdReport, Report } from "./dfd-report";
 
+/** XML 쿼리(화면) 상자 색 */
+export const XML_COLOR = "#2e8b57";
 export const COLORS = { read: "#2f6fdd", write: "#e07a1f", call: "#8a93a0", flow: "#7a4fd0", trig: "#c62f3c", use: "#a3abb5" };
 export const KIND_KO: Record<EdgeKind, string> = { read: "읽기", write: "쓰기", call: "호출", trig: "트리거 발동", flow: "커서 흐름", use: "쓰임 (연산 모름)" };
 /** 이보다 크면 처음에는 가장 바쁜 노드를 가운데로 */
@@ -38,6 +40,8 @@ export class DfdView {
     ...[1, 2, 3, 4].map((d) => h("option", { value: String(d), selected: d === 2 }, `${d}단계`)), h("option", { value: "0" }, "끝까지"));
   private unitSel = h("select", { title: "처리 상자 하나가 프로시저 하나인지, 패키지 하나인지" },
     h("option", { value: "proc" }, "처리: 프로시저"), h("option", { value: "pkg" }, "처리: 패키지"));
+  private xmlSel = h("select", { title: "XML 쿼리 파일(화면)을 파일 상자 안에 쿼리 id 들로 볼지, 파일 하나를 상자 하나로 볼지", hidden: true },
+    h("option", { value: "id" }, "XML: 파일·id"), h("option", { value: "file" }, "XML: 파일"));
   private callBox = h("input", { type: "checkbox" });
   private flowBox = h("input", { type: "checkbox" });
   private hiddenBtn = h("button", { class: "small", hidden: true, title: "숨긴 노드를 모두 다시 보인다" });
@@ -60,7 +64,7 @@ export class DfdView {
     const tb = h("div", { class: "dfd-toolbar" },
       this.centerIn, this.names, this.dirSel, this.depthSel,
       h("button", { class: "small", title: "가운데 없이 전체", onclick: () => this.setCenter(null) }, "전체"),
-      h("span", { class: "sep" }), this.unitSel,
+      h("span", { class: "sep" }), this.unitSel, this.xmlSel,
       h("label", { class: "check", title: "처리 → 처리 호출선" }, this.callBox, "처리간 호출"),
       h("label", { class: "check", title: "커서로 읽어 다른 테이블에 넣는 흐름. 읽기·쓰기 선과 겹치는 내용이라 기본으로 숨긴다" }, this.flowBox, "테이블 흐름"),
       this.hiddenBtn,
@@ -78,20 +82,8 @@ export class DfdView {
     });
     this.depthSel.onchange = () => this.draw();
     this.dirSel.onchange = () => this.draw();
-    this.unitSel.onchange = () => {
-      if (!this.src) return;
-      const byPkg = this.unitSel.value === "pkg";
-      this.base = buildBase(this.src, byPkg);
-      this.fillNames();
-      // 가운데가 프로시저였으면 그 패키지로 (되돌릴 때는 패키지 그대로 두면 없으니 전체로)
-      if (this.center && !this.base.nodes.has(this.center)) {
-        const p = packageOf(this.center);
-        this.center = byPkg && this.base.nodes.has(p) ? p : null;
-      }
-      this.centerIn.value = this.center ?? "";
-      this.hidden.clear();
-      this.draw();
-    };
+    this.unitSel.onchange = () => this.rebase();
+    this.xmlSel.onchange = () => this.rebase();
     this.callBox.onchange = () => this.draw();
     this.flowBox.onchange = () => this.draw();
     this.hiddenBtn.onclick = () => { this.hidden.clear(); this.draw(); };
@@ -99,6 +91,26 @@ export class DfdView {
     this.main = [tb, body];
     this.el = h("div", { class: "dfd" }, tb, body);
     this.sideHint();
+  }
+
+  private xmlMode(): XmlMode {
+    return this.xmlSel.value === "file" ? "file" : "id";
+  }
+
+  /** 처리·XML 단위를 바꾼 뒤 바탕 그래프를 다시 */
+  private rebase(center = this.center) {
+    if (!this.src) return;
+    this.base = buildBase(this.src, this.unitSel.value === "pkg", this.xmlMode());
+    this.fillNames();
+    // 가운데가 프로시저·쿼리 id 였으면 그 패키지·파일로 (되돌릴 때는 패키지·파일 그대로 두면 없으니 전체로)
+    if (center && !this.base.nodes.has(center)) {
+      const p = packageOf(center);
+      center = this.base.nodes.has(p) ? p : null;
+    }
+    this.center = center;
+    this.centerIn.value = this.center ?? "";
+    this.hidden.clear();
+    this.draw();
   }
 
   // ── 보고서 모드 ─────────────────────────────
@@ -126,7 +138,7 @@ export class DfdView {
       [{ label: "취소", value: false }, { label: "만들기", value: true, kind: "primary" }]);
     if (!ok || !this.cy) return;
     const { snapshot } = await import("./dfd-report");
-    const basis = { center: this.center, dir: this.dirSel.value, depth: Number(this.depthSel.value), unit: this.unitSel.value as "proc" | "pkg",
+    const basis = { center: this.center, dir: this.dirSel.value, depth: Number(this.depthSel.value), unit: this.unitSel.value as "proc" | "pkg", xml: this.xmlMode(),
       calls: this.callBox.checked, flows: this.flowBox.checked, hidden: [...this.hidden] };
     await this.showReport(snapshot(this.cy, basis, profile, nameIn.value.trim() || "보고서"));
   }
@@ -162,7 +174,9 @@ export class DfdView {
     if (unit) this.unitSel.value = unit;
     // 프로시저에서 넘어오면 프로시저 단위로
     else if (focus) this.unitSel.value = "proc";
-    this.base = buildBase(g, this.unitSel.value === "pkg");
+    this.xmlSel.hidden = !hasXml(g);
+    this.sideHint();
+    this.base = buildBase(g, this.unitSel.value === "pkg", this.xmlMode());
     this.hidden.clear();
     const all = this.fillNames();
     if (focus && this.base.nodes.has(focus)) this.center = focus;
@@ -203,7 +217,7 @@ export class DfdView {
     });
     this.hiddenBtn.hidden = !this.hidden.size;
     this.hiddenBtn.textContent = `숨김 ${this.hidden.size} 해제`;
-    this.info.textContent = `노드 ${view.nodes.filter((n) => !n.copy).length} · 선 ${view.edges.length}`;
+    this.info.textContent = `노드 ${view.nodes.filter((n) => !n.copy && n.type !== "xmlfile").length} · 선 ${view.edges.length}`;
     // 가운데로 고른 것이 흐름에 없으면 전체를 그린다 — 그렇다고 알린다 (다른 프로시저가 나와 헷갈리지 않게)
     if (this.center && !b.nodes.has(this.center)) this.info.textContent += ` · '${this.center}' 가 흐름에 없어 전체를 보여 줍니다`;
     if (!view.nodes.length) {
@@ -216,15 +230,21 @@ export class DfdView {
     const cy = this.ensureCy(L);
     const sizes = new Map<string, [number, number]>();
     for (const n of view.nodes) {
+      if (n.type === "xmlfile") continue;
       let [w, hh] = boxSize(n.label, n.type, n.center);
       // 선이 많이 붙으면 키워서 붙는 점을 벌린다
       const inc = view.edges.filter((e) => e.target === n.id).length, out = view.edges.filter((e) => e.source === n.id).length;
       if (n.type !== "trig") hh = Math.max(hh, Math.max(inc, out) * 14 + 12);
       sizes.set(n.id, [w, hh]);
     }
+    // XML 파일 상자: 안에 쿼리 id 들 (ELK 가 상자와 함께 배치한다)
+    const boxes = view.nodes.filter((n) => n.type === "xmlfile");
+    const leaf = (n: (typeof view.nodes)[number]) => ({ id: n.id, width: sizes.get(n.id)![0], height: sizes.get(n.id)![1],
+      layoutOptions: { "elk.partitioning.partition": String(LANE_POS[n.lane]) } });
     const graph = {
       id: "root",
       layoutOptions: {
+        ...(boxes.length ? { "elk.hierarchyHandling": "INCLUDE_CHILDREN" } : {}),
         "elk.algorithm": "layered", "elk.direction": "RIGHT", "elk.edgeRouting": "ORTHOGONAL",
         "elk.partitioning.activate": "true", "elk.separateConnectedComponents": "false",
         "elk.spacing.nodeNode": "26", "elk.layered.spacing.nodeNodeBetweenLayers": "80",
@@ -235,8 +255,12 @@ export class DfdView {
         "elk.layered.nodePlacement.favorStraightEdges": "true",
         "elk.layered.mergeEdges": "false", "elk.layered.unnecessaryBendpoints": "false",
       },
-      children: view.nodes.map((n) => ({ id: n.id, width: sizes.get(n.id)![0], height: sizes.get(n.id)![1],
-        layoutOptions: { "elk.partitioning.partition": String(n.lane) } })),
+      children: [
+        ...view.nodes.filter((n) => !n.parent && n.type !== "xmlfile").map(leaf),
+        ...boxes.map((b) => ({ id: b.id, layoutOptions: { "elk.partitioning.partition": String(LANE_POS[b.lane]), "elk.padding": `[top=${BOX_TOP},left=10,bottom=10,right=10]`,
+          "elk.spacing.nodeNode": "10" },
+          children: view.nodes.filter((n) => n.parent === b.id).map((n) => ({ id: n.id, width: sizes.get(n.id)![0], height: sizes.get(n.id)![1] })) })),
+      ],
       edges: view.edges.map((e) => ({ id: e.id, sources: [e.source], targets: [e.target] })),
     };
     this.info.textContent += " · 배치 중…";
@@ -250,8 +274,12 @@ export class DfdView {
     if (run !== this.runId) return;
     this.info.textContent = this.info.textContent.replace(" · 배치 중…", "");
 
+    // 상자 안의 것은 상자 기준 좌표 → 전체 좌표로
     const pos = new Map<string, { x: number; y: number; w: number; h: number }>();
-    for (const c of laid.children ?? []) pos.set(c.id, { x: c.x ?? 0, y: c.y ?? 0, w: c.width ?? 0, h: c.height ?? 0 });
+    for (const c of laid.children ?? []) {
+      pos.set(c.id, { x: c.x ?? 0, y: c.y ?? 0, w: c.width ?? 0, h: c.height ?? 0 });
+      for (const k of c.children ?? []) pos.set(k.id, { x: (c.x ?? 0) + (k.x ?? 0), y: (c.y ?? 0) + (k.y ?? 0), w: k.width ?? 0, h: k.height ?? 0 });
+    }
     cy.batch(() => {
       cy.elements().remove();
       // 칸 배경 — 칸마다 노드가 차지한 가로 범위, 세로는 전체
@@ -264,9 +292,10 @@ export class DfdView {
       }
       // 칸끼리 빈틈·겹침 없이 맞붙게
       const lanes = fitLanes(spans);
-      cy.add(lanes.map((l) => ({ group: "nodes" as const, data: { id: `lane:${l.i}`, type: "lane", label: LANES[l.i], alt: l.i % 2 === 1, w: l.x2 - l.x1, h: y2 - y1 },
+      cy.add(lanes.map((l) => ({ group: "nodes" as const, data: { id: `lane:${l.i}`, type: "lane", label: LANES[l.i], alt: l.i === 1, w: l.x2 - l.x1, h: y2 - y1 },
         position: { x: (l.x1 + l.x2) / 2, y: (y1 + y2) / 2 }, selectable: false, grabbable: false })));
-      cy.add(view.nodes.map((n) => {
+      // 상자 먼저 (Cytoscape 는 부모가 있어야 자식을 붙인다). 상자 크기는 자식에 맞춰 Cytoscape 가 정한다 — 여백은 ELK 와 같게
+      cy.add([...boxes, ...view.nodes.filter((n) => n.type !== "xmlfile")].map((n) => {
         const p = pos.get(n.id)!;
         return { group: "nodes" as const, data: { ...n, w: p.w, h: p.h }, position: { x: p.x + p.w / 2, y: p.y + p.h / 2 }, grabbable: false };
       }));
@@ -305,14 +334,21 @@ export class DfdView {
     cy.on("mouseover", "node", (ev) => {
       const n = ev.target as NodeSingular;
       if (n.data("type") === "lane") return;
-      const keep = twinsOf(n).closedNeighborhood().union(cy.nodes("[type='lane']"));
+      const near = n.data("type") === "xmlfile" ? n.union(n.children()).closedNeighborhood() : twinsOf(n).closedNeighborhood();
+      // 상자를 흐리게 하면 안의 것도 흐려진다 — 닿는 것의 상자는 남긴다
+      const keep = near.union(near.parents()).union(cy.nodes("[type='lane']"));
       cy.elements().not(keep).addClass("dim");
     });
     cy.on("mouseout", "node", () => cy.elements().removeClass("dim"));
     cy.on("tap", "node", (ev) => this.showNode(ev.target.data("ref")));
     cy.on("tap", "edge", (ev) => this.showEdge(ev.target as EdgeSingular));
     cy.on("tap", (ev) => { if (ev.target === cy) this.sideHint(); });
-    cy.on("dbltap", "node", (ev) => this.setCenter(ev.target.data("ref")));
+    cy.on("dbltap", "node", (ev) => {
+      const n = ev.target as NodeSingular;
+      // 파일 상자: 파일 단위로 바꿔 그 파일을 가운데로
+      if (n.data("type") === "xmlfile") { this.xmlSel.value = "file"; return this.rebase(n.data("ref")); }
+      this.setCenter(n.data("ref"));
+    });
     new ResizeObserver(() => cy.resize()).observe(this.canvas);
     this.cy = cy;
     return cy;
@@ -321,14 +357,32 @@ export class DfdView {
   private sideHint() {
     this.side.replaceChildren(h("h4", {}, "보는 법"),
       h("div", { class: "hint" }, "왼쪽 입력 테이블 → 가운데 처리 → 오른쪽 출력 테이블. 읽히고 쓰이기도 하는 테이블은 입력 칸에 점선 사본으로 한 번 더 나옵니다."),
+      this.xmlSel.hidden ? "" : h("div", { class: "hint" }, h("span", { class: "dfd-sw", style: `background:${XML_COLOR}` }),
+        " 화면 (XML): XML 쿼리 파일의 SQL — 처리(PL/SQL·Pro*C)와 칸을 나눴습니다. 'XML: 파일·id' 면 파일 상자 안에 쿼리 id 들, 'XML: 파일' 이면 파일 하나가 상자 하나. 파일 상자 더블클릭: 그 파일을 가운데로."),
       h("div", { class: "dfd-legend" },
         ...(Object.entries(COLORS) as [EdgeKind, string][]).map(([k, c]) => h("div", {}, h("span", { class: "dfd-sw", style: `background:${c}` }), KIND_KO[k]))),
       h("div", { class: "hint" }, "점선(·····)은 추정 — 소스에서 직접 확인하지 못하고 사전이나 모델로 채운 선입니다."),
       h("div", { class: "hint" }, "클릭: 상세 · 더블클릭: 가운데로 · 마우스 올리기: 닿는 선만 진하게 · ＋: 화면 밖으로 더 이어짐"));
   }
 
+  /** 파일 상자 — 안의 쿼리 id 들 */
+  private showFile(file: string) {
+    const b = this.base!;
+    const qs = [...b.nodes.values()].filter((n) => n.file === file);
+    const shown = new Set(this.cy?.getElementById(fileBoxId(file)).children().map((n) => n.data("ref") as string) ?? []);
+    this.side.replaceChildren(h("h4", {}, "화면 (XML 파일)"), h("div", { class: "dfd-title" }, file),
+      h("div", { class: "row" },
+        h("button", { class: "small", title: "파일 단위로 바꿔 이 파일을 가운데로", onclick: () => { this.xmlSel.value = "file"; this.rebase(file); } }, "파일로 가운데")),
+      h("h4", {}, `쿼리 ${qs.length}${shown.size < qs.length ? ` (그림에 ${shown.size})` : ""}`),
+      h("ul", { class: "an-ul" }, ...qs.map((q) => h("li", {},
+        h("a", { href: "#", class: "an-link", onclick: (ev: Event) => { ev.preventDefault(); this.showNode(q.id); } }, q.label),
+        shown.has(q.id) ? "" : h("small", { class: "dim" }, " (그림 밖)"),
+        q.summary ? h("small", { class: "dim" }, ` — ${q.summary}`) : ""))));
+  }
+
   private showNode(id: string) {
     const b = this.base!;
+    if (!b.nodes.has(id) && [...b.nodes.values()].some((n) => n.file === id)) return this.showFile(id);
     const n = b.nodes.get(id);
     if (!n) return;
     const { ins, outs } = edgesOf(b, id);
@@ -336,14 +390,16 @@ export class DfdView {
       h("a", { href: "#", class: "an-link", onclick: (ev: Event) => { ev.preventDefault(); this.showNode(other); } }, other),
       h("small", { class: "dim" }, ` ${KIND_KO[e.kind]}${e.label && e.kind !== "read" ? ` ${e.label}` : ""}${e.lines?.length ? ` · ${e.lines.join(", ")}행` : ""}`));
     this.side.replaceChildren(
-      h("h4", {}, { proc: this.unitSel.value === "pkg" ? "처리 (패키지)" : "처리 (프로시저)", trig: "트리거", table: "테이블" }[n.type]),
+      h("h4", {}, { proc: this.unitSel.value === "pkg" ? "처리 (패키지)" : "처리 (프로시저)", trig: "트리거", table: "테이블",
+        xml: n.file ? "화면 (XML 쿼리)" : "화면 (XML 파일)", xmlfile: "화면 (XML 파일)" }[n.type]),
       h("div", { class: "dfd-title" }, id),
+      n.file ? h("div", {}, h("a", { href: "#", class: "an-link", onclick: (ev: Event) => { ev.preventDefault(); this.showFile(n.file!); } }, `파일 ${n.file}`)) : "",
       n.summary ? h("p", {}, n.summary) : "",
       n.commits ? h("div", { class: "warn" }, "COMMIT/ROLLBACK 함") : "",
       h("div", { class: "row" },
         h("button", { class: "small", onclick: () => this.setCenter(id) }, "가운데로"),
         h("button", { class: "small", onclick: () => { this.hidden.add(id); this.draw(); } }, "숨기기"),
-        this.onOpenNode && n.type !== "table" && n.id.split(".").length >= 2 && this.unitSel.value === "proc" ? h("button", { class: "small", title: "호출 관계 탭에서 본다", onclick: () => this.onOpenNode?.(id) }, "상세") : ""),
+        this.onOpenNode && n.type !== "table" && n.id.split(".").length >= 2 && (n.type === "xml" ? !!n.file : this.unitSel.value === "proc") ? h("button", { class: "small", title: "호출 관계 탭에서 본다", onclick: () => this.onOpenNode?.(id) }, "상세") : ""),
       h("h4", {}, `들어오는 것 ${ins.length}`), h("ul", { class: "an-ul" }, ...ins.map((e) => row(e, e.s))),
       h("h4", {}, `나가는 것 ${outs.length}`), h("ul", { class: "an-ul" }, ...outs.map((e) => row(e, e.t))));
   }
@@ -385,6 +441,11 @@ export function dfdStyle(): unknown[] {
       "border-width": 2, "z-index-compare": "manual", "z-index": 10 } },
     { selector: "node[type='proc']", style: { "border-color": COLORS.read, "background-color": "#e8f0fd" } },
     { selector: "node[type='table']", style: { shape: "rectangle", "border-color": COLORS.write, "border-style": "double", "border-width": 3, "background-color": "#fff4e6" } },
+    { selector: "node[type='xml']", style: { "border-color": XML_COLOR, "background-color": "#e7f5ec" } },
+    { selector: "node[type='xmlfile']", style: { shape: "round-rectangle", "border-color": XML_COLOR, "border-width": 2, "border-style": "solid",
+      "background-color": XML_COLOR, "background-opacity": 0.06, label: "data(label)", "text-valign": "top", "text-halign": "center",
+      "text-margin-y": BOX_TOP - 4, "font-weight": "bold", "font-size": 11, color: XML_COLOR, padding: "10px",
+      "padding-top": `${BOX_TOP}px` as never, "z-index": 6 } },
     { selector: "node[type='trig']", style: { shape: "diamond", "border-color": COLORS.trig, "background-color": "#fdeaec" } },
     { selector: "node[?copy]", style: { "border-style": "dashed", "border-width": 2 } },
     { selector: "node[?center]", style: { "border-width": 4, "font-weight": "bold", "font-size": 13 } },
@@ -407,6 +468,9 @@ export function dfdStyle(): unknown[] {
     { selector: ".dim", style: { opacity: 0.12 } },
   ];
 }
+
+/** 파일 상자 위쪽 여백 (파일 이름 자리) */
+const BOX_TOP = 24;
 
 const measure = document.createElement("canvas").getContext("2d")!;
 export function boxSize(label: string, type: string, center: boolean): [number, number] {

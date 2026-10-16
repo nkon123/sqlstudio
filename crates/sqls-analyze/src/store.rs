@@ -184,7 +184,8 @@ impl Store {
     pub fn units(&self) -> Vec<UnitResult> {
         let mut out = Vec::new();
         if let Ok(rd) = fs::read_dir(self.root.join("units")) {
-            for e in rd.flatten() {
+            // 점으로 시작하는 것은 바꿔 끼우는 중인 사본 (bundle::merge_dir)
+            for e in rd.flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.')) {
                 if let Some(u) = read_json::<UnitResult>(&e.path().join("unit.json")) {
                     out.push(u);
                 }

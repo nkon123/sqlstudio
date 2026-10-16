@@ -6,18 +6,24 @@
 //    - 읽히고 쓰이기도 하는 테이블은 입력 칸에 "읽기용 사본"을 하나 더 둔다 → 되돌아가는 선이 없다
 //    - 같은 두 노드 사이 같은 종류 선은 하나로 합친다 (라벨 C,U)
 //    - 처리간 호출·테이블 흐름선은 읽기·쓰기 선과 같은 내용이라 기본으로 숨긴다
+//    - XML 쿼리 파일(화면이 부르는 SQL)은 처리(PL/SQL·Pro*C)와 따로 '화면 (XML)' 칸에 — 파일 상자 안에 쿼리 id 들,
+//      또는 파일 하나를 상자 하나로. 칸 순서: 입력 테이블 | 화면 (XML) | 처리 | 출력 테이블 (화면 → 프로시저 호출도 왼쪽 → 오른쪽)
 
-export interface DfdSourceNode { id: string; kind: string; summary?: string | null; signature?: string; trigger_on?: string | null; trigger_events?: string | null; commits?: boolean }
+export interface DfdSourceNode { id: string; unit?: string; kind: string; summary?: string | null; signature?: string; trigger_on?: string | null; trigger_events?: string | null; commits?: boolean }
 export interface DfdSourceEdge { from: string; to: string; resolved: boolean; lines: number[] }
 /** conf: 노드 → ok (사전·소스) / src (소스만) / dict (사전만, 연산 모름) / llm (모델 추정) */
 export interface DfdSourceTable { table: string; by: Record<string, string>; conf?: Record<string, string>; fed_from?: string[]; feeds_into?: string[] }
 export interface DfdSource { nodes: DfdSourceNode[]; edges: DfdSourceEdge[]; tables: DfdSourceTable[] }
 
-export type NodeType = "proc" | "trig" | "table";
+/** xml: XML 쿼리 파일의 쿼리 id (파일 단위면 파일) · xmlfile: 쿼리 id 들을 담는 파일 상자 (보기에만) */
+export type NodeType = "proc" | "trig" | "table" | "xml" | "xmlfile";
+/** XML 을 파일·id 로 (파일 상자 안에 id 들) 볼지, 파일 하나를 상자 하나로 볼지 */
+export type XmlMode = "id" | "file";
 /** use: 사전에는 쓴다고 나오는데 연산을 모름 — 입력 쪽으로 그린다 */
 export type EdgeKind = "read" | "write" | "call" | "trig" | "flow" | "use";
 
-export interface BaseNode { id: string; type: NodeType; label: string; summary?: string; commits?: boolean }
+/** file: XML 쿼리 id 의 파일 ("OWNER.FILE") */
+export interface BaseNode { id: string; type: NodeType; label: string; summary?: string; commits?: boolean; file?: string }
 /** guess: 소스에서 직접 확인하지 못한 것 (사전·모델 추정) */
 export interface BaseEdge { s: string; t: string; kind: EdgeKind; label: string; lines?: number[]; guess?: boolean }
 export interface Base { nodes: Map<string, BaseNode>; edges: BaseEdge[]; owner: string }
@@ -38,11 +44,17 @@ export interface ViewOptions {
    */
   direction?: "both" | "up" | "down";
 }
-export interface ViewNode { id: string; ref: string; type: NodeType; label: string; lane: number; copy: boolean; center: boolean; more: boolean }
+/** parent: 담는 파일 상자의 id (XML 쿼리 id) */
+export interface ViewNode { id: string; ref: string; type: NodeType; label: string; lane: number; copy: boolean; center: boolean; more: boolean; parent?: string }
 export interface ViewEdge { id: string; source: string; target: string; kind: EdgeKind; label: string; guess?: boolean }
 export interface View { nodes: ViewNode[]; edges: ViewEdge[] }
 
-export const LANES = ["입력 테이블", "처리", "출력 테이블"];
+/** 칸 이름 — 번호는 저장한 보고서에 남으므로 바꾸지 않는다. 화면의 왼쪽→오른쪽 순서는 LANE_POS */
+export const LANES = ["입력 테이블", "처리", "출력 테이블", "화면 (XML)"];
+export const LANE_POS = [0, 2, 3, 1];
+export const XML_LANE = 3;
+/** 파일 상자의 보기 id */
+export const fileBoxId = (file: string) => `xf:${file}`;
 
 /** 가장 많이 나오는 스키마 — 라벨에서 뗀다 */
 function mainOwner(ids: string[]): string {
@@ -64,17 +76,27 @@ export function packageOf(id: string): string {
   return p.length >= 3 ? p.slice(0, 2).join(".") : id;
 }
 
-/** byPackage: 처리를 패키지 하나로 묶는다 (프로시저가 많을 때 큰 그림) */
-export function buildBase(g: DfdSource, byPackage = false): Base {
+/** 분석 결과에 XML 쿼리 파일이 있는지 */
+export const hasXml = (g: DfdSource) => g.nodes.some((n) => n.unit?.endsWith(".XML_BODY"));
+
+/** byPackage: 처리를 패키지 하나로 묶는다 (프로시저가 많을 때 큰 그림). xml: XML 쿼리를 id 하나씩(파일 상자 안에) / 파일 하나로 */
+export function buildBase(g: DfdSource, byPackage = false, xml: XmlMode = "id"): Base {
   const owner = mainOwner([...g.nodes.map((n) => n.id), ...g.tables.map((t) => t.table)]);
   const trig = new Set(g.nodes.filter((n) => n.kind === "TRIGGER").map((n) => n.id));
-  const key = (id: string) => (byPackage && !trig.has(id) ? packageOf(id) : id);
+  // XML 파일 ("OWNER.FILE") — 노드 목록에 없는 것((전역) 등)도 파일로 알아본다
+  const xmlFiles = new Set(g.nodes.filter((n) => n.unit?.endsWith(".XML_BODY")).map((n) => packageOf(n.id)));
+  const isXml = (id: string) => xmlFiles.has(packageOf(id)) && id.split(".").length >= 3;
+  const key = (id: string) => (isXml(id) ? (xml === "file" ? packageOf(id) : id) : byPackage && !trig.has(id) ? packageOf(id) : id);
   const nodes = new Map<string, BaseNode>();
   const add = (raw: string, type: NodeType, extra: Partial<BaseNode> = {}) => {
+    const x = type !== "table" && isXml(raw);
+    if (x) type = "xml";
     const id = type === "table" ? raw : key(raw);
     const grouped = id !== raw;
     const cur = nodes.get(id);
-    if (!cur) nodes.set(id, { id, type, label: labelOf(id, owner), ...(grouped ? { commits: extra.commits } : extra) });
+    // 파일 상자 안의 쿼리 id 는 id 만 (파일 이름은 상자에)
+    const label = x && xml === "id" ? id.split(".").slice(2).join(".") : labelOf(id, owner);
+    if (!cur) nodes.set(id, { id, type, label, ...(x && xml === "id" ? { file: packageOf(id) } : {}), ...(grouped ? { commits: extra.commits } : extra) });
     else if (grouped && extra.commits) cur.commits = true;
     return id;
   };
@@ -212,10 +234,17 @@ export function buildView(b: Base, o: ViewOptions): View {
     out.push(v);
   }
   const nodes: ViewNode[] = [];
+  const boxes = new Map<string, ViewNode>();
   const mk = (id: string, ref: string, copy: boolean) => {
     const n = b.nodes.get(ref)!;
-    const lane = n.type === "table" ? (copy || !written.has(ref) ? 0 : 2) : 1;
-    nodes.push({ id, ref, type: n.type, label: n.label, lane, copy, center: ref === o.center, more: more.has(ref) });
+    const lane = n.type === "table" ? (copy || !written.has(ref) ? 0 : 2) : n.type === "xml" ? XML_LANE : 1;
+    const parent = n.file ? fileBoxId(n.file) : undefined;
+    if (n.file && !boxes.has(n.file)) {
+      const box: ViewNode = { id: parent!, ref: n.file, type: "xmlfile", label: labelOf(n.file, b.owner), lane: XML_LANE, copy: false, center: false, more: false };
+      boxes.set(n.file, box);
+      nodes.push(box);
+    }
+    nodes.push({ id, ref, type: n.type, label: n.label, lane, copy, center: ref === o.center, more: more.has(ref), ...(parent ? { parent } : {}) });
   };
   for (const id of keep.keys()) {
     if (!b.nodes.has(id)) continue;
@@ -235,7 +264,8 @@ export interface LaneSpan { i: number; x1: number; x2: number }
 /** 칸 경계 — 칸마다 노드가 차지한 가로 범위를 받아, 빈틈·겹침 없이 맞붙은 칸으로.
  *  이웃 칸 사이 경계는 두 칸 노드 사이 한가운데, 바깥은 pad. 노드가 칸을 넘어가 있어도 칸은 최소 폭을 지킨다. */
 export function fitLanes(spans: LaneSpan[], pad = 24, minW = 60): LaneSpan[] {
-  const s = [...spans].sort((a, b) => a.i - b.i);
+  const pos = (i: number) => LANE_POS[i] ?? i;
+  const s = [...spans].sort((a, b) => pos(a.i) - pos(b.i));
   if (!s.length) return [];
   const b: number[] = [s[0].x1 - pad];
   for (let k = 1; k < s.length; k++) b.push((s[k - 1].x2 + s[k].x1) / 2);

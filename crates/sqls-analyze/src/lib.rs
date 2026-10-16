@@ -44,7 +44,7 @@ pub fn safe_set_name(name: &str) -> String {
     if s.is_empty() { "_".into() } else { s }
 }
 
-fn has_results(dir: &std::path::Path) -> bool {
+pub(crate) fn has_results(dir: &std::path::Path) -> bool {
     dir.join("integrated").is_dir() || std::fs::read_dir(dir.join("units")).map(|mut d| d.next().is_some()).unwrap_or(false)
 }
 

@@ -112,6 +112,14 @@ interface SetInfo {
   name: string; dir: string; units: number; generated_at?: number | null;
   imported?: { profile: string; db_user?: string | null; server?: string | null; exported_at: number; exported_by: string; app_version: string; units: number; imported_at?: number | null } | null;
 }
+interface ImportTarget { name: string; kind: "connection" | "imported"; units: number; same_db: boolean; already?: number | null }
+interface ImportPeek { manifest: Manifest; targets: ImportTarget[]; suggested?: string | null }
+interface MergeReport { added: number; updated: number; kept: number; reports: number; merged: boolean }
+interface ImportDone extends MergeReport { name: string; connection: boolean }
+const mergeText = (r: MergeReport) => {
+  const parts = [r.added && `새 단위 ${r.added}`, r.updated && `바꾼 단위 ${r.updated}`, r.kept && `그대로 ${r.kept} (이쪽이 같거나 더 나중)`, r.reports && `흐름도 보고서 ${r.reports}`].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "바뀐 것 없음";
+};
 interface Manifest { profile: string; db_user?: string | null; server?: string | null; exported_at: number; exported_by: string; app_version: string; units: number; files: number }
 
 /** 흐름도 가운데: 무엇을, 처리 상자를 프로시저 단위로 볼지 패키지 단위로 볼지 */
@@ -198,7 +206,7 @@ export class AnalysisView {
     this.setSel.onchange = () => this.useSet(this.setSel.value || null);
     for (const i of [this.ownerIn, this.nameIn]) i.addEventListener("keydown", (e) => { if (e.key === "Enter") this.load(); });
     const toolbar = h("div", { class: "dbg-toolbar an-toolbar" },
-      h("label", { class: "check", title: "볼 분석 결과" }, "결과", this.setSel), this.removeBtn,
+      h("label", { class: "check", title: "볼 분석 결과" }, "결과", this.setSel), this.mergeBtn, this.removeBtn,
       h("button", { title: "보고 있는 분석 결과를 파일 하나(.sqla)로 — 분석할 수 없는 곳에서 '가져오기' 로 본다", onclick: () => this.exportSet() }, "내보내기"),
       h("button", { title: "다른 곳에서 내보낸 분석 결과(.sqla)를 가져와 접속 없이 본다", onclick: () => this.importSet() }, "가져오기"),
       h("span", { class: "sep" }),
@@ -290,8 +298,10 @@ export class AnalysisView {
 
   private removeBtn = h("button", { class: "small", title: "가져온 결과를 이 PC 에서 지운다", hidden: true, onclick: () => this.removeSet() }, "지우기");
 
+  private mergeBtn = h("button", { class: "small", title: "따로 둔 이 결과를 접속의 결과에 합친다 — 접속한 DB 목록에 분석 표시가 나오게", hidden: true, onclick: () => this.mergeSet() }, "접속에 합치기");
+
   private updateRemoveBtn() {
-    this.removeBtn.hidden = !this.sets.find((x) => x.name === this.set)?.imported;
+    this.removeBtn.hidden = this.mergeBtn.hidden = !this.sets.find((x) => x.name === this.set)?.imported;
   }
 
   private async useSet(name: string | null) {
@@ -340,34 +350,89 @@ export class AnalysisView {
   private async importSet() {
     const path = await openDialog({ multiple: false, filters: [{ name: "SQLStudio 분석 결과", extensions: ["sqla"] }] });
     if (!path || Array.isArray(path)) return;
-    let m: Manifest;
+    let p: ImportPeek;
     try {
-      m = await invoke<Manifest>("analysis_peek", { path });
+      p = await invoke<ImportPeek>("analysis_peek", { path });
     } catch (e) {
       return toast(errOf(e).message, "error");
     }
+    const m = p.manifest;
+    const NEW = "*new*";
+    const conns = p.targets.filter((t) => t.kind === "connection");
+    const sets = p.targets.filter((t) => t.kind === "imported");
+    const label = (t: ImportTarget) => `${t.name}${t.same_db ? " ✓ 같은 DB" : ""}${t.units ? ` — 단위 ${t.units}개에 합침` : ""}`;
+    const sel = h("select", { style: "width:100%" },
+      ...(conns.length ? [h("optgroup", { label: "접속의 결과로 (목록의 분석 표시·값의 출처에 쓰인다)" }, ...conns.map((t) => h("option", { value: t.name }, label(t))))] : []),
+      ...(sets.length ? [h("optgroup", { label: "따로 둔 결과 (접속 없이 본다)" }, ...sets.map((t) => h("option", { value: t.name }, label(t))))] : []),
+      h("option", { value: NEW }, "새 이름으로 따로 두기…"));
+    sel.value = p.suggested ?? NEW;
     const nameIn = h("input", { value: `${m.profile} (가져옴)`, style: "width:100%" });
+    const nameField = field("이 PC 에서 부를 이름", nameIn, "같은 이름이 있으면 그 결과에 합칩니다");
+    const note = h("div", { class: "hint" });
+    const sync = () => {
+      const t = p.targets.find((x) => x.name === sel.value);
+      nameField.hidden = !!t;
+      const lines: string[] = [];
+      if (t?.already) lines.push(`이 파일은 ${when(t.already)} 에 이미 '${t.name}' 로 가져왔습니다 — 다시 가져와도 바뀌는 것이 없습니다.`);
+      if (t?.units) lines.push("있는 결과에 합칩니다: 단위마다 더 나중에 분석한 것을 남깁니다 (이쪽에서 더 나중에 분석한 것은 그대로).");
+      if (t?.kind === "connection" && !t.same_db) lines.push(`⚠ 이 파일은 ${m.db_user ?? m.profile} 에서 분석한 것입니다. 이 접속의 소스와 다르면 분석 표시가 실제와 맞지 않을 수 있습니다.`);
+      if (!t) lines.push("접속 없이만 볼 수 있습니다. 접속한 DB 목록의 분석 표시에 쓰려면 위에서 접속을 고르세요.");
+      note.replaceChildren(...lines.flatMap((l, i) => (i ? [h("br"), l] : [l])));
+    };
+    sel.onchange = sync;
+    sync();
     const info = h("div", { class: "hint" },
       `${m.profile}${m.db_user ? ` · ${m.db_user}` : ""}${m.server ? ` · ${m.server}` : ""}`, h("br"),
       `단위 ${m.units}개 · ${when(m.exported_at)} 내보냄${m.exported_by ? ` (${m.exported_by})` : ""} · SQLStudio ${m.app_version}`);
-    const go = await modal("분석 결과 가져오기", h("div", {}, info, field("이 PC 에서 부를 이름", nameIn, "같은 이름이 있으면 바꿔 끼울지 묻습니다")),
+    const go = await modal("분석 결과 가져오기", h("div", {}, info, field("가져올 곳", sel), nameField, note),
       [{ label: "취소", value: false }, { label: "가져오기", value: true, kind: "primary" }]);
     if (!go) return;
-    const run = async (overwrite: boolean): Promise<string | null> => {
-      try {
-        return await invoke<string>("analysis_import", { path, name: nameIn.value.trim() || m.profile, overwrite });
-      } catch (e) {
-        const err = errOf(e);
-        if (err.kind === "exists" && !overwrite && await confirmBox("같은 이름이 있습니다", `${err.message}. 새 파일로 바꿔 끼울까요?`, "바꿔 끼우기")) return run(true);
-        if (err.kind !== "exists") toast(err.message, "error");
-        return null;
-      }
-    };
-    const name = await run(false);
-    if (!name) return;
-    toast(`가져옴: ${name} — 접속 없이 볼 수 있습니다`, "ok");
+    const target = sel.value === NEW ? (nameIn.value.trim() || m.profile) : sel.value;
+    let r: ImportDone;
+    this.statusEl.textContent = "가져오는 중…";
+    try {
+      r = await invoke<ImportDone>("analysis_import", { path, target });
+    } catch (e) {
+      this.statusEl.textContent = "";
+      return toast(errOf(e).message, "error");
+    }
+    this.statusEl.textContent = "";
+    toast(`가져옴 → ${r.name}: ${mergeText(r)}`, "ok", 7000);
     await this.refreshSets();
-    await this.useSet(name);
+    // 지금 접속한 DB 의 결과로 들어갔으면 접속 목록으로 (분석 표시가 보이게)
+    const live = await this.liveName();
+    await this.useSet(r.connection && live === r.name ? null : r.name);
+  }
+
+  /** 따로 둔 결과를 접속의 결과에 합친다 — 전에 다른 이름으로 가져와 접속 목록에 분석 표시가 안 보이던 것 */
+  private async mergeSet() {
+    const x = this.sets.find((s) => s.name === this.set);
+    if (!x?.imported) return;
+    let profiles: string[] = [];
+    try {
+      profiles = (await api.listProfiles()).map((p) => p.name);
+    } catch { /* 아래에서 알린다 */ }
+    if (!profiles.length) return toast("접속 프로필이 없습니다", "error");
+    const live = await this.liveName();
+    const sel = h("select", { style: "width:100%" }, ...profiles.map((n) => h("option", { value: n }, n)));
+    sel.value = profiles.includes(x.imported.profile) ? x.imported.profile : live && profiles.includes(live) ? live : profiles[0];
+    const del = h("input", { type: "checkbox", checked: true });
+    const go = await modal("접속의 결과에 합치기", h("div", {},
+      h("div", { class: "hint" }, `'${x.name}' (단위 ${x.units}개, ${x.imported.profile} 에서 내보냄) 을 접속의 결과에 합칩니다.`, h("br"),
+        "단위마다 더 나중에 분석한 것을 남깁니다. 합치면 그 접속의 목록에 분석 표시가 나오고, 값의 출처에도 쓰입니다."),
+      field("합칠 접속", sel),
+      h("label", { class: "check" }, del, "합친 뒤 따로 둔 이 결과는 지우기")),
+      [{ label: "취소", value: false }, { label: "합치기", value: true, kind: "primary" }]);
+    if (!go) return;
+    try {
+      const r = await invoke<MergeReport>("analysis_merge_set", { set: x.name, into: sel.value });
+      if (del.checked) await invoke("analysis_remove_set", { name: x.name });
+      toast(`'${sel.value}' 에 합침: ${mergeText(r)}`, "ok", 7000);
+    } catch (e) {
+      return toast(errOf(e).message, "error");
+    }
+    await this.refreshSets();
+    await this.useSet(live === sel.value ? null : sel.value);
   }
 
   private async removeSet() {

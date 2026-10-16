@@ -150,6 +150,7 @@ pub fn run() {
             analyze::analysis_export,
             analyze::analysis_peek,
             analyze::analysis_import,
+            analyze::analysis_merge_set,
             analyze::analysis_remove_set,
             schemacmp::schema_compare_start,
             schemacmp::schema_compare_cancel,

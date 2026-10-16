@@ -10,14 +10,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { errOf } from "./api";
 import { COLORS, KIND_KO, type Libs, boxSize, dfdStyle, loadLibs } from "./dfd";
-import { type DfdSource, type EdgeKind, LANES, type LaneSpan, buildBase, buildView, fitLanes } from "./dfd-model";
+import { type DfdSource, type EdgeKind, LANES, LANE_POS, type LaneSpan, type XmlMode, buildBase, buildView, fitLanes } from "./dfd-model";
 import { confirmBox, h, toast } from "./ui";
 
 export interface ReportBasis {
   center: string | null; dir: string; depth: number; unit: "proc" | "pkg"; calls: boolean; flows: boolean; hidden: string[];
+  /** XML 쿼리를 파일·id 로 / 파일 하나로 (없으면 파일·id — 이 값이 생기기 전 보고서) */
+  xml?: XmlMode;
 }
 export interface ReportNode {
-  id: string; ref: string; type: "proc" | "trig" | "table" | "note"; label: string; x: number; y: number; w: number; h: number; lane: number;
+  id: string; ref: string; type: "proc" | "trig" | "table" | "xml" | "note"; label: string; x: number; y: number; w: number; h: number; lane: number;
   /** 표시 이름 (비우면 label) — 메모면 내용 */
   text?: string; copy?: boolean; center?: boolean; color?: string; hidden?: boolean;
   /** 메모가 붙은 노드·선 */
@@ -56,10 +58,14 @@ const edgeKey = (s: string, t: string, k: string) => `${s}|${t}|${k}`;
 
 /** 지금 흐름도(그려진 것)를 보고서로 떼어 낸다 */
 export function snapshot(cy: Core, basis: ReportBasis, profile: string, name: string): Report {
-  const nodes: ReportNode[] = cy.nodes().filter((n) => isItem(n as NodeSingular)).map((x) => {
+  // XML 파일 상자는 떼고 안의 쿼리 id 에 파일 이름을 붙인다 (보고서는 상자 없이 손본다)
+  const nodes: ReportNode[] = cy.nodes().filter((n) => isItem(n as NodeSingular) && n.data("type") !== "xmlfile").map((x) => {
     const n = x as NodeSingular;
     const p = n.position();
-    return { id: n.id(), ref: n.data("ref"), type: n.data("type"), label: n.data("label"), x: p.x, y: p.y, w: n.data("w"), h: n.data("h"),
+    const box = n.parent();
+    const label = box.length ? `${box.data("label")}\n${n.data("label")}` : n.data("label");
+    const [bw, bh] = box.length ? boxSize(label, "xml", !!n.data("center")) : [n.data("w"), n.data("h")];
+    return { id: n.id(), ref: n.data("ref"), type: n.data("type"), label, x: p.x, y: p.y, w: Math.max(bw, n.data("w")), h: Math.max(bh, n.data("h")),
       lane: n.data("lane"), copy: n.data("copy") || undefined, center: n.data("center") || undefined };
   });
   const edges: ReportEdge[] = cy.edges().map((e) => ({ id: e.id(), source: e.data("source"), target: e.data("target"), kind: e.data("kind"),
@@ -355,7 +361,7 @@ export class DfdReport {
       const bb = ns.boundingBox({});
       const y1 = bb.y1 - 46, y2 = bb.y2 + 16, cyy = (y1 + y2) / 2;
       for (const l of L) {
-        cy.add({ group: "nodes", data: { id: `lane:${l.i}`, type: "lane", label: LANES[l.i], alt: l.i % 2 === 1, w: l.x2 - l.x1, h: y2 - y1 },
+        cy.add({ group: "nodes", data: { id: `lane:${l.i}`, type: "lane", label: LANES[l.i], alt: l.i === 1, w: l.x2 - l.x1, h: y2 - y1 },
           position: { x: (l.x1 + l.x2) / 2, y: cyy }, selectable: false, grabbable: false });
       }
       for (let k = 0; k <= L.length; k++) {
@@ -481,7 +487,7 @@ export class DfdReport {
       layoutOptions: { "elk.algorithm": "layered", "elk.direction": "RIGHT", "elk.partitioning.activate": "true", "elk.separateConnectedComponents": "false",
         "elk.spacing.nodeNode": "26", "elk.layered.spacing.nodeNodeBetweenLayers": "80", "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
         "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF", "elk.layered.nodePlacement.favorStraightEdges": "true" },
-      children: ns.map((n) => ({ id: n.id(), width: n.width(), height: n.height(), layoutOptions: { "elk.partitioning.partition": String(n.data("lane") ?? 1) } })),
+      children: ns.map((n) => ({ id: n.id(), width: n.width(), height: n.height(), layoutOptions: { "elk.partitioning.partition": String(LANE_POS[n.data("lane") ?? 1] ?? 2) } })),
       edges: es.map((x) => { const e = x as EdgeSingular; return { id: e.id(), sources: [e.source().id()], targets: [e.target().id()] }; }),
     };
     try {
@@ -737,7 +743,7 @@ export class DfdReport {
   private compare(): { added: ReportEdge[]; addedNodes: ReportNode[]; gone: string[] } | null {
     const r = this.r, src = this.opts.src();
     if (!r || !src) return null;
-    const base = buildBase(src, r.basis.unit === "pkg");
+    const base = buildBase(src, r.basis.unit === "pkg", r.basis.xml ?? "id");
     if (r.basis.center && !base.nodes.has(r.basis.center)) return null;
     const view = buildView(base, { center: r.basis.center, depth: r.basis.depth, showCalls: r.basis.calls, showFlows: r.basis.flows,
       hidden: new Set(r.basis.hidden), direction: r.basis.center ? (r.basis.dir as "up" | "down" | "both") : "both" });
@@ -746,9 +752,11 @@ export class DfdReport {
     const nodeIds = new Set(r.nodes.map((n) => n.id));
     const added: ReportEdge[] = view.edges.filter((e) => !mine.has(edgeKey(e.source, e.target, e.kind)))
       .map((e) => ({ id: `n:${e.id}:${Date.now().toString(36)}`, source: e.source, target: e.target, kind: e.kind, label: e.label, guess: e.guess }));
-    const addedNodes: ReportNode[] = view.nodes.filter((n) => !nodeIds.has(n.id)).map((n) => {
-      const [w, hh] = boxSize(n.label, n.type, n.center);
-      return { id: n.id, ref: n.ref, type: n.type, label: n.label, x: 0, y: 0, w, h: hh, lane: n.lane, copy: n.copy || undefined };
+    const boxLabel = new Map(view.nodes.filter((n) => n.type === "xmlfile").map((n) => [n.id, n.label]));
+    const addedNodes: ReportNode[] = view.nodes.filter((n) => !nodeIds.has(n.id) && n.type !== "xmlfile").map((n) => {
+      const label = n.parent ? `${boxLabel.get(n.parent)}\n${n.label}` : n.label;
+      const [w, hh] = boxSize(label, n.type, n.center);
+      return { id: n.id, ref: n.ref, type: n.type as ReportNode["type"], label, x: 0, y: 0, w, h: hh, lane: n.lane, copy: n.copy || undefined };
     });
     const gone = r.edges.filter((e) => e.kind !== "manual" && !now.has(edgeKey(e.source, e.target, e.kind))).map((e) => e.id);
     return { added, addedNodes, gone };

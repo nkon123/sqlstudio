@@ -192,6 +192,186 @@ pub fn import(file: &Path, dest: &Path, overwrite: bool) -> io::Result<Manifest>
     Ok(m)
 }
 
+// ── 합치기: 같은 곳에 여러 번 가져와도 단위마다 하나만 남는다 ─────────────
+
+/// 가져온 기록 (결과 폴더의 imports.json — 내보내기에는 들어가지 않는다)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ImportLog {
+    pub profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_user: Option<String>,
+    pub exported_at: u64,
+    #[serde(default)]
+    pub exported_by: String,
+    pub imported_at: u64,
+    #[serde(default)]
+    pub from: String,
+    pub added: usize,
+    pub updated: usize,
+    pub kept: usize,
+}
+
+const IMPORT_LOG: &str = "imports.json";
+
+pub fn import_log(dir: &Path) -> Vec<ImportLog> {
+    fs::read_to_string(dir.join(IMPORT_LOG)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+fn push_log(dir: &Path, l: ImportLog) -> io::Result<()> {
+    let mut v = import_log(dir);
+    v.push(l);
+    let keep = v.len().saturating_sub(100);
+    fs::write(dir.join(IMPORT_LOG), serde_json::to_vec_pretty(&v[keep..]).map_err(io::Error::other)?)
+}
+
+/// 합친 결과
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MergeReport {
+    /// 없던 단위
+    pub added: usize,
+    /// 있던 것보다 나중에 분석한 것이라 바꾼 단위
+    pub updated: usize,
+    /// 있던 것이 같거나 더 나중 것이라 그대로 둔 단위
+    pub kept: usize,
+    /// 흐름도 보고서 (없던 것·나중에 고친 것)
+    pub reports: usize,
+    /// 있던 결과에 합쳤으면 true, 빈 곳에 새로 풀었으면 false
+    pub merged: bool,
+}
+
+fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+    fs::create_dir_all(to)?;
+    for e in fs::read_dir(from)? {
+        let p = e?.path();
+        let t = to.join(p.file_name().unwrap_or_default());
+        if p.is_dir() {
+            copy_tree(&p, &t)?;
+        } else if p.extension().is_none_or(|x| x != "tmp") {
+            fs::copy(&p, &t)?;
+        }
+    }
+    Ok(())
+}
+
+/// 폴더 `to` 를 `from` 의 사본으로 바꿔 끼운다 (다 복사한 뒤에 바꾸므로 도중에 실패해도 있던 것이 남는다)
+fn replace_tree(from: &Path, to: &Path) -> io::Result<()> {
+    let parent = to.parent().ok_or_else(|| err("폴더가 잘못되었습니다"))?;
+    let leaf = to.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let new = parent.join(format!(".new-{leaf}"));
+    let _ = fs::remove_dir_all(&new);
+    if let Err(e) = copy_tree(from, &new) {
+        let _ = fs::remove_dir_all(&new);
+        return Err(e);
+    }
+    if to.exists() {
+        let old = parent.join(format!(".old-{leaf}"));
+        let _ = fs::remove_dir_all(&old);
+        fs::rename(to, &old)?;
+        if let Err(e) = fs::rename(&new, to) {
+            let _ = fs::rename(&old, to);
+            return Err(e);
+        }
+        let _ = fs::remove_dir_all(&old);
+        Ok(())
+    } else {
+        fs::rename(&new, to)
+    }
+}
+
+fn updated_at(p: &Path) -> u64 {
+    fs::read_to_string(p).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v["updated_at"].as_u64()).unwrap_or(0)
+}
+
+/// 결과 폴더 `from` 을 `into` 에 합친다 — 단위마다 더 나중에 분석한 것을 남기고, 통합 결과를 다시 만든다.
+/// 같은 것을 몇 번 합쳐도 결과는 같다 (같은 시각이면 있던 것을 둔다). `from` 은 그대로 둔다.
+pub fn merge_dir(from: &Path, into: &Path) -> io::Result<MergeReport> {
+    let src = Store::open(from)?;
+    let dst = Store::open(into)?;
+    let mut r = MergeReport { merged: true, ..Default::default() };
+    let mut taken = std::collections::HashSet::new();
+    for u in src.units() {
+        let have = dst.read_unit(&u.key);
+        if have.as_ref().is_some_and(|h| h.analyzed_at >= u.analyzed_at) {
+            r.kept += 1;
+            continue;
+        }
+        replace_tree(&src.unit_dir(&u.key), &dst.unit_dir(&u.key))?;
+        if have.is_some() {
+            r.updated += 1;
+        } else {
+            r.added += 1;
+        }
+        taken.insert(u.key);
+    }
+    // 사전 대조의 모델 추정: 가져온 단위의 것은 그쪽 것으로
+    if !taken.is_empty() {
+        use crate::deps::Guess;
+        let mut g: Vec<Guess> = dst.read_integrated("supplement.json").unwrap_or_default();
+        g.retain(|x| !taken.contains(&x.unit));
+        g.extend(src.read_integrated::<Vec<Guess>>("supplement.json").unwrap_or_default().into_iter().filter(|x| taken.contains(&x.unit)));
+        if !g.is_empty() {
+            dst.write_integrated("supplement.json", &g)?;
+        }
+    }
+    // 흐름도 보고서: 없던 것은 넣고, 같은 것이면 나중에 고친 것
+    if let Ok(rd) = fs::read_dir(from.join("integrated").join("reports")) {
+        let to_dir = into.join("integrated").join("reports");
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_none_or(|x| x != "json") {
+                continue;
+            }
+            let t = to_dir.join(e.file_name());
+            if !t.exists() || updated_at(&p) > updated_at(&t) {
+                fs::create_dir_all(&to_dir)?;
+                fs::copy(&p, &t)?;
+                r.reports += 1;
+            }
+        }
+    }
+    let had = dst.read_integrated::<crate::integrate::Integrated>("integrated.json");
+    if r.added + r.updated > 0 || had.is_none() {
+        // 전체 요약(모델이 쓴 것)은 있던 것을, 없으면 가져온 것을
+        let overview = had.and_then(|g| g.overview).or_else(|| src.read_integrated::<crate::integrate::Integrated>("integrated.json").and_then(|g| g.overview));
+        crate::integrate::write_all(&dst, overview)?;
+    }
+    Ok(r)
+}
+
+/// 묶음을 결과 폴더 `dest` 로 가져온다. 비어 있으면 그대로 풀고, 결과가 있으면 합친다 (덮어쓰지 않는다).
+/// `mark` 면 '가져온 결과' 표시(imported.json)를 남긴다 — 접속 프로필의 결과 폴더로 가져올 때는 남기지 않는다
+/// (남기면 그 접속의 결과가 '가져온 것' 으로 보이고, 이름 바꾼 접속의 결과 이어 붙이기에서도 빠진다).
+pub fn import_to(file: &Path, dest: &Path, mark: bool) -> io::Result<(Manifest, MergeReport)> {
+    let (m, r) = if crate::has_results(dest) {
+        let parent = dest.parent().ok_or_else(|| err("가져올 폴더가 잘못되었습니다"))?;
+        let stage = parent.join(format!(".merge-{}-{}", std::process::id(), crate::store::now()));
+        let m = import(file, &stage, false)?;
+        let r = merge_dir(&stage, dest);
+        let _ = fs::remove_dir_all(&stage);
+        (m, r?)
+    } else {
+        // Store::open 이 만들어 둔 빈 폴더는 바꿔 끼운다
+        let m = import(file, dest, true)?;
+        if !mark {
+            let _ = fs::remove_file(dest.join("imported.json"));
+        }
+        let added = Store::open(dest)?.units().len();
+        (m, MergeReport { added, ..Default::default() })
+    };
+    push_log(dest, ImportLog {
+        profile: m.profile.clone(),
+        db_user: m.db_user.clone(),
+        exported_at: m.exported_at,
+        exported_by: m.exported_by.clone(),
+        imported_at: crate::store::now(),
+        from: file.display().to_string(),
+        added: r.added,
+        updated: r.updated,
+        kept: r.kept,
+    })?;
+    Ok((m, r))
+}
+
 /// 이 PC 에 있는 결과 하나
 #[derive(Debug, Clone, Serialize)]
 pub struct SetInfo {
@@ -203,6 +383,8 @@ pub struct SetInfo {
     pub generated_at: Option<u64>,
     /// 가져온 것이면 그 머리
     pub imported: Option<Manifest>,
+    /// 이 폴더로 가져온 기록 (오래된 것부터)
+    pub imports: Vec<ImportLog>,
 }
 
 /// 결과 폴더들 (`analysis/` 아래)
@@ -213,13 +395,14 @@ pub fn list_sets(base: &Path) -> Vec<SetInfo> {
         .map(|e| e.path())
         .filter(|p| p.is_dir() && p.join("units").is_dir() && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
         .map(|p| {
-            let units = fs::read_dir(p.join("units")).map(|r| r.flatten().filter(|e| e.path().join("unit.json").is_file()).count()).unwrap_or(0);
+            let units = fs::read_dir(p.join("units")).map(|r| r.flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.') && e.path().join("unit.json").is_file()).count()).unwrap_or(0);
             let generated_at = fs::read_to_string(p.join("integrated").join("integrated.json"))
                 .ok()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
                 .and_then(|v| v["generated_at"].as_u64());
             let imported = fs::read_to_string(p.join("imported.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
-            SetInfo { name: p.file_name().unwrap().to_string_lossy().into_owned(), dir: p.display().to_string(), units, generated_at, imported }
+            let imports = import_log(&p);
+            SetInfo { name: p.file_name().unwrap().to_string_lossy().into_owned(), dir: p.display().to_string(), units, generated_at, imported, imports }
         })
         .filter(|s| s.units > 0)
         .collect();
@@ -263,6 +446,65 @@ mod tests {
         let sets = list_sets(&base);
         assert_eq!(sets.iter().map(|s| (s.name.as_str(), s.imported.is_some())).collect::<Vec<_>>(), vec![("DEV", false), ("DEV (가져옴)", true)]);
         assert!(!fs::read_dir(&base).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with('.')), "임시 폴더를 남기지 않는다");
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    async fn analyze(store: &Store, name: &str, at: u64) {
+        let src = UnitSource { owner: "APP".into(), name: name.into(), unit_type: "PROCEDURE".into(), text: format!("PROCEDURE {name} IS\nBEGIN\n  UPDATE t_{name} SET a = 1;\nEND {name};") };
+        analyze_unit(store, &src, None, None, &Options::default(), Arc::new(|_: Event| {}), Arc::new(AtomicBool::new(false))).await.unwrap();
+        let key = crate::chunk::unit_key("APP", name, "PROCEDURE");
+        let mut u = store.read_unit(&key).unwrap();
+        u.analyzed_at = at;
+        store.write_unit(&u).unwrap();
+        crate::integrate::write_all(store, None).unwrap();
+    }
+
+    #[tokio::test]
+    async fn import_merges_into_existing() {
+        let base = std::env::temp_dir().join(format!("sqls-bundle-merge-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        // 보낸 쪽: P(100), Q(100)
+        let a = Store::open(base.join("A")).unwrap();
+        analyze(&a, "P", 100).await;
+        analyze(&a, "Q", 100).await;
+        let fa = base.join("a.sqla");
+        export(&a, &fa, Manifest::new("QA", "0")).unwrap();
+
+        // 접속 프로필 폴더로 (빈 곳) — 가져온 표시를 남기지 않는다: 그 접속의 결과로 보인다
+        let qa = base.join("QA");
+        Store::open(&qa).unwrap();
+        let (_, r) = import_to(&fa, &qa, false).unwrap();
+        assert_eq!((r.added, r.merged), (2, false));
+        assert!(!qa.join("imported.json").exists());
+        // 같은 파일을 또: 그대로 (같은 시각이면 있던 것)
+        let (_, r) = import_to(&fa, &qa, false).unwrap();
+        assert_eq!((r.added, r.updated, r.kept, r.merged), (0, 0, 2, true));
+        assert_eq!(Store::open(&qa).unwrap().units().len(), 2);
+
+        // 이쪽에서 Q 를 더 나중에(300) 다시 분석했고, 보낸 쪽은 P 를 200 에 다시, R 을 새로
+        let here = Store::open(&qa).unwrap();
+        analyze(&here, "Q", 300).await;
+        analyze(&a, "P", 200).await;
+        analyze(&a, "R", 200).await;
+        let fb = base.join("b.sqla");
+        export(&a, &fb, Manifest::new("QA", "0")).unwrap();
+        let (_, r) = import_to(&fb, &qa, false).unwrap();
+        assert_eq!((r.added, r.updated, r.kept), (1, 1, 1), "R 새로, P 바꿈, Q 는 이쪽이 더 나중");
+        let at = |n: &str| here.read_unit(&crate::chunk::unit_key("APP", n, "PROCEDURE")).unwrap().analyzed_at;
+        assert_eq!((at("P"), at("Q"), at("R")), (200, 300, 200));
+        // 통합 결과도 다시 만든다
+        let g: crate::integrate::Integrated = here.read_integrated("integrated.json").unwrap();
+        assert_eq!(g.units, 3);
+        assert_eq!(import_log(&qa).len(), 3);
+        assert!(!fs::read_dir(&base).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with('.')), "임시 폴더를 남기지 않는다");
+        assert!(!fs::read_dir(qa.join("units")).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with('.')));
+
+        // 따로 둔 결과(가져옴 표시)를 접속 결과에 합치기
+        let set = base.join("QA (가져옴)");
+        import_to(&fa, &set, true).unwrap();
+        assert!(set.join("imported.json").exists());
+        let r = merge_dir(&set, &qa).unwrap();
+        assert_eq!((r.added, r.updated, r.kept), (0, 0, 2), "옛 파일의 P·Q 는 이쪽이 더 나중");
         fs::remove_dir_all(&base).unwrap();
     }
 

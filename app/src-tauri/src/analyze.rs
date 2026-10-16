@@ -645,22 +645,106 @@ pub fn analysis_export(st: State<'_, AppState>, id: Option<u64>, set: Option<Str
     bundle::export(&store, std::path::Path::new(&path), m).map_err(|e| ErrView::msg("io", e.to_string()))
 }
 
-/// 가져오기 전에 무엇인지 본다
-#[tauri::command]
-pub fn analysis_peek(path: String) -> R<bundle::Manifest> {
-    bundle::peek(std::path::Path::new(&path)).map_err(|e| ErrView::msg("invalid", e.to_string()))
+/// 가져올 수 있는 곳 하나 — 접속 프로필의 결과 폴더, 또는 따로 둔(가져온) 결과
+#[derive(Serialize)]
+pub struct ImportTarget {
+    name: String,
+    /// "connection" | "imported"
+    kind: &'static str,
+    /// 있는 단위 수 (0 이면 비어 있다 — 그대로 푼다, 아니면 합친다)
+    units: usize,
+    /// 묶음을 만든 DB 와 같아 보이면 (접속: 계정@접속 문자열, 가져온 것: 같은 곳에서 내보낸 것)
+    same_db: bool,
+    /// 같은 파일(같은 곳·같은 시각에 내보낸 것)을 이미 가져온 때
+    already: Option<u64>,
 }
 
-/// 파일을 이 PC 의 결과로 가져온다. 같은 이름이 있으면 overwrite 일 때만 바꿔 끼운다. 돌려주는 것은 붙인 이름
+#[derive(Serialize)]
+pub struct ImportPeek {
+    manifest: bundle::Manifest,
+    targets: Vec<ImportTarget>,
+    /// 고를 곳 (없으면 새 이름으로 따로)
+    suggested: Option<String>,
+}
+
+fn same_user(a: Option<&str>, b: &str) -> bool {
+    a.is_some_and(|a| a.eq_ignore_ascii_case(b))
+}
+
+/// 가져오기 전에 무엇인지, 어디로 가져갈지 본다
 #[tauri::command]
-pub fn analysis_import(path: String, name: String, overwrite: bool) -> R<String> {
-    let name = sqls_analyze::safe_set_name(&name);
-    let dest = sqls_analyze::analysis_root().join(&name);
-    bundle::import(std::path::Path::new(&path), &dest, overwrite).map_err(|e| match e.kind() {
-        std::io::ErrorKind::AlreadyExists => ErrView::msg("exists", format!("'{name}' 결과가 이미 있습니다")),
-        _ => ErrView::msg("io", e.to_string()),
-    })?;
-    Ok(name)
+pub fn analysis_peek(st: State<'_, AppState>, path: String) -> R<ImportPeek> {
+    let m = bundle::peek(std::path::Path::new(&path)).map_err(|e| ErrView::msg("invalid", e.to_string()))?;
+    let sets = bundle::list_sets(&sqls_analyze::analysis_root());
+    let already = |dir: &std::path::Path| {
+        bundle::import_log(dir).iter().rev().find(|l| l.profile == m.profile && l.exported_at == m.exported_at).map(|l| l.imported_at)
+    };
+    let mut targets = Vec::new();
+    for p in st.cfg.read().unwrap().connections.iter() {
+        let dir = sqls_analyze::default_dir(&p.name);
+        let units = sets.iter().find(|x| std::path::Path::new(&x.dir) == dir).map(|x| x.units).unwrap_or(0);
+        let same_db = match &m.db_user {
+            Some(u) => u.eq_ignore_ascii_case(&format!("{}@{}", p.user, p.connect_string)),
+            None => p.name == m.profile,
+        };
+        targets.push(ImportTarget { name: p.name.clone(), kind: "connection", units, same_db, already: already(&dir) });
+    }
+    for x in sets.iter().filter(|x| x.imported.is_some()) {
+        let i = x.imported.as_ref().unwrap();
+        let same_db = i.profile == m.profile && (m.db_user.is_none() || same_user(i.db_user.as_deref(), m.db_user.as_deref().unwrap_or("")));
+        if targets.iter().any(|t| t.name == x.name) {
+            continue;
+        }
+        targets.push(ImportTarget { name: x.name.clone(), kind: "imported", units: x.units, same_db, already: already(std::path::Path::new(&x.dir)) });
+    }
+    // 같은 DB 의 접속 (이름까지 같으면 그것) → 같은 곳에서 가져온 결과 → 없으면 새로
+    let suggested = targets
+        .iter()
+        .filter(|t| t.same_db)
+        .min_by_key(|t| (t.kind != "connection", t.name != m.profile))
+        .map(|t| t.name.clone());
+    Ok(ImportPeek { manifest: m, targets, suggested })
+}
+
+#[derive(Serialize)]
+pub struct ImportDone {
+    name: String,
+    /// 접속 프로필의 결과로 들어갔으면 true
+    connection: bool,
+    #[serde(flatten)]
+    report: bundle::MergeReport,
+}
+
+/// 파일을 이 PC 의 결과로 가져온다. `target` 이 접속 이름이면 그 접속의 결과로 (분석 표시·값의 출처에 쓰인다),
+/// 아니면 그 이름의 따로 둔 결과로. 이미 결과가 있으면 합친다 — 단위마다 더 나중에 분석한 것이 남는다
+#[tauri::command]
+pub fn analysis_import(st: State<'_, AppState>, path: String, target: String) -> R<ImportDone> {
+    let target = target.trim().to_string();
+    let connection = st.cfg.read().unwrap().connections.iter().any(|p| p.name == target);
+    let (name, dest) = if connection {
+        (target.clone(), sqls_analyze::default_dir(&target))
+    } else {
+        let n = sqls_analyze::safe_set_name(&target);
+        let d = sqls_analyze::analysis_root().join(&n);
+        (n, d)
+    };
+    let (_, report) = bundle::import_to(std::path::Path::new(&path), &dest, !connection).map_err(|e| ErrView::msg("io", e.to_string()))?;
+    Ok(ImportDone { name, connection, report })
+}
+
+/// 따로 둔(가져온) 결과를 접속의 결과에 합친다 — 전에 다른 이름으로 가져와 접속에서 분석 표시가 안 보이던 것.
+/// 따로 둔 결과는 그대로 둔다 (지우는 것은 화면이 묻고 따로)
+#[tauri::command]
+pub fn analysis_merge_set(st: State<'_, AppState>, set: String, into: String) -> R<bundle::MergeReport> {
+    if !st.cfg.read().unwrap().connections.iter().any(|p| p.name == into) {
+        return Err(ErrView::msg("invalid", format!("'{into}' 접속이 없습니다")));
+    }
+    let from = set_dir(&set)?;
+    let dest = sqls_analyze::default_dir(&into);
+    if from == dest {
+        return Err(ErrView::msg("invalid", "같은 결과입니다"));
+    }
+    bundle::merge_dir(&from, &dest).map_err(|e| ErrView::msg("io", e.to_string()))
 }
 
 /// 가져온 결과를 지운다 (접속 프로필의 결과는 지우지 않는다 — 폴더에서 직접)

@@ -3704,7 +3704,7 @@ dependencies = [
 
 [[package]]
 name = "sqlstudio"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "calamine",
  "csv",

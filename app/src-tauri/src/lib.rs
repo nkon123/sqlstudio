@@ -141,6 +141,7 @@ pub fn run() {
             analyze::analysis_result_for,
             analyze::open_dfd_window,
             analyze::analysis_unit,
+            analyze::column_source,
             analyze::analysis_dir,
             analyze::analysis_eval,
             analyze::analysis_sets,

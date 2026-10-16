@@ -24,6 +24,9 @@ export interface GridOptions {
   onContextMenu?: (row: (string | null)[], col: number, e: MouseEvent) => void;
   /** 더블클릭. 참을 돌려주면 값 보기 창을 띄우지 않는다 */
   onDoubleClick?: (row: (string | null)[], col: number) => boolean;
+  /** 행·셀에 덧붙일 CSS 클래스 (결과 비교 등) — 없으면 그리는 데 아무것도 더하지 않는다 */
+  rowClass?: (row: (string | null)[]) => string | null;
+  cellClass?: (row: (string | null)[], col: number) => string | null;
 }
 
 /** 편집 모드 설정: ROWID 열 위치와 고칠 수 있는 열 */
@@ -511,6 +514,7 @@ export class ResultGrid {
     const last = Math.min(n, Math.ceil((top + h) / ROW_H) + OVERSCAN);
     const frag = document.createDocumentFragment();
     const tw = `${this.totalWidth()}px`;
+    const { rowClass, cellClass } = this.opts;
     for (let r = first; r < last; r++) {
       const row = div("grid-row");
       row.style.transform = `translateY(${r * ROW_H}px)`;
@@ -518,6 +522,8 @@ export class ResultGrid {
       if (r % 2) row.classList.add("odd");
       const ri = this.view[r];
       if (this.deleted.has(ri)) row.classList.add("deleted");
+      const rc = rowClass?.(this.rows[ri]);
+      if (rc) row.classList.add(rc);
       const num = div("grid-cell grid-num");
       num.textContent = String(r + 1);
       row.append(num);
@@ -534,6 +540,7 @@ export class ResultGrid {
         } else {
           cell.textContent = v.length > 500 ? v.slice(0, 500) + "…" : v;
         }
+        if (cellClass) { const cc = cellClass(this.rows[ri], c); if (cc) cell.classList.add(cc); }
         if (this.inSel(r, c)) cell.classList.add("sel");
         cell.dataset.r = String(r);
         cell.dataset.c = String(c);

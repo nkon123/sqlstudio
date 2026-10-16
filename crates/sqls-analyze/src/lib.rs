@@ -11,6 +11,7 @@
 
 pub mod bundle;
 pub mod chunk;
+pub mod colwrite;
 pub mod deps;
 pub mod eval;
 pub mod facts;

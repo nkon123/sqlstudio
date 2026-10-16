@@ -424,6 +424,8 @@ struct TableRef {
     derived: Option<Vec<String>>,
     /// 몇 번째 블록에서 왔는지 (0 = 커서가 있는 블록)
     level: usize,
+    /// 인라인 뷰면 안쪽 쿼리의 바이트 범위 (열 출처를 따라 들어갈 때)
+    body: Option<(usize, usize)>,
 }
 
 impl TableRef {
@@ -772,7 +774,7 @@ fn table_from_tokens(names: &[Tok], ctes: &HashMap<String, Vec<String>>) -> Tabl
         _ => (None, None, None),
     };
     let derived = if owner.is_none() { name.as_ref().and_then(|n| ctes.get(n).cloned()) } else { None };
-    TableRef { owner, name, alias, derived, level: 0 }
+    TableRef { owner, name, alias, derived, level: 0, body: None }
 }
 
 /// WITH a AS (...), b (x, y) AS (...)
@@ -922,7 +924,7 @@ fn parse_refs(toks: &[Tok], depth: i32, ctes: &HashMap<String, Vec<String>>) -> 
             if alias.is_some() {
                 k += 1;
             }
-            out.push(TableRef { owner: None, name: None, alias, derived: Some(cols), level: 0 });
+            out.push(TableRef { owner: None, name: None, alias, derived: Some(cols), level: 0, body: toks.get(qs).zip(j.checked_sub(1).and_then(|e| toks.get(e))).map(|(a, b)| (a.s, b.e)).filter(|(a, b)| a < b) });
             i = k;
             continue;
         }
@@ -963,7 +965,7 @@ fn parse_refs(toks: &[Tok], depth: i32, ctes: &HashMap<String, Vec<String>>) -> 
             k += 1;
         }
         let derived = if owner.is_none() { ctes.get(&name).cloned() } else { None };
-        out.push(TableRef { owner, name: Some(name), alias, derived, level: 0 });
+        out.push(TableRef { owner, name: Some(name), alias, derived, level: 0, body: None });
         i = k;
     }
     out
@@ -1430,7 +1432,7 @@ pub fn suggest(a: &Analysis, cache: &SchemaCache, limit: usize) -> Completion {
                 let key = cache.resolve(owner.as_deref(), &q)?;
                 let kind = cache.kind_of(&key);
                 if owner.is_some() || kind.map(|k| k.table_like()).unwrap_or(false) {
-                    Some(TableRef { owner: Some(key.0), name: Some(key.1), alias: None, derived: None, level: 0 })
+                    Some(TableRef { owner: Some(key.0), name: Some(key.1), alias: None, derived: None, level: 0, body: None })
                 } else {
                     None
                 }
@@ -1777,6 +1779,296 @@ pub fn column_notes(sql: &str, cache: &SchemaCache) -> std::collections::BTreeMa
                     out.entry(c.name.clone()).or_insert_with(|| cm.trim().to_string());
                 }
             }
+        }
+    }
+    out
+}
+
+/// 결과 열 하나가 어디서 왔는지
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Origin {
+    /// 테이블의 열 그대로. owner 는 캐시로 풀었을 때만
+    Column { owner: Option<String>, table: String, column: String },
+    /// 식·함수·상수
+    Computed { expr: String },
+    /// 찾지 못함 (UNION, 인라인 뷰 등)
+    Unknown { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OriginResult {
+    #[serde(flatten)]
+    pub origin: Origin,
+    /// 캐시에 없어 채우면 더 정확해지는 것 (채운 뒤 다시 부른다)
+    #[serde(skip)]
+    pub missing: Vec<Missing>,
+}
+
+/// 테이블 열이 아닌 낱말 (열처럼 보여도)
+const PSEUDO: &[&str] = &["SYSDATE", "SYSTIMESTAMP", "CURRENT_DATE", "CURRENT_TIMESTAMP", "LOCALTIMESTAMP", "ROWNUM", "ROWID", "LEVEL", "USER", "UID", "NULL", "TRUE", "FALSE"];
+
+/// 조회 결과의 `pos` 번째(0부터) 열 `name` 이 어느 테이블의 어느 열인지. 캐시로만 푼다 (DB 왕복 없음).
+/// 위치로 먼저 찾고(`*` 는 캐시의 열 순서로 편다), 안 되면 이름으로 찾는다
+pub fn column_origin(sql: &str, pos: Option<usize>, name: &str, cache: &SchemaCache) -> OriginResult {
+    let missing = std::cell::RefCell::new(Vec::new());
+    let origin = origin_in(sql, pos, name, cache, &missing, 0);
+    OriginResult { origin, missing: missing.into_inner() }
+}
+
+fn origin_in(sql: &str, pos: Option<usize>, name: &str, cache: &SchemaCache, missing: &std::cell::RefCell<Vec<Missing>>, nest: u8) -> Origin {
+    let text = format!("{} ", sql.trim_end().trim_end_matches(';'));
+    let (mut toks, _) = tokenize(&text);
+    if let Some(base) = toks.first().map(|t| t.depth) {
+        for t in &mut toks {
+            t.depth -= base;
+        }
+    }
+    let name = name.trim().trim_matches('"').to_uppercase();
+    let unknown = |r: &str| Origin::Unknown { reason: r.into() };
+    if toks.iter().any(|t| t.depth == 0 && matches!(word(t), Some("UNION" | "INTERSECT" | "MINUS"))) {
+        return unknown("UNION 등으로 합친 결과라 열마다 출처가 여럿입니다");
+    }
+    let Some(sel) = toks.iter().position(|t| t.depth == 0 && is_w(Some(t), "SELECT")) else {
+        return unknown("SELECT 문이 아닙니다");
+    };
+    let ctes = parse_ctes(&toks);
+    let refs = parse_refs(&toks, 0, &ctes);
+
+    // SELECT 목록을 항목(같은 깊이의 쉼표로 나눈 토큰 범위)으로
+    let mut i = sel + 1;
+    if matches!(toks.get(i).and_then(word), Some("DISTINCT" | "UNIQUE" | "ALL")) {
+        i += 1;
+    }
+    let mut items: Vec<&[Tok]> = Vec::new();
+    let mut start = i;
+    while i < toks.len() {
+        let t = &toks[i];
+        if t.depth == 0 && (is_w(Some(t), "FROM") || is_w(Some(t), "INTO")) {
+            break;
+        }
+        if t.depth == 0 && t.t == T::P(',') {
+            items.push(&toks[start..i]);
+            start = i + 1;
+        }
+        i += 1;
+    }
+    items.push(&toks[start..i]);
+
+    let ctes_at = cte_bodies(&toks);
+    // 참조의 열 목록 (인라인 뷰·WITH 는 SELECT 목록 이름)
+    let cols_of = |r: &TableRef| -> Option<Vec<String>> {
+        if let Some(d) = &r.derived {
+            return Some(d.clone());
+        }
+        let key = cache.resolve(r.owner.as_deref(), r.name.as_deref()?)?;
+        match cache.cols(&key) {
+            Some(c) => Some(c.iter().map(|c| c.name.clone()).collect()),
+            None => {
+                missing.borrow_mut().push(Missing::Columns { owner: key.0, table: key.1 });
+                None
+            }
+        }
+    };
+    let ref_named = |q: &str, owner: Option<&str>| {
+        refs.iter().find(|r| r.alias.as_deref() == Some(q) && owner.is_none()).or_else(|| {
+            refs.iter().find(|r| r.name.as_deref() == Some(q) && (owner.is_none() || r.owner.as_deref() == owner))
+        })
+    };
+
+    // 항목 하나: (출력 이름, 출처). 출처는 Ok(참조, 열) 또는 Err(식)
+    enum Src<'a> {
+        Col(Option<&'a TableRef>, String),
+        Star(Option<&'a TableRef>),
+        Expr(String),
+    }
+    let parse = |it: &[Tok]| -> (Option<String>, Src) {
+        let mut body: &[Tok] = it;
+        let mut alias = None;
+        if let [.., prev, last] = it {
+            // 별칭: `식 AS 별칭`, `열 별칭`, `f(x) 별칭`, `'a' 별칭` — `a.b`, `a + b`, `CASE … END` 는 아니다
+            let last_ident = last.depth == 0 && matches!(last.t, T::Word(_) | T::QWord(_));
+            let after_value = matches!(prev.t, T::Word(_) | T::QWord(_) | T::Str | T::Num | T::P(')')) && !is_w(Some(last), "END");
+            if last_ident && is_w(Some(prev), "AS") {
+                alias = ident(last);
+                body = &it[..it.len() - 2];
+            } else if last_ident && after_value && prev.depth == 0 || (last_ident && prev.t == T::P(')')) {
+                alias = ident(last);
+                body = &it[..it.len() - 1];
+            }
+        }
+        let expr = || match (body.first(), body.last()) {
+            (Some(a), Some(b)) => text[a.s..b.e].trim().to_string(),
+            _ => String::new(),
+        };
+        // a / a.b / a.b.c — 낱말과 점이 번갈아
+        let parts: Option<Vec<String>> = (body.len() % 2 == 1)
+            .then(|| body.iter().enumerate().map(|(k, t)| if k % 2 == 0 { ident(t) } else { (t.t == T::P('.')).then(String::new) }).collect::<Option<Vec<_>>>())
+            .flatten()
+            .map(|v| v.into_iter().step_by(2).collect());
+        // t.* / *
+        if body.len() == 1 && body[0].t == T::P('*') {
+            return (None, Src::Star(None));
+        }
+        if body.len() == 3 && body[2].t == T::P('*') && body[1].t == T::P('.') {
+            let q = ident(&body[0]).unwrap_or_default();
+            return (None, Src::Star(ref_named(&q, None)));
+        }
+        if body.len() == 5 && body[4].t == T::P('*') {
+            let (o, q) = (ident(&body[0]).unwrap_or_default(), ident(&body[2]).unwrap_or_default());
+            return (None, Src::Star(ref_named(&q, Some(&o))));
+        }
+        match parts.as_deref() {
+            Some([c]) if !PSEUDO.contains(&c.as_str()) => (Some(alias.unwrap_or_else(|| c.clone())), Src::Col(None, c.clone())),
+            Some([q, c]) => (Some(alias.unwrap_or_else(|| c.clone())), match ref_named(q, None) {
+                Some(r) => Src::Col(Some(r), c.clone()),
+                None => Src::Expr(expr()),
+            }),
+            Some([o, q, c]) => (Some(alias.unwrap_or_else(|| c.clone())), match ref_named(q, Some(o)) {
+                Some(r) => Src::Col(Some(r), c.clone()),
+                None => Src::Expr(expr()),
+            }),
+            // 식 — 별칭이 없으면 Oracle 이 붙인 이름은 맞춰 보지 않는다 (공백 등이 다르다)
+            _ => (alias, Src::Expr(expr())),
+        }
+    };
+    let parsed: Vec<(Option<String>, Src)> = items.iter().map(|it| parse(it)).collect();
+
+    // 참조에서 열을 찾아 결과로
+    let finish = |r: Option<&TableRef>, col: &str| -> Origin {
+        let r = match r {
+            Some(r) => r,
+            None => {
+                // 이름만 — 그 열이 있는 첫 참조 (하나뿐이면 그것)
+                if refs.len() == 1 {
+                    &refs[0]
+                } else {
+                    match refs.iter().find(|r| cols_of(r).is_some_and(|c| c.iter().any(|x| x == col))) {
+                        Some(r) => r,
+                        None => return Origin::Unknown { reason: format!("{col} 열이 어느 테이블의 것인지 모릅니다 (별칭을 붙여 보세요)") },
+                    }
+                }
+            }
+        };
+        if r.derived.is_some() {
+            // 인라인 뷰·WITH 면 안쪽 쿼리에서 그 이름을 다시 찾는다
+            let inner = r.body.or_else(|| r.name.as_ref().and_then(|n| ctes_at.get(n).copied()));
+            if let Some((a, b)) = inner.filter(|_| nest < 8) {
+                return origin_in(&text[a..b], None, col, cache, missing, nest + 1);
+            }
+            let via = r.alias.clone().or_else(|| r.name.clone()).unwrap_or_else(|| "인라인 뷰".into());
+            return Origin::Unknown { reason: format!("{via}(인라인 뷰·WITH) 를 거친 열입니다 — 안쪽 쿼리에서 찾아 주세요") };
+        }
+        let n = r.name.clone().unwrap_or_default();
+        match cache.resolve(r.owner.as_deref(), &n) {
+            Some((o, t)) => Origin::Column { owner: Some(o), table: t, column: col.to_string() },
+            None => Origin::Column { owner: r.owner.clone(), table: n, column: col.to_string() },
+        }
+    };
+
+    // 위치로: `*` 를 펴 가며 pos 번째 항목
+    if let Some(pos) = pos {
+        let mut k = 0usize;
+        let mut ok = true;
+        for (out, src) in &parsed {
+            match src {
+                Src::Star(r) => {
+                    let targets: Vec<&TableRef> = match r { Some(r) => vec![*r], None => refs.iter().collect() };
+                    for t in targets {
+                        let Some(cols) = cols_of(t) else { ok = false; break };
+                        if pos < k + cols.len() {
+                            let col = cols[pos - k].clone();
+                            if col == name {
+                                let o = finish(Some(t), &col);
+                                return o;
+                            }
+                            ok = false;
+                            break;
+                        }
+                        k += cols.len();
+                    }
+                }
+                _ => {
+                    if k == pos {
+                        if out.as_deref() == Some(name.as_str()) || out.is_none() {
+                            let o = match src {
+                                Src::Col(r, c) => finish(*r, c),
+                                Src::Expr(e) => Origin::Computed { expr: e.clone() },
+                                Src::Star(_) => unreachable!(),
+                            };
+                            return o;
+                        }
+                        ok = false;
+                    }
+                    k += 1;
+                }
+            }
+            if !ok || k > pos {
+                break;
+            }
+        }
+    }
+    // 이름으로
+    if let Some((_, src)) = parsed.iter().find(|(o, _)| o.as_deref() == Some(name.as_str())) {
+        let o = match src {
+            Src::Col(r, c) => finish(*r, c),
+            Src::Expr(e) => Origin::Computed { expr: e.clone() },
+            Src::Star(_) => unreachable!(),
+        };
+        return o;
+    }
+    for (_, src) in &parsed {
+        if let Src::Star(r) = src {
+            let targets: Vec<&TableRef> = match r { Some(r) => vec![*r], None => refs.iter().collect() };
+            for t in targets {
+                if cols_of(t).is_some_and(|c| c.contains(&name)) {
+                    let o = finish(Some(t), &name);
+                    return o;
+                }
+            }
+        }
+    }
+    Origin::Unknown { reason: format!("SELECT 목록에서 {name} 을 찾지 못했습니다") }
+}
+
+/// WITH 이름 → 그 쿼리의 바이트 범위
+fn cte_bodies(toks: &[Tok]) -> HashMap<String, (usize, usize)> {
+    let mut out = HashMap::new();
+    if !is_w(toks.first(), "WITH") {
+        return out;
+    }
+    let mut i = 1;
+    while i < toks.len() {
+        let Some(name) = ident(&toks[i]) else { break };
+        i += 1;
+        // 열 이름 목록 (a, b)
+        if toks.get(i).is_some_and(|t| t.t == T::P('(')) && !is_w(toks.get(i + 1), "SELECT") {
+            let d = toks[i].depth;
+            i += 1;
+            while i < toks.len() && !(toks[i].t == T::P(')') && toks[i].depth == d) {
+                i += 1;
+            }
+            i += 1;
+        }
+        if !is_w(toks.get(i), "AS") || toks.get(i + 1).is_none_or(|t| t.t != T::P('(')) {
+            break;
+        }
+        let d = toks[i + 1].depth;
+        let qs = i + 2;
+        let mut j = qs;
+        while j < toks.len() && !(toks[j].t == T::P(')') && toks[j].depth == d) {
+            j += 1;
+        }
+        if let (Some(a), Some(b)) = (toks.get(qs), j.checked_sub(1).and_then(|e| toks.get(e))) {
+            if a.s < b.e {
+                out.insert(name, (a.s, b.e));
+            }
+        }
+        i = j + 1;
+        if toks.get(i).is_some_and(|t| t.t == T::P(',')) {
+            i += 1;
+        } else {
+            break;
         }
     }
     out

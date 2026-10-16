@@ -334,6 +334,32 @@ pub fn column_notes(st: State<'_, AppState>, id: u64, sql: String) -> Result<std
     Ok(complete::column_notes(&sql, &cache))
 }
 
+/// 결과 열의 출처 (테이블.열). 캐시로 풀고, 모자라면 메타 세션으로 그 테이블의 열을 채워 한 번 더 (우클릭할 때만)
+pub async fn column_origin(st: &AppState, id: u64, sql: &str, pos: Option<usize>, name: &str) -> Result<complete::Origin, ErrView> {
+    let hub = hub_for(st, id)?;
+    let first = complete::column_origin(sql, pos, name, &hub.cache.read().unwrap());
+    if first.missing.is_empty() {
+        return Ok(first.origin);
+    }
+    let Some(s) = hub.session() else { return Ok(first.origin) };
+    let todo: Vec<Missing> = first.missing.into_iter().take(4).collect();
+    let fill = async {
+        for m in &todo {
+            if let Ok(fills) = load::fill(&s, m).await {
+                let mut cache = hub.cache.write().unwrap();
+                for f in fills {
+                    cache.apply(f);
+                }
+            }
+        }
+    };
+    if tokio::time::timeout(Duration::from_secs(5), fill).await.is_err() {
+        tracing::debug!("열 출처: 열 채우기가 늦어 있는 것으로 답함");
+    }
+    let again = complete::column_origin(sql, pos, name, &hub.cache.read().unwrap());
+    Ok(again.origin)
+}
+
 #[tauri::command]
 pub fn completion_status(st: State<'_, AppState>, id: u64) -> Result<HubStatus, ErrView> {
     Ok(hub_for(&st, id)?.status())

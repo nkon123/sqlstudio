@@ -27,6 +27,8 @@ import { aliasMap, showColumns } from "./colpopup";
 import { showMenu, type MenuItem } from "./ctxmenu";
 import { SchemaCompareView } from "./schemacmp";
 import { showUsage } from "./usage";
+import { showColumnSource } from "./colsource";
+import { showDiff, type Snapshot } from "./resultdiff";
 import { openHistory } from "./history";
 import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
@@ -200,6 +202,7 @@ class Tab {
         h("span", { class: "spacer" }), this.gridStatus,
         h("button", { class: "small", title: "가져온 행을 CSV 로 복사", onclick: () => this.copyCsv() }, "CSV 복사"),
         exportSel,
+        h("button", { class: "small", title: "결과 비교 — 이 결과를 기준으로 담고, 고친 쿼리·다른 DB 의 결과와 행·열 단위로 비교", onclick: (e: Event) => app.compareMenu(this, e as MouseEvent) }, "비교"),
         h("span", { class: "pane-size" },
           h("button", { class: "small", title: "결과 영역 키우기 (에디터를 줄인다) — 경계선을 끌어도 된다", onclick: () => this.resizePane("grow") }, "▲"),
           h("button", { class: "small", title: "결과 영역 줄이기", onclick: () => this.resizePane("shrink") }, "▼"),
@@ -299,6 +302,39 @@ class Tab {
     const span = h("span", { class: cls }, line + "\n");
     this.output.append(span);
     this.output.scrollTop = this.output.scrollHeight;
+  }
+
+  /** 비교용으로 지금 결과를 담는다 (보이는 열·정렬·거르기 그대로). 서버에 행이 남았으면 끝까지 가져올지 묻는다 */
+  async snapshot(): Promise<Snapshot | null> {
+    if (!this.grid.columnAt(0)) {
+      toast("비교할 결과가 없습니다 — 먼저 조회하세요", "info");
+      return null;
+    }
+    const LIMIT = 500_000;
+    if (this.grid.hasMoreRows()) {
+      const choice = await modal<"all" | "loaded">("결과 비교",
+        h("pre", { class: "modal-text" },
+          `지금 ${this.grid.rowCount().toLocaleString()}행을 가져왔고, 서버에 행이 더 남아 있습니다.\n\n` +
+          `전체를 비교하려면 남은 행을 모두 가져옵니다 (${LIMIT.toLocaleString()}행까지, 행이 많으면 시간이 걸립니다).`),
+        [{ label: "가져온 행만", value: "loaded" }, { label: "전체 가져와서", value: "all", kind: "primary" }]);
+      if (!choice) return null;
+      if (choice === "all") {
+        let stop = false;
+        const cancel = h("button", { class: "small", onclick: () => { stop = true; } }, "중지");
+        this.gridStatus.after(cancel);
+        try {
+          const r = await this.grid.loadAll(LIMIT, (n) => { this.gridStatus.textContent = `${n.toLocaleString()}행 가져오는 중…`; }, () => stop);
+          if (r === "cancelled") { toast("멈췄습니다 (가져온 행은 그리드에 남아 있습니다)", "info"); return null; }
+        } catch (e) {
+          toast(errOf(e).message, "error");
+          return null;
+        } finally {
+          cancel.remove();
+        }
+      }
+    }
+    const d = this.grid.exportData();
+    return { label: `${this.title()} ${new Date().toTimeString().slice(0, 8)}`, columns: d.columns, rows: d.rows, partial: this.grid.hasMoreRows() };
   }
 
   /** 결과 내보내기: 엑셀 · CSV 파일 · INSERT 문(새 탭 / 파일). 보이는 열·정렬·거르기 그대로 */
@@ -1643,6 +1679,9 @@ class App {
         { label: "포함 (LIKE) 추가하고 실행", run: () => void this.addCellCondition(t, column!, value, "like", true) },
       ] });
     }
+    // 값의 출처 — 이 열이 어느 테이블.열이고, 어디서 그 열에 값을 넣는지 (분석 결과로)
+    items.push({ label: "값의 출처 (어디서 오나)", hint: column ? column.name : "", disabled: !q || !t.conn || !column,
+      run: () => this.showValueSource(t, col, column!) });
     // 고른 행만 보기·빼고 보기 — 화면에서만 거른다 (서버 쿼리는 그대로)
     items.push(
       { sep: true },
@@ -1653,12 +1692,52 @@ class App {
         { label: "거르기 해제", disabled: !t.grid.hasRowMask(), run: () => t.grid.clearRowMask() },
       ] },
       { sep: true },
+      { label: "결과 비교…", hint: this.compareBase ? "기준 있음" : "기준으로 담기", run: () => this.compareMenu(t, e) },
       { label: "건수 확인", hint: "전체 행 수", disabled: !q || !t.conn || t.grid.isEditing(), run: () => void this.countResult(t) },
       { sep: true },
       { label: n > 1 ? `고른 셀 복사 (${n}행)` : "고른 셀 복사", hint: "Ctrl+C", run: () => navigator.clipboard.writeText(t.grid.selectionText()).catch(() => {}) },
       { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(t.grid.selectionText(true)).catch(() => {}) },
     );
     showMenu(e.clientX, e.clientY, items);
+  }
+
+  /** 결과 비교의 기준 (담아 둔 결과) — 탭을 건너 쓴다 (다른 접속의 결과와도) */
+  private compareBase: Snapshot | null = null;
+
+  compareMenu(t: Tab, e: MouseEvent) {
+    const b = this.compareBase;
+    showMenu(e.clientX, e.clientY, [
+      { title: b ? `기준: ${b.label} · ${b.rows.length.toLocaleString()}행` : "담아 둔 기준이 없습니다" },
+      { label: "이 결과를 기준으로 담기", hint: "고치기 전 · 다른 DB", run: () => void t.snapshot().then((s) => {
+        if (!s) return;
+        this.compareBase = s;
+        toast(`기준으로 담았습니다 (${s.rows.length.toLocaleString()}행) — 쿼리를 고치거나 다른 접속에서 실행한 뒤 '기준과 비교'`, "ok", 5000);
+      }) },
+      { label: "기준과 비교", hint: b ? "지금 결과 ↔ 기준" : "", disabled: !b, run: () => void t.snapshot().then((s) => { if (s && b) showDiff(b, s); }) },
+      { sep: true },
+      { label: "기준 비우기", disabled: !b, run: () => { this.compareBase = null; } },
+    ]);
+  }
+
+  private showValueSource(t: Tab, col: number, column: Column) {
+    const q = t.lastQuery;
+    if (!q || !t.conn) return;
+    const id = t.conn.id;
+    // 편집 모드면 ROWID 를 붙여 다시 조회한 결과라 열 위치가 원래 쿼리와 다르다 — 이름으로만 찾는다
+    void showColumnSource(id, q.sql, t.grid.isEditing() ? null : col, column, {
+      openSource: async (owner, name, kind, line) => {
+        const ddl = await api.getDdl(id, kind, `"${owner}"."${name}"`).catch((e) => `-- ${errOf(e).message}`);
+        const nt = this.newTab(true, ddl);
+        if (line) {
+          // DDL 앞의 빈 줄을 건너 CREATE 줄이 소스의 1번째 줄
+          const base = ddl.split("\n").findIndex((l) => /^\s*CREATE\b/i.test(l));
+          nt.editor.gotoLine((base < 0 ? 0 : base) + line);
+        }
+      },
+      showUsage: (table, c) => void showUsage(id, table, c, async (owner, name, kind) =>
+        this.newTab(true, await api.getDdl(id, kind, `"${owner}"."${name}"`).catch((e) => `-- ${errOf(e).message}`))),
+      openAnalysis: () => { t.analysis(); },
+    });
   }
 
   /** 셀 값을 조회 조건으로 */

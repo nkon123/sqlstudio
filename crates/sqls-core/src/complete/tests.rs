@@ -375,3 +375,56 @@ fn korean_finds_by_comment() {
     assert_eq!(notes.get("ORD_DT").map(String::as_str), Some("주문일자"));
     assert_eq!(notes.get("CUST_ID").map(String::as_str), Some("고객 ID"));
 }
+
+fn origin(sql: &str, pos: Option<usize>, name: &str) -> Origin {
+    column_origin(sql, pos, name, &cache()).origin
+}
+
+fn col_of(owner: &str, table: &str, column: &str) -> Origin {
+    Origin::Column { owner: Some(owner.into()), table: table.into(), column: column.into() }
+}
+
+#[test]
+fn origin_plain_and_alias() {
+    assert_eq!(origin("select ename, sal from emp", Some(1), "SAL"), col_of("SCOTT", "EMP", "SAL"));
+    assert_eq!(origin("select e.ename nm, d.dname as dept from emp e join dept d on d.deptno = e.deptno", Some(1), "DEPT"), col_of("SCOTT", "DEPT", "DNAME"));
+    // 별칭 없이 이름만 — 그 열이 있는 테이블
+    assert_eq!(origin("select ename, loc from emp e, dept d where d.deptno = e.deptno", Some(1), "LOC"), col_of("SCOTT", "DEPT", "LOC"));
+    // 스키마.테이블.열
+    assert_eq!(origin("select scott.emp.job from scott.emp", Some(0), "JOB"), col_of("SCOTT", "EMP", "JOB"));
+    // 함수 뒤 별칭, 위치 없이 이름으로
+    assert!(matches!(origin("select nvl(comm, 0) c, empno from emp", None, "C"), Origin::Computed { .. }));
+    assert_eq!(origin("select nvl(comm, 0) c, empno from emp", None, "EMPNO"), col_of("SCOTT", "EMP", "EMPNO"));
+}
+
+#[test]
+fn origin_star_and_computed() {
+    // * 는 캐시의 열 순서로 편다
+    assert_eq!(origin("select * from dept", Some(2), "LOC"), col_of("SCOTT", "DEPT", "LOC"));
+    assert_eq!(origin("select d.*, e.ename from dept d, emp e", Some(3), "ENAME"), col_of("SCOTT", "EMP", "ENAME"));
+    assert_eq!(origin("select e.*, d.* from emp e, dept d", Some(9), "DNAME"), col_of("SCOTT", "DEPT", "DNAME"));
+    assert!(matches!(origin("select sal * 12 from emp", Some(0), "SAL*12"), Origin::Computed { .. }));
+    assert!(matches!(origin("select case when sal > 1 then 'Y' end from emp", Some(0), "X"), Origin::Computed { .. }));
+    assert!(matches!(origin("select sysdate, rownum from emp", Some(0), "SYSDATE"), Origin::Computed { .. }));
+    assert!(matches!(origin("select count(*) n from emp", Some(0), "N"), Origin::Computed { .. }));
+}
+
+#[test]
+fn origin_through_inline_views() {
+    // 인라인 뷰·WITH 안쪽으로 따라 들어간다 (별칭도 풀어서)
+    assert_eq!(origin("select x.nm from (select ename nm from emp) x", Some(0), "NM"), col_of("SCOTT", "EMP", "ENAME"));
+    assert_eq!(origin("select * from (select d.loc from dept d) where loc = 'A'", Some(0), "LOC"), col_of("SCOTT", "DEPT", "LOC"));
+    assert_eq!(origin("with v as (select e.ename who from emp e) select who from v", Some(0), "WHO"), col_of("SCOTT", "EMP", "ENAME"));
+    assert_eq!(origin("with a as (select deptno, dname from dept), b as (select empno from emp) select a.dname, b.empno from a, b", Some(1), "EMPNO"), col_of("SCOTT", "EMP", "EMPNO"));
+    // 조건 추가가 감싼 꼴
+    assert_eq!(origin("SELECT * FROM (select ename, sal * 2 s2 from emp) WHERE ENAME = 'A'", Some(0), "ENAME"), col_of("SCOTT", "EMP", "ENAME"));
+}
+
+#[test]
+fn origin_unknown() {
+    assert!(matches!(origin("select ename from emp union all select ename from bonus", Some(0), "ENAME"), Origin::Unknown { .. }));
+    assert!(matches!(origin("select x.nm from (select sal + 1 nm from emp) x", Some(0), "NM"), Origin::Computed { .. }));
+    // 캐시에 열이 없는 테이블의 * — 채울 것을 알려 준다
+    let r = column_origin("select * from erp.orders", Some(0), "ID", &cache());
+    assert!(r.missing.contains(&Missing::Columns { owner: "ERP".into(), table: "ORDERS".into() }));
+}

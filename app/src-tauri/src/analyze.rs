@@ -520,6 +520,50 @@ pub fn analysis_unit(st: State<'_, AppState>, id: Option<u64>, set: Option<Strin
     Ok(UnitDetail { unit, chunks })
 }
 
+#[derive(Serialize)]
+pub struct ColumnSource {
+    origin: sqls_core::complete::Origin,
+    /// 분석 결과(문장 목록)가 있는지 — 없으면 writes 는 비어 있다
+    analyzed: bool,
+    writes: Vec<sqls_analyze::colwrite::ColWrite>,
+}
+
+/// 읽어 둔 문장 목록 (파일과 고친 때가 같으면 다시 읽지 않는다)
+type Stmts = Arc<Vec<sqls_analyze::colwrite::StmtLite>>;
+static STMTS: std::sync::Mutex<Option<(std::path::PathBuf, std::time::SystemTime, Stmts)>> = std::sync::Mutex::new(None);
+
+fn statements(path: &std::path::Path) -> Option<Stmts> {
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    if let Some((p, t, v)) = STMTS.lock().unwrap().as_ref() {
+        if p == path && *t == mtime {
+            return Some(v.clone());
+        }
+    }
+    let f = std::fs::File::open(path).ok()?;
+    let v: Vec<sqls_analyze::colwrite::StmtLite> = serde_json::from_reader(std::io::BufReader::new(f)).ok()?;
+    let v = Arc::new(v);
+    *STMTS.lock().unwrap() = Some((path.to_path_buf(), mtime, v.clone()));
+    Some(v)
+}
+
+/// 결과 그리드 열의 출처 — 어느 테이블.열인지(쿼리를 캐시로 풀어서), 분석 결과에서 그 열에 값을 넣는 문장들.
+/// 우클릭으로 고를 때만 돈다. 문장 목록은 처음 한 번 읽어 두고 파일이 바뀔 때만 다시 읽는다
+#[tauri::command]
+pub async fn column_source(st: State<'_, AppState>, id: u64, sql: String, pos: Option<usize>, name: String) -> R<ColumnSource> {
+    let origin = crate::complete::column_origin(&st, id, &sql, pos, &name).await?;
+    let sqls_core::complete::Origin::Column { owner, table, column } = &origin else {
+        return Ok(ColumnSource { origin, analyzed: false, writes: vec![] });
+    };
+    let path = store_for(&st, id)?.root().join("integrated").join("statements.json");
+    let (owner, table, column) = (owner.clone(), table.clone(), column.clone());
+    let found = tauri::async_runtime::spawn_blocking(move || {
+        statements(&path).map(|v| sqls_analyze::colwrite::column_writes(&v, owner.as_deref(), &table, &column))
+    })
+    .await
+    .map_err(|e| ErrView::msg("io", e.to_string()))?;
+    Ok(ColumnSource { origin, analyzed: found.is_some(), writes: found.unwrap_or_default() })
+}
+
 /// 결과 폴더 경로
 #[tauri::command]
 pub fn analysis_dir(st: State<'_, AppState>, id: Option<u64>, set: Option<String>) -> R<String> {

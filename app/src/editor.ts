@@ -236,6 +236,18 @@ export class SqlEditor {
     this.view.focus();
   }
 
+  /** n 번째 줄(1부터)로 커서를 옮기고 그 줄을 칠한다 */
+  gotoLine(n: number) {
+    const doc = this.view.state.doc;
+    const line = doc.line(Math.min(Math.max(1, n), doc.lines));
+    this.view.dispatch({
+      effects: setMarks.of([{ from: line.from, to: line.to, cls: "cm-running" }]),
+      selection: EditorSelection.cursor(line.from),
+      scrollIntoView: true,
+    });
+    this.view.focus();
+  }
+
   /** 지금 실행하는 문장을 잠깐 칠한다 */
   flash(from: number, to: number) {
     this.view.dispatch({ effects: setMarks.of([{ from, to, cls: "cm-running" }]) });

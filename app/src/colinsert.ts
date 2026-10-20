@@ -16,6 +16,9 @@ export interface Placed { from: number; to: number; insert: string; cursor: numb
 const CLAUSE_WORDS = new Set(["SELECT", "FROM", "WHERE", "GROUP", "ORDER", "HAVING", "UNION", "INTERSECT", "MINUS", "CONNECT", "START",
   "FETCH", "OFFSET", "FOR", "INTO", "JOIN", "LEFT", "RIGHT", "INNER", "FULL", "CROSS", "ON", "AND", "OR", "AS", "MODEL", "PARTITION", "WINDOW", "THEN", "ELSE", "END", "WHEN"]);
 
+/** WHERE 다음에 올 수 있는 절의 첫 낱말 */
+const WHERE_ENDS = new Set(["CONNECT", "START", "GROUP", "HAVING", "ORDER", "FETCH", "OFFSET", "MODEL", "FOR", "UNION", "INTERSECT", "MINUS"]);
+
 /** 커서가 있는 절. 괄호마다 따로 본다 — 서브쿼리 안이면 그 서브쿼리의 절, 함수 괄호 안이면 바깥 절 */
 export function clauseAt(sql: string, pos: number): Target | "other" {
   type C = Target | "other";
@@ -123,13 +126,24 @@ export function placeInClause(sql: string, target: Target, cols: string[]): Plac
       return { from: at, to: at + 1, insert: body, cursor: at + body.length };
     }
     const at = listFrom + list.replace(/\s+$/, "").length;
-    return { from: at, to: at, insert: `, ${body}`, cursor: at + 2 + body.length };
+    // 목록이 비었으면 (SELECT 만 쓰고 연 것) 쉼표 없이
+    const lead = list.trim() && !/^(DISTINCT|UNIQUE|ALL)$/i.test(list.trim()) ? ", " : " ";
+    return { from: at, to: at, insert: lead + body, cursor: at + lead.length + body.length };
   }
 
   if (target === "where") {
     // 첫 조건의 "= " 뒤에 커서를 둔다 — 표시 글자를 넣어 자리를 찾고 뺀다
     const MARK = "\u0001";
     const cond = cols.map((c, k) => `${c} = ${k === 0 ? MARK : ""}`).join("\n  AND ");
+    // WHERE 만 써 두고 비어 있으면 그 뒤에 (addCondition 은 "WHERE AND …" 를 만든다)
+    const w = words.findIndex((x, k) => k > from && x.w === "WHERE");
+    if (w >= 0) {
+      const wEnd = words[w].at + "WHERE".length;
+      const nx = words.findIndex((x, k) => k > w && WHERE_ENDS.has(x.w));
+      if (!sql.slice(wEnd, nx >= 0 ? words[nx].at : end).trim()) {
+        return { from: wEnd, to: wEnd, insert: ` ${cond.replace(MARK, "")}`, cursor: wEnd + 1 + cond.indexOf(MARK) };
+      }
+    }
     const r = addCondition(sql, cond);
     if ("error" in r) return r;
     const at = r.sql.indexOf(MARK);
@@ -148,7 +162,12 @@ export function placeInClause(sql: string, target: Target, cols: string[]): Plac
   const next = words.findIndex((_, k) => k > start && isNext(k));
   const stop = next >= 0 ? words[next].at : end;
   const at = sql.slice(0, stop).replace(/\s+$/, "").length;
-  if (head >= 0) return { from: at, to: at, insert: `, ${body}`, cursor: at + 2 + body.length };
+  if (head >= 0) {
+    // "ORDER BY" 만 써 둔 것이면 쉼표 없이
+    const by = words[head + 1]?.w === "BY" ? words[head + 1] : words[head + 2];
+    const lead = by && !sql.slice(by.at + 2, stop).trim() ? " " : ", ";
+    return { from: at, to: at, insert: lead + body, cursor: at + lead.length + body.length };
+  }
   const clause = `\n${kw} BY ${body}`;
   return { from: at, to: at, insert: clause, cursor: at + clause.length };
 }

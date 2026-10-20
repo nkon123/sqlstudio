@@ -199,6 +199,10 @@ docker run -d --name ora11 -e ORACLE_PASSWORD=oracle gvenzl/oracle-xe:11-slim
 SQLS_TEST_DSN=system/oracle@<ip>:1521/XE cargo test --workspace -- --ignored --test-threads=1
 ```
 
+UI without a database (mock mode): `cd app && npm run mock` opens it in a browser (no Rust build), and
+`npm run tauri:mock` runs the desktop window with only the DB commands faked. Connect to the "가짜 DB" profile
+to get SCOTT.EMP, DEPT, ORDERS (1,234 rows) and ORDER_ITEMS. Fixtures live in `app/src/mock/` and are left out of release builds.
+
 ### Architecture
 
 ```

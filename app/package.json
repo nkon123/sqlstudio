@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "node scripts/notices.mjs && tsc --noEmit && vite build",
     "notices": "node scripts/notices.mjs",
+    "mock": "vite --mode mock --port 1430 --strictPort --open",
     "tauri": "tauri",
+    "tauri:mock": "tauri dev --config src-tauri/tauri.mock.json",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

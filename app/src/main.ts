@@ -3,6 +3,7 @@
 // 탭 하나 = 에디터 하나 + 세션 하나 + 결과 영역 하나. 탭끼리는 아무것도 공유하지 않는다
 // (한 탭의 긴 쿼리가 다른 탭을 묶지 않는다 — 세션마다 서버 쪽 스레드가 따로 있다).
 
+import "./mock/install"; // 가짜 DB 모드 (npm run mock) — 맨 먼저
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -1542,6 +1543,12 @@ class App {
     const a = await api.analyze(text, utf16ToByte(text, sel.head), undefined, t.conn?.id).catch(() => null);
     const st = a?.statement ? { from: byteToUtf16(text, a.statement.start), to: byteToUtf16(text, a.statement.end) } : null;
     const inside = st && sel.from >= st.from && sel.to <= st.to;
+    // 별칭 없이 연 팝업(테이블 이름에서 F4 등)이면 문장에서 그 테이블의 별칭을 찾아 붙인다 (FROM emp e → e.ENAME)
+    if (st && !cols[0].includes(".")) {
+      const table = from.split(" ")[0].toUpperCase();
+      const hits = [...aliasMap(text.slice(st.from, st.to))].filter(([, tb]) => tb === table || table.endsWith(`.${tb}`) || tb.endsWith(`.${table.split(".").pop()}`));
+      if (hits.length === 1) cols = cols.map((c) => `${hits[0][0].toLowerCase()}.${c}`);
+    }
     const apply = (base: number, p: Placed) => {
       view.dispatch({
         changes: { from: base + p.from, to: base + p.to, insert: p.insert },

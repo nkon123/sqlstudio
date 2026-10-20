@@ -358,6 +358,19 @@ SQLS_TEST_DSN=system/oracle@$IP:1521/XE cargo test --workspace -- --ignored --te
 `localhost` 포트 매핑으로 붙으면 Docker 프록시가 취소 신호(OOB)를 버린다. 이때도
 `abandon_releases_stuck_call` 테스트는 통과해야 한다 — 그것이 그 테스트의 목적이다.
 
+### DB 없이 화면만 (가짜 DB 모드)
+
+```bash
+cd app
+npm run mock         # 브라우저로 — Rust 빌드 없이 바로. http://localhost:1430
+npm run tauri:mock   # 앱 창으로 — DB 명령만 가짜, 문장 나누기·설정·파일·이력은 진짜 Rust
+```
+
+접속 목록의 '가짜 DB' 로 접속하면 SCOTT 의 EMP · DEPT · ORDERS(1,234행, 열 14개) · ORDER_ITEMS 가 있다.
+조회는 `SELECT … FROM 테이블` 모양만 흉내 낸다 — 첫 테이블의 행을 만들고, WHERE 는 보지 않는다(`ROWNUM <= n` 만).
+DML 은 "1행" 이라고만 답한다. 세션·용량·디버그·결과 편집처럼 DB 가 꼭 있어야 하는 기능은 "가짜 모드에서는 쓸 수 없습니다" 오류.
+가짜 데이터는 `app/src/mock/` 에 있고, 배포 빌드에는 들어가지 않는다 (`--mode mock` 일 때만 불러온다).
+
 ## 구조
 
 ```

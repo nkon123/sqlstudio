@@ -788,16 +788,13 @@ impl Worker {
             self.begin_read_only()?;
         }
 
-        let mut stmt = self
-            .conn
-            .statement(sql_text)
-            .fetch_array_size(opts.fetch_array_size.max(1))
-            .prefetch_rows(opts.fetch_array_size.max(1))
-            .build()?;
+        let arr = opts.fetch_array_size.max(1);
+        // 미리 가져오기는 끈다 — 쿼리면 열 형식을 보고 다시 열 수도 있다 (open_rows)
+        let mut stmt = self.conn.statement(sql_text).fetch_array_size(arr).prefetch_rows(0).build()?;
         bind_all(&mut stmt, &opts.binds)?;
 
         let outcome = if stmt.is_query() {
-            let mut rs = stmt.into_result_set::<Row>(&[])?;
+            let mut rs = self.open_rows(stmt, sql_text, &opts.binds, arr)?;
             let columns = columns_of(rs.column_info());
             let (rows, has_more) = take_rows(&mut rs, opts.first_page, opts.max_cell_chars)?;
             let fetched = rows.len() as u64;
@@ -839,6 +836,39 @@ impl Worker {
         })
     }
 
+    /// 쿼리를 열어 결과 집합을 돌려준다 (`stmt` 는 바인드까지 마치고 미리 가져오기를 끈 것).
+    ///
+    /// ROWID 형식 열(`a.ROWID` 등)을 드라이버가 그대로 받아 문자열로 바꾸면 테이블에 따라
+    /// (IOT 의 논리 ROWID 등) 클라이언트 안에서 프로세스가 죽는다. 그래서 행을 하나도 가져오기 전에
+    /// 열 형식을 보고, ROWID 열이 있으면 그 열만 ROWIDTOCHAR 로 감싼 문장으로 다시 연다.
+    fn open_rows(
+        &self,
+        stmt: oracle::Statement,
+        sql_text: &str,
+        binds: &[(String, Option<String>)],
+        arr: u32,
+    ) -> Result<ResultSet<'static, Row>> {
+        let rs = stmt.into_result_set::<Row>(&[])?;
+        let cols: Vec<(String, bool)> = rs
+            .column_info()
+            .iter()
+            .map(|c| (c.name().to_string(), matches!(c.oracle_type(), OracleType::Rowid)))
+            .collect();
+        if !cols.iter().any(|(_, r)| *r) {
+            return Ok(rs);
+        }
+        drop(rs);
+        let hint = "ROWID 열은 ROWIDTOCHAR(a.ROWID) 처럼 문자로 바꿔 조회해 주세요";
+        let wrapped = rowid_as_text(sql_text, &cols)
+            .ok_or_else(|| Error::Invalid(format!("열 이름이 겹치거나 따옴표가 있어 ROWID 열을 자동으로 바꾸지 못했습니다 — {hint}")))?;
+        let mut stmt = self.conn.statement(&wrapped).fetch_array_size(arr).prefetch_rows(arr).build()?;
+        bind_all(&mut stmt, binds)?;
+        stmt.into_result_set::<Row>(&[]).map_err(|e| match Error::from(e) {
+            Error::Db { message, .. } => Error::Invalid(format!("ROWID 열을 문자로 바꿔 다시 조회하다 실패했습니다 ({message}) — {hint}")),
+            e => e,
+        })
+    }
+
     fn fetch_more(&mut self, n: usize) -> Result<RowPage> {
         let cur = self
             .cursor
@@ -863,9 +893,9 @@ impl Worker {
         if !sql::is_read_only(sql_text) {
             return Err(Error::ReadOnly("따로 읽는 커서는 SELECT 만 허용".into()));
         }
-        let mut stmt = self.conn.statement(sql_text).fetch_array_size(500).prefetch_rows(500).build()?;
+        let mut stmt = self.conn.statement(sql_text).fetch_array_size(500).prefetch_rows(0).build()?;
         bind_all(&mut stmt, binds)?;
-        let rs = stmt.into_result_set::<Row>(&[])?;
+        let rs = self.open_rows(stmt, sql_text, binds, 500)?;
         let columns = columns_of(rs.column_info());
         self.side = Some(OpenCursor { rs, columns: columns.clone(), fetched: 0, max_cell_chars: 1_000_000 });
         Ok(columns)
@@ -898,9 +928,9 @@ impl Worker {
             return Err(Error::ReadOnly("내부 조회는 SELECT 만 허용".into()));
         }
         let arr = max_rows.clamp(1, 1000) as u32;
-        let mut stmt = self.conn.statement(sql_text).fetch_array_size(arr).prefetch_rows(arr).build()?;
+        let mut stmt = self.conn.statement(sql_text).fetch_array_size(arr).prefetch_rows(0).build()?;
         bind_all(&mut stmt, binds)?;
-        let mut rs = stmt.into_result_set::<Row>(&[])?;
+        let mut rs = self.open_rows(stmt, sql_text, binds, arr)?;
         let columns = columns_of(rs.column_info());
         let (rows, has_more) = take_rows(&mut rs, max_rows, 1_000_000)?;
         let fetched_total = rows.len() as u64;
@@ -1038,6 +1068,24 @@ fn row_to_cells(row: &Row, max_chars: usize) -> Vec<Option<String>> {
         .collect()
 }
 
+/// `SELECT "A", ROWIDTOCHAR("RID") AS "RID" FROM (원문)` — ROWID 열만 문자로. 열 이름이 겹치거나
+/// 따옴표가 들어 있으면 바깥에서 가리킬 수 없으므로 None.
+fn rowid_as_text(sql_text: &str, cols: &[(String, bool)]) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut list = Vec::with_capacity(cols.len());
+    for (name, rowid) in cols {
+        if name.is_empty() || name.contains('"') || !seen.insert(name.as_str()) {
+            return None;
+        }
+        list.push(if *rowid { format!("ROWIDTOCHAR(\"{name}\") AS \"{name}\"") } else { format!("\"{name}\"") });
+    }
+    let body = sql_text.trim().trim_end_matches(';').trim_end();
+    // 원문 끝이 -- 주석이어도 닫는 괄호가 묻히지 않게 줄을 바꾼다
+    Some(format!("SELECT {} FROM (
+{body}
+)", list.join(", ")))
+}
+
 fn truncate_chars(s: String, max: usize) -> String {
     if s.len() <= max {
         return s;
@@ -1060,6 +1108,19 @@ mod tests {
     fn truncate_is_char_safe() {
         assert_eq!(truncate_chars("가나다라".into(), 2), "가나…");
         assert_eq!(truncate_chars("abc".into(), 5), "abc");
+    }
+
+    #[test]
+    fn rowid_columns_become_text() {
+        let cols = vec![("RID".to_string(), true), ("ENAME".to_string(), false)];
+        assert_eq!(
+            rowid_as_text("select a.rowid rid, a.ename from emp a -- x", &cols).unwrap(),
+            "SELECT ROWIDTOCHAR(\"RID\") AS \"RID\", \"ENAME\" FROM (
+select a.rowid rid, a.ename from emp a -- x
+)"
+        );
+        let dup = vec![("ID".to_string(), false), ("ID".to_string(), false), ("ROWID".to_string(), true)];
+        assert!(rowid_as_text("select a.id, b.id, a.rowid from a, b", &dup).is_none());
     }
 
     #[test]

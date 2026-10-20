@@ -23,6 +23,7 @@ import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from
 import type { GitPanel } from "./git";
 import { ResultGrid } from "./grid";
 import { guessTable, toCsv as toCsvText, toInserts as toInsertsText, unsupported as unsupportedCols } from "./export-text";
+import { placeAtCursor, placeInClause, TARGET_LABEL, type Placed, type Target } from "./colinsert";
 import { aliasMap, showColumns } from "./colpopup";
 import { showMenu, type MenuItem } from "./ctxmenu";
 import { SchemaCompareView } from "./schemacmp";
@@ -1458,6 +1459,7 @@ class App {
     const popup = showColumns(d, {
       at, alias,
       insert: (s) => { const t = this.active; if (!t) return; t.editor.insert(s); t.editor.view.focus(); },
+      place: (target, cols, from) => this.placeColumns(target, cols, from),
       ddl: async () => { const t = this.active; if (t?.conn) this.newTab(true, await api.getDdl(t.conn.id, d.object_type, `"${d.owner}"."${d.name}"`)); },
       usage: (column) => {
         const t = this.active;
@@ -1528,6 +1530,52 @@ class App {
       } catch { /* 다음 후보 */ }
     }
     return null;
+  }
+
+  /** 컬럼 팝업에서 고른 컬럼을 커서 쪽 문장에 넣는다. "auto" 인데 절을 모르면 false (팝업이 메뉴를 띄운다) */
+  private async placeColumns(target: Target | "auto", cols: string[], from: string): Promise<boolean> {
+    const t = this.active;
+    if (!t) return true;
+    const view = t.editor.view;
+    const text = t.editor.text();
+    const sel = view.state.selection.main;
+    const a = await api.analyze(text, utf16ToByte(text, sel.head), undefined, t.conn?.id).catch(() => null);
+    const st = a?.statement ? { from: byteToUtf16(text, a.statement.start), to: byteToUtf16(text, a.statement.end) } : null;
+    const inside = st && sel.from >= st.from && sel.to <= st.to;
+    const apply = (base: number, p: Placed) => {
+      view.dispatch({
+        changes: { from: base + p.from, to: base + p.to, insert: p.insert },
+        selection: { anchor: base + p.cursor },
+        scrollIntoView: true,
+        userEvent: "input.columns",
+      });
+      view.focus();
+    };
+    if (target === "auto") {
+      if (!st || !inside) return false;
+      const sql = text.slice(st.from, st.to);
+      const p = placeAtCursor(sql, sel.from - st.from, sel.to - st.from, cols);
+      if (!p) return false;
+      apply(st.from, p);
+      return true;
+    }
+    // 커서 쪽에 문장이 없으면 SELECT 를 새로 만든다
+    if (!st) {
+      const head = sel.from > 0 && text[sel.from - 1] !== "\n" ? "\n" : "";
+      const body = target === "select" ? `SELECT ${cols.join(", ")}\n  FROM ${from}`
+        : target === "where" ? `SELECT *\n  FROM ${from}\n WHERE ${cols.map((c) => `${c} = `).join("\n   AND ")}`
+        : `SELECT ${cols.join(", ")}\n  FROM ${from}\n ${TARGET_LABEL[target]} ${cols.join(", ")}`;
+      const cursor = target === "where" ? body.indexOf(" = ") + 3 : body.length;
+      apply(sel.from, { from: 0, to: sel.to - sel.from, insert: head + body, cursor: head.length + cursor });
+      return true;
+    }
+    const p = placeInClause(text.slice(st.from, st.to), target, cols);
+    if ("error" in p) {
+      toast(p.error, "error", 5000);
+      return true;
+    }
+    apply(st.from, p);
+    return true;
   }
 
   /** F4: 커서 위치의 테이블(또는 별칭·스키마.테이블·별칭.컬럼)의 컬럼 팝업 */

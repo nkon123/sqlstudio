@@ -142,6 +142,7 @@ body.row-resizing { cursor: row-resize; user-select: none; }
 .grid-num { width: 56px; color: var(--dim); text-align: right; background: var(--bg); }
 .grid-cell.null { color: var(--dim); font-style: italic; }
 .grid-cell.sel { background: var(--sel); }
+.grid:focus .grid-cell.cur { outline: 1px solid var(--accent); outline-offset: -1px; }
 .grid-filler { flex: none; }
 .grid-grip { position: absolute; right: -3px; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 1; }
 .grid-empty { color: var(--dim); padding: 12px; }
@@ -414,6 +415,16 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .cp-filter { width: 160px; padding: 1px 6px; }
 .cp-count { color: var(--dim); }
 .cp-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+/* 4방향 휠 — 고른 컬럼을 어느 절에 넣을지 (Ctrl+Shift 를 누른 채 방향키) */
+.cp-wheel { position: fixed; z-index: 10000; display: grid; grid-template: repeat(3, 34px) / repeat(3, 92px); gap: 4px; pointer-events: none; }
+.cp-wheel button { pointer-events: auto; display: flex; align-items: center; justify-content: center; gap: 4px; font: 600 12px var(--mono); border-radius: 17px;
+  background: var(--panel); border: 1px solid var(--line); box-shadow: 0 4px 14px rgba(0,0,0,.22); color: var(--text); }
+.cp-wheel button .k { color: var(--dim); font-weight: 400; }
+.cp-wheel button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.cp-wheel button.on .k { color: inherit; }
+.cp-wheel .w-select { grid-area: 1 / 2; } .cp-wheel .w-where { grid-area: 3 / 2; }
+.cp-wheel .w-order { grid-area: 2 / 1; } .cp-wheel .w-group { grid-area: 2 / 3; }
+.cp-wheel .w-mid { grid-area: 2 / 2; align-self: center; justify-self: center; padding: 2px 10px; border-radius: 10px; background: var(--hover); color: var(--dim); font-size: 11px; white-space: nowrap; }
 .cp-grid { width: 100%; border-collapse: collapse; }
 .cp-grid th { position: sticky; top: 0; background: var(--panel); text-align: left; color: var(--dim); font-weight: 600; border-bottom: 1px solid var(--line); padding: 2px 6px; white-space: nowrap; }
 .cp-grid th.sortable { cursor: pointer; }

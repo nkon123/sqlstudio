@@ -27,6 +27,8 @@ export interface GridOptions {
   /** 행·셀에 덧붙일 CSS 클래스 (결과 비교 등) — 없으면 그리는 데 아무것도 더하지 않는다 */
   rowClass?: (row: (string | null)[]) => string | null;
   cellClass?: (row: (string | null)[], col: number) => string | null;
+  /** 그리드가 키를 받기 전에. 참을 돌려주면 그리드는 그 키를 쓰지 않는다 */
+  onKeyDown?: (e: KeyboardEvent) => boolean;
 }
 
 /** 편집 모드 설정: ROWID 열 위치와 고칠 수 있는 열 */
@@ -104,6 +106,8 @@ export class ResultGrid {
   private showNotes = false;
   /** Ctrl+클릭으로 더한 셀들 (화면 행 * 10000 + 열) — 사각형(sel) 과 합쳐서 선택이 된다 */
   private picked = new Set<number>();
+  /** 키보드 커서 (화면 행·열) — 방향키가 여기서 움직인다. Ctrl+방향키는 선택을 두고 이것만 옮긴다 (Space 로 더하기) */
+  private cur: { r: number; c: number } | null = null;
   /** 고른 행만 보기(keep) / 고른 행 빼고 보기 — 화면에서만 거른다. 값은 rows 인덱스 */
   private rowMask: { keep: boolean; ids: Set<number> } | null = null;
   /** 머리 끝의 빈칸 — 본문의 세로 스크롤바 폭만큼. 없으면 오른쪽 끝에서 머리가 그만큼 덜 스크롤되어 열과 어긋난다 */
@@ -144,6 +148,7 @@ export class ResultGrid {
     this.rows = [];
     this.hasMore = false;
     this.sel = null;
+    this.cur = null;
     this.picked.clear();
     this.rowMask = null;
     this.view = [];
@@ -165,6 +170,7 @@ export class ResultGrid {
     this.rows = page.rows.slice();
     this.hasMore = page.has_more;
     this.sel = null;
+    this.cur = null;
     this.picked.clear();
     this.rowMask = null;
     this.sortCol = -1;
@@ -551,6 +557,7 @@ export class ResultGrid {
         }
         if (cellClass) { const cc = cellClass(this.rows[ri], c); if (cc) cell.classList.add(cc); }
         if (this.inSel(r, c)) cell.classList.add("sel");
+        if (this.cur && this.cur.r === r && this.cur.c === c) cell.classList.add("cur");
         cell.dataset.r = String(r);
         cell.dataset.c = String(c);
         row.append(cell);
@@ -680,6 +687,7 @@ export class ResultGrid {
     this.el.focus();
     // 이미 고른 셀 위의 오른쪽 클릭은 선택을 그대로 둔다 (고른 값으로 메뉴를 열려고)
     if (e.button === 2 && this.inSel(at.r, at.c)) return;
+    this.cur = { ...at };
     if ((e.ctrlKey || e.metaKey) && e.button === 0) {
       // Ctrl+클릭: 셀을 하나씩 더하거나 뺀다 (떨어진 셀·행도). 지금 사각형은 그 셀들로 바꿔 둔다
       for (const x of this.selCells()) this.picked.add(x.r * 10000 + x.c);
@@ -706,6 +714,7 @@ export class ResultGrid {
       if (p && this.sel && (p.r !== this.sel.r1 || p.c !== this.sel.c1)) {
         this.sel.r1 = p.r;
         this.sel.c1 = p.c;
+        this.cur = { ...p };
         this.update();
         this.status();
       }
@@ -741,6 +750,8 @@ export class ResultGrid {
   }
 
   private onKey(e: KeyboardEvent) {
+    if (this.opts.onKeyDown?.(e)) return;
+    if (this.navKey(e)) return;
     // 물리 키(code)로 비교 — Shift 를 누르면 key 가 "C" 가 되고, 한글 입력 상태에서는 "ㅊ" 이 된다
     if ((e.ctrlKey || e.metaKey) && e.code === "KeyC") {
       e.preventDefault();
@@ -759,6 +770,100 @@ export class ResultGrid {
       const el = this.body.querySelector(`.grid-cell[data-r="${this.sel.r1}"][data-c="${this.sel.c1}"]`) as HTMLElement | null;
       if (el) this.startEdit(this.sel.r1, this.sel.c1, el);
     }
+  }
+
+  // ── 키보드 이동 ─────────────────────────────────────
+
+  /** 방향키·PgUp/PgDn·Home/End·Space. 쓴 키면 참.
+   *  방향키: 그 셀 하나를 고른다 · Shift+: 넓힌다 · Ctrl+: 커서만 옮긴다 (고른 것은 그대로) · Space: 커서 셀을 더하거나 뺀다 (Ctrl+클릭) */
+  private navKey(e: KeyboardEvent): boolean {
+    if (e.altKey || !this.view.length || !this.columns.length) return false;
+    const cols = this.columns.map((_, i) => i).filter((i) => !this.hiddenCol(i));
+    if (!cols.length) return false;
+    const last = this.view.length - 1;
+    const page = Math.max(1, Math.floor(this.viewport.clientHeight / ROW_H) - 1);
+    if (e.key === " " && !e.ctrlKey && !e.shiftKey) {
+      if (!this.cur) return false;
+      e.preventDefault();
+      // 사각형은 낱낱의 셀로 바꿔 두고 커서 셀을 뒤집는다
+      for (const x of this.selCells()) this.picked.add(x.r * 10000 + x.c);
+      this.sel = null;
+      const k = this.cur.r * 10000 + this.cur.c;
+      if (this.picked.has(k)) this.picked.delete(k);
+      else this.picked.add(k);
+      this.update();
+      this.status();
+      return true;
+    }
+    const from = this.cur ?? (this.sel ? { r: this.sel.r1, c: this.sel.c1 } : null);
+    let r = Math.min(from?.r ?? 0, last);
+    let ci = Math.max(0, cols.indexOf(from?.c ?? cols[0]));
+    switch (e.key) {
+      case "ArrowUp": r = Math.max(0, r - 1); break;
+      case "ArrowDown": r = Math.min(last, r + 1); break;
+      case "ArrowLeft": ci = Math.max(0, ci - 1); break;
+      case "ArrowRight": ci = Math.min(cols.length - 1, ci + 1); break;
+      case "PageUp": r = Math.max(0, r - page); break;
+      case "PageDown": r = Math.min(last, r + page); break;
+      case "Home": if (e.ctrlKey) r = 0; else ci = 0; break;
+      case "End": if (e.ctrlKey) r = last; else ci = cols.length - 1; break;
+      default: return false;
+    }
+    e.preventDefault();
+    // 처음 누른 키는 커서를 첫 셀에 놓기만 한다
+    if (!from) { r = 0; ci = 0; }
+    const c = cols[ci];
+    this.cur = { r, c };
+    const moveOnly = e.ctrlKey && e.key !== "Home" && e.key !== "End";
+    if (e.shiftKey) {
+      if (!this.sel) this.sel = { r0: from?.r ?? r, c0: from?.c ?? c, r1: r, c1: c };
+      this.sel.r1 = r;
+      this.sel.c1 = c;
+    } else if (!moveOnly) {
+      this.picked.clear();
+      this.sel = { r0: r, c0: c, r1: r, c1: c };
+    }
+    this.reveal(r, c);
+    this.update();
+    this.status();
+    return true;
+  }
+
+  /** 그 셀이 보이게 스크롤 */
+  private reveal(r: number, c: number) {
+    const vp = this.viewport;
+    const top = r * ROW_H;
+    if (top < vp.scrollTop) vp.scrollTop = top;
+    else if (top + ROW_H > vp.scrollTop + vp.clientHeight) vp.scrollTop = top + ROW_H - vp.clientHeight;
+    const NUM_W = 56;
+    let left = NUM_W;
+    for (let i = 0; i < c; i++) if (!this.hiddenCol(i)) left += this.widths[i];
+    const right = left + this.widths[c];
+    if (left - NUM_W < vp.scrollLeft) vp.scrollLeft = left - NUM_W;
+    else if (right > vp.scrollLeft + vp.clientWidth) vp.scrollLeft = right - vp.clientWidth;
+  }
+
+  /** 화면 행 `r` 의 셀 하나를 고르고 커서를 둔다 (거르기 칸에서 ↓ 로 내려왔을 때 등) */
+  selectRow(r: number) {
+    if (!this.view.length) return;
+    r = Math.max(0, Math.min(this.view.length - 1, r));
+    const c = this.columns.findIndex((_, i) => !this.hiddenCol(i));
+    if (c < 0) return;
+    this.picked.clear();
+    this.sel = { r0: r, c0: c, r1: r, c1: c };
+    this.cur = { r, c };
+    this.reveal(r, c);
+    this.update();
+    this.status();
+  }
+
+  /** 키보드 커서 행의 화면 위치 (없으면 null) — 그 옆에 메뉴를 띄우려고 */
+  cursorRect(): { left: number; top: number; right: number; bottom: number } | null {
+    const r = this.cur?.r ?? this.sel?.r1;
+    if (r == null) return null;
+    const vp = this.viewport.getBoundingClientRect();
+    const top = Math.max(vp.top, Math.min(vp.bottom - ROW_H, vp.top + r * ROW_H - this.viewport.scrollTop));
+    return { left: vp.left, top, right: vp.right, bottom: top + ROW_H };
   }
 
   /** 선택 영역을 TSV 로 (엑셀에 바로 붙는다). Ctrl+Shift+C 는 헤더 포함. */

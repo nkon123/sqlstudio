@@ -3,9 +3,13 @@
 // 편집기에서 F4 (커서의 테이블·별칭), 왼쪽 테이블 목록에서 우클릭.
 // 결과 그리드와 같다: 셀 단위 선택(끌기·Shift) · Ctrl+C 고른 셀 복사(컬럼 칸만 고르면 이름만) · 머리 눌러 정렬 · 열 너비
 // 더블클릭: 컬럼 이름 넣기 · 우클릭: 이름 복사·넣기 · Esc: 닫기 · 머리 끌기: 옮기기 · 오른쪽 아래 모서리: 크기
+// 키보드: 방향키로 고르기 (Shift+ 넓히기 · Ctrl+ 커서만 · Space 더하기/빼기) · 글자를 치면 거르기 칸으로
+//   Enter: 커서가 있던 절에 맞춰 넣기 · Shift+Enter: 넣을 절 메뉴
+//   Ctrl+Shift(또는 Alt) 를 누르고 있으면 4방향 휠 — 누른 채 ↑ SELECT · ↓ WHERE · ← ORDER BY · → GROUP BY, 떼면 넣는다
 
 import type { Column, TableDesc } from "./api";
-import { showMenu } from "./ctxmenu";
+import { TARGET_LABEL, type Target } from "./colinsert";
+import { showMenu, type MenuItem } from "./ctxmenu";
 import { ResultGrid } from "./grid";
 import { h, toast } from "./ui";
 
@@ -25,7 +29,22 @@ export interface ColPopupOpts {
   ddl?: () => void;
   /** 컬럼 영향도 (이 컬럼을 쓰는 곳) */
   usage?: (column: string) => void;
+  /** 고른 컬럼을 SQL 에 넣는다 — "auto" 는 커서가 있던 절에 맞춰. 절을 알 수 없으면 false (메뉴로 고르게).
+   *  `from` 은 FROM 에 쓸 테이블 (커서 쪽에 문장이 없으면 새 SELECT 를 만든다) */
+  place?: (target: Target | "auto", cols: string[], from: string) => Promise<boolean>;
 }
+
+/** 휠을 여는 키 — Ctrl+Shift 가 Windows 입력 언어 전환 키인 PC 는 Alt 로 */
+type WheelKey = "ctrlshift" | "alt";
+const WHEEL_KEY = "colpopup.wheelKey";
+function wheelKey(): WheelKey {
+  try { return localStorage.getItem(WHEEL_KEY) === "alt" ? "alt" : "ctrlshift"; } catch { return "ctrlshift"; }
+}
+const WHEEL_LABEL: Record<WheelKey, string> = { ctrlshift: "Ctrl+Shift", alt: "Alt" };
+const TARGETS: Target[] = ["select", "where", "order", "group"];
+/** 방향 → 절 */
+const DIRS: Record<string, Target> = { ArrowUp: "select", ArrowDown: "where", ArrowLeft: "order", ArrowRight: "group" };
+const ARROW: Record<Target, string> = { select: "↑", where: "↓", order: "←", group: "→" };
 
 const open: HTMLElement[] = [];
 let zTop = 60;
@@ -71,6 +90,32 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
     const sel = grid.selectedRows();
     return (sel.length ? sel : grid.viewRows()).map((r) => prefix + (r[NAME] ?? ""));
   };
+  /** 고른 행의 컬럼 (넣기용 — 고른 게 없으면 빈 목록) */
+  const chosen = () => grid.selectedRows().map((r) => r[NAME]).filter((n): n is string => !!n).map((n) => prefix + n);
+  const fromText = `${d.owner}.${d.name}${o.alias ? ` ${o.alias}` : ""}`;
+  const NONE = "넣을 컬럼을 고르세요 (방향키 · Shift+방향키 · Space)";
+  const placeCols = async (target: Target | "auto") => {
+    if (view !== "cols") return;
+    const cols = chosen();
+    if (!cols.length) return toast(NONE, "info", 2000);
+    if (!o.place) return o.insert(cols.join(", "));
+    if (!(await o.place(target, cols, fromText))) placeMenu();
+  };
+  const placeItems = (): MenuItem[] => {
+    const k = WHEEL_LABEL[wheelKey()];
+    return [
+      { label: "커서 자리에 (절에 맞춰)", hint: "Enter", run: () => void placeCols("auto") },
+      ...TARGETS.map((t) => ({ label: `${TARGET_LABEL[t]} 에`, hint: `${k} ${ARROW[t]}`, run: () => void placeCols(t) })),
+      { label: "이름만 커서 자리에", run: () => { const c = chosen(); if (c.length) o.insert(c.join(", ")); } },
+    ];
+  };
+  /** 넣을 절 메뉴 — 커서 행 옆에 */
+  const placeMenu = () => {
+    const n = chosen().length;
+    if (!n) return toast(NONE, "info", 2000);
+    const r = grid.cursorRect() ?? body.getBoundingClientRect();
+    showMenu(r.left + 60, r.bottom, [{ title: `고른 컬럼 ${n}개 넣기` }, ...placeItems()]);
+  };
   const copyNames = () => {
     const v = names();
     navigator.clipboard.writeText(v.join("\n")).then(() => toast(`컬럼 이름 ${v.length}개 복사`, "info", 1500)).catch(() => {});
@@ -78,6 +123,21 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   const grid: ResultGrid = new ResultGrid({
     onStatus: () => { count.textContent = view === "cols" && grid.viewRows().length !== rows.length ? `${grid.viewRows().length}/${rows.length}` : ""; },
     onDoubleClick: (r) => { if (view === "cols" && r[NAME]) o.insert(prefix + r[NAME]); return true; },
+    onKeyDown: (e) => {
+      if (view !== "cols") return false;
+      if (e.key === "Enter" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        if (e.shiftKey) placeMenu();
+        else void placeCols("auto");
+        return true;
+      }
+      // 글자를 치면 거르기 칸으로 (그 글자는 칸에 들어간다)
+      if (e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        filter.focus();
+        return true;
+      }
+      return false;
+    },
     onContextMenu: (_r, _c, e) => {
       if (view !== "cols") return;
       const n = grid.selectedRows().length;
@@ -88,6 +148,11 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
         { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(grid.selectionText(true)).catch(() => {}) },
         { sep: true },
         { label: "컬럼 넣기", run: () => o.insert(names().join(", ")) },
+        ...(o.place ? [{ label: "절에 맞춰 넣기", sub: placeItems() }] : []),
+        { label: "휠 키", sub: (["ctrlshift", "alt"] as WheelKey[]).map((k) => ({
+          label: `${wheelKey() === k ? "✓ " : ""}${WHEEL_LABEL[k]} 누르고 있기`,
+          run: () => { try { localStorage.setItem(WHEEL_KEY, k); } catch { /* 기억 못 해도 된다 */ } },
+        })) },
         ...(o.usage ? [{ sep: true as const }, { label: "이 컬럼을 쓰는 곳 (영향도)", hint: "뷰·소스의 줄", run: () => { const c = _r[NAME]; if (c) o.usage!(c); } }] : []),
       ]);
     },
@@ -117,6 +182,8 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   }
 
   function close() {
+    closeWheel();
+    window.removeEventListener("blur", closeWheel);
     win.remove();
     open.splice(open.indexOf(win), 1);
   }
@@ -125,11 +192,70 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   tabIdx.onclick = () => { view = "idx"; tabIdx.classList.add("on"); tabCols.classList.remove("on"); render(); };
   // 거르기: 아무 칸에 든 글자 (그리드 필터식도 된다: 형식~DATE)
   filter.addEventListener("input", () => grid.setFilter(filter.value));
-  filter.addEventListener("keydown", (e) => { if (e.key === "ArrowDown") { e.preventDefault(); grid.el.focus(); } });
+  filter.addEventListener("keydown", (e) => {
+    if ((e.key === "ArrowDown" || (e.key === "Enter" && !e.isComposing)) && view === "cols") { e.preventDefault(); grid.el.focus(); grid.selectRow(0); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); grid.el.focus(); }
+  });
   body.append(grid.el);
   win.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { e.stopPropagation(); close(); }
   });
+
+  // ── 4방향 휠 ── 모디파이어만 0.2초 누르고 있으면 뜬다 (Ctrl+Shift+C 같은 단축키는 그 전에 다른 키가 와서 안 뜬다)
+  let wheelTimer = 0;
+  let wheel: { el: HTMLElement; dir: Target | null } | null = null;
+  const held = (e: KeyboardEvent) => (wheelKey() === "alt" ? e.altKey && !e.ctrlKey && !e.shiftKey : e.ctrlKey && e.shiftKey && !e.altKey);
+  const MODS = new Set(["Control", "Shift", "Alt"]);
+  const closeWheel = () => { clearTimeout(wheelTimer); wheelTimer = 0; wheel?.el.remove(); wheel = null; };
+  const pickDir = (t: Target) => {
+    if (!wheel) return;
+    wheel.dir = t;
+    for (const b of wheel.el.querySelectorAll<HTMLElement>("button")) b.classList.toggle("on", b.dataset.t === t);
+  };
+  const openWheel = () => {
+    const n = chosen().length;
+    if (!n || view !== "cols") return;
+    const el = h("div", { class: "cp-wheel" },
+      ...TARGETS.map((t) => h("button", { class: `w-${t}`, "data-t": t,
+        onmousedown: (ev: MouseEvent) => { ev.preventDefault(); closeWheel(); void placeCols(t); } },
+      h("span", { class: "k" }, ARROW[t]), TARGET_LABEL[t])),
+      h("div", { class: "w-mid" }, `${n}개`));
+    const r = grid.cursorRect() ?? body.getBoundingClientRect();
+    const W = 3 * 92 + 8, H = 3 * 34 + 8;
+    const cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+    el.style.left = `${Math.max(4, Math.min(window.innerWidth - W - 4, cx - W / 2))}px`;
+    el.style.top = `${Math.max(4, Math.min(window.innerHeight - H - 4, cy - H / 2))}px`;
+    document.body.append(el);
+    wheel = { el, dir: null };
+  };
+  // 잡기 단계 — 휠이 떠 있으면 방향키는 그리드로 가지 않는다
+  win.addEventListener("keydown", (e) => {
+    if (wheel) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (DIRS[e.key]) pickDir(DIRS[e.key]);
+      else if (e.key === "Escape") closeWheel();
+      return;
+    }
+    if (MODS.has(e.key)) {
+      if (e.key === "Alt" && wheelKey() === "alt") e.preventDefault();
+      if (held(e) && !wheelTimer && view === "cols") wheelTimer = window.setTimeout(() => { wheelTimer = 0; openWheel(); }, 200);
+    } else {
+      clearTimeout(wheelTimer);
+      wheelTimer = 0;
+    }
+  }, true);
+  win.addEventListener("keyup", (e) => {
+    if (!MODS.has(e.key) || held(e)) return;
+    clearTimeout(wheelTimer);
+    wheelTimer = 0;
+    if (!wheel) return;
+    e.preventDefault();
+    const t = wheel.dir;
+    closeWheel();
+    if (t) void placeCols(t);
+  }, true);
+  window.addEventListener("blur", closeWheel);
   win.addEventListener("mousedown", () => { win.style.zIndex = String(++zTop); });
 
   // 머리를 끌어 옮기기

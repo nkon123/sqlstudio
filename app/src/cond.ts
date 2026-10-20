@@ -13,7 +13,7 @@ interface Scan {
 }
 
 /** 문자열·따옴표 이름·주석을 건너뛰며 깊이 0 의 낱말을 모은다 */
-function scan(sql: string): Scan {
+export function scan(sql: string): Scan {
   const words: { w: string; at: number }[] = [];
   let depth = 0;
   let i = 0;

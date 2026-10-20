@@ -44,6 +44,8 @@ const GROUPS: [string, [string, string][]][] = [
   ["결과 그리드", [
     ["Ctrl+C", "고른 셀 복사"],
     ["Ctrl+A", "모두 고르기"],
+    ["방향키 · PgUp/PgDn · Home/End", "셀 옮기기 (Shift: 넓혀 고르기 · Ctrl+Home/End: 처음/끝 행)"],
+    ["Ctrl+방향키 · Space", "고른 것은 두고 커서만 옮기기 · 커서 셀 더하기/빼기 (떨어진 행 고르기)"],
     ["F2 · Enter", "셀 고치기 (편집 모드에서)"],
     ["Delete", "행 삭제 표시 (편집 모드에서, 다시 누르면 풀림)"],
     ["Esc", "거르기 칸 비우기 (거르기 칸에서)"],
@@ -51,6 +53,12 @@ const GROUPS: [string, [string, string][]][] = [
   ["컬럼 팝업 (F4)", [
     ["더블클릭", "컬럼 이름 넣기"],
     ["Ctrl+클릭 · Shift+클릭", "여러 행 고르기"],
+    ["방향키 · Shift+방향키", "고르기 · 넓혀 고르기 (거르기 칸에서 ↓ 로 내려온다)"],
+    ["Ctrl+방향키 · Space", "커서만 옮기기 · 그 행 더하기/빼기"],
+    ["Enter", "고른 컬럼을 커서가 있던 절에 맞춰 넣기 — SELECT·ORDER BY·GROUP BY 는 쉼표로, WHERE·ON·HAVING 은 '열 = '"],
+    ["Shift+Enter", "넣을 절 고르기 메뉴"],
+    ["Ctrl+Shift 누르고 있기", "4방향 휠 — ↑ SELECT · ↓ WHERE · ← ORDER BY · → GROUP BY, 떼면 그 절에 넣는다 (우클릭 > 휠 키 에서 Alt 로 바꿀 수 있음)"],
+    ["글자 입력", "거르기 칸으로"],
     ["Ctrl+A · Ctrl+C", "모두 고르기 · 고른 행 복사"],
     ["Esc", "닫기"],
   ]],

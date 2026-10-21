@@ -20,7 +20,7 @@ import { showSpace } from "./space";
 import { enableTabDrag } from "./tabdrag";
 import { cellCondition, listCondition, listText, placeCondition, type CondOp, type ListCond, type ListText } from "./cond";
 import { SqlEditor, changeCase } from "./editor";
-import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from "./format";
+import { DEFAULT_PREFS, STYLE_PRESETS, autoFormat, detectPrefs, formatSql, loadPrefs, savePrefs, setAutoFormat, startsWithDml, type AutoFormat, type FormatPrefs } from "./format";
 import type { GitPanel } from "./git";
 import { ResultGrid } from "./grid";
 import { guessTable, toCsv as toCsvText, toInserts as toInsertsText, unsupported as unsupportedCols } from "./export-text";
@@ -904,8 +904,18 @@ class App {
   async runStatement() {
     const t = this.need();
     if (!t || !t.conn) return;
-    const cur = await this.currentStatement(t);
+    let cur = await this.currentStatement(t);
     if (!cur) return toast("실행할 문장이 없습니다", "error");
+    // 자동 포맷: 실행하는 문장을 먼저 정리 (선택해서 실행할 때는 그대로)
+    if (autoFormat().onRun && !t.editor.selection()) {
+      const src = t.editor.view.state.sliceDoc(cur.from, cur.to);
+      const r = startsWithDml(src) ? formatSql(src) : null;
+      if (r?.ok && r.text !== src) {
+        t.editor.view.dispatch({ changes: { from: cur.from, to: cur.to, insert: r.text }, selection: { anchor: cur.from + r.text.length }, userEvent: "input.format" });
+        cur = await this.currentStatement(t);
+        if (!cur) return toast("실행할 문장이 없습니다", "error");
+      }
+    }
     const { a, from, to } = cur;
     const stmt = a.statement!;
     let binds: [string, string | null][] = [];
@@ -2200,6 +2210,22 @@ class App {
       { sep: true },
       { label: "실행 이력", hint: "F8", run: () => this.showHistory() },
       { label: "SQL 포맷", hint: "Ctrl+Shift+F", run: () => void this.formatSql() },
+      { label: `자동 포맷${Object.values(autoFormat()).some(Boolean) ? " (켜짐)" : ""}`, sub: this.autoFormatItems() },
+    ];
+  }
+
+  /** 자동 포맷 켜기/끄기 — 파일 메뉴의 하위 메뉴와 명령 검색이 같이 쓴다 */
+  private autoFormatItems(): MenuItem[] {
+    const a = autoFormat();
+    const item = (k: keyof AutoFormat, label: string): MenuItem =>
+      ({ label: `${a[k] ? "✓ " : "　 "}${label}`, run: () => { setAutoFormat({ [k]: !a[k] }); toast(`${label}: ${a[k] ? "끔" : "켬"}`, "info", 1500); } });
+    return [
+      item("caseOnType", "키워드 대소문자 바로 맞추기"),
+      item("onSemicolon", "; 를 치면 그 문장 정리"),
+      item("onPaste", "SQL 을 붙여 넣으면 정리"),
+      item("onRun", "실행할 때 그 문장 정리"),
+      { sep: true },
+      { label: "포맷 스타일…", run: () => void this.settings("편집기") },
     ];
   }
 
@@ -2240,6 +2266,9 @@ class App {
       { group: "파일", label: "저장", keys: "Ctrl+S", alias: "save", run: () => void this.save() },
       { group: "파일", label: "다른 이름으로 저장", keys: "Ctrl+Shift+S", alias: "save as", run: () => void this.saveAs() },
       { group: "편집", label: "SQL 포맷", keys: "Ctrl+Shift+F", alias: "format 정리", run: () => void this.formatSql() },
+      ...this.autoFormatItems().flatMap((it): Command[] => ("run" in it && it.run && !it.label.endsWith("…")
+        ? [{ group: "자동 포맷", label: `${it.label.slice(2)} ${it.label.startsWith("✓") ? "끄기" : "켜기"}`, alias: "auto format 자동 정리", run: it.run }] : [])),
+      { group: "편집", label: "포맷 스타일 설정", alias: "format style 정렬 쉼표", run: () => void this.settings("편집기") },
       { group: "편집", label: "실행 이력", keys: "F8", alias: "history", run: () => this.showHistory() },
       { group: "도구", label: "PL/SQL 분석", alias: "analyze", disabled: off("analyze"), run: () => this.analyzeActive() },
       { group: "도구", label: "데이터 흐름도", alias: "dfd flow", run: () => this.openDfd() },
@@ -2259,7 +2288,7 @@ class App {
 
   // ── 설정 ─────────────────────────────────────────
 
-  async settings() {
+  async settings(page = "접속") {
     const body = h("div", { class: "settings" });
     const nav = h("nav", { class: "settings-nav" });
     const pages: Record<string, () => Promise<HTMLElement>> = {
@@ -2276,7 +2305,7 @@ class App {
     };
     for (const name of Object.keys(pages)) nav.append(h("button", { onclick: (e: Event) => { e.preventDefault(); showPage(name); } }, name));
     body.append(nav, content);
-    showPage("접속");
+    showPage(pages[page] ? page : "접속");
     await modal("설정", body, [{ label: "닫기", value: true, kind: "primary" }], { wide: true });
     await this.reloadProfiles();
     await this.ai.load();
@@ -2353,26 +2382,78 @@ class App {
     const p = loadPrefs();
     const sel = (cur: string, opts: [string, string][]) =>
       h("select", {}, ...opts.map(([v, l]) => h("option", { value: v, selected: v === cur }, l))) as HTMLSelectElement;
+    const style = sel(p.style, Object.entries(STYLE_PRESETS).map(([k, v]) => [k, v.label]));
     const kw = sel(p.keywordCase, [["upper", "대문자 (SELECT)"], ["lower", "소문자 (select)"], ["preserve", "그대로"]]);
+    const ident = sel(p.identCase, [["preserve", "그대로"], ["upper", "대문자 (EMP)"], ["lower", "소문자 (emp)"]]);
+    const comma = sel(p.commaBefore ? "before" : "after", [["before", "줄 앞 (, SAL)"], ["after", "줄 끝 (SAL,)"]]);
     const ind = sel(String(p.indent), [["2", "2칸"], ["4", "4칸"]]);
     const logic = sel(p.logicalBefore ? "before" : "after", [["before", "줄 앞 (AND x = 1)"], ["after", "줄 끝 (x = 1 AND)"]]);
     const width = h("input", { type: "number", min: "20", max: "200", value: String(p.expressionWidth) }) as HTMLInputElement;
     const preview = h("pre", { class: "format-preview" });
-    const sample = "select o.id, c.name, sum(o.amt) total from orders o join customers c on c.id = o.cust_id where o.dt >= trunc(sysdate) - 7 and c.grade in ('A','B') group by o.id, c.name order by total desc";
+    const sample = "select o.order_id, c.cust_nm, sum(i.qty * i.price) total, case when o.status = 'C' then '취소' else '정상' end st " +
+      "from orders o join customers c on c.cust_id = o.cust_id left join order_items i on i.order_id = o.order_id and i.use_yn = 'Y' " +
+      "where o.order_dt >= trunc(sysdate) - 7 and c.grade in ('A', 'B') and exists (select 1 from payments p where p.order_id = o.order_id) " +
+      "group by o.order_id, c.cust_nm, o.status order by total desc";
+    // 스타일마다 쓰는 항목만 보인다
+    const fComma = field("쉼표 위치", comma);
+    const fInd = field("들여쓰기", ind);
+    const fWidth = field("한 줄 너비", width, " ");
     const read = (): FormatPrefs => ({
+      style: style.value as FormatPrefs["style"],
       keywordCase: kw.value as FormatPrefs["keywordCase"],
+      identCase: ident.value as FormatPrefs["identCase"],
+      commaBefore: comma.value === "before",
       indent: ind.value === "4" ? 4 : 2,
       expressionWidth: Math.max(20, Math.min(200, Number(width.value) || DEFAULT_PREFS.expressionWidth)),
       logicalBefore: logic.value === "before",
     });
+    const set = (q: Partial<FormatPrefs>) => {
+      if (q.style) style.value = q.style;
+      if (q.keywordCase) kw.value = q.keywordCase;
+      if (q.identCase) ident.value = q.identCase;
+      if (q.commaBefore !== undefined) comma.value = q.commaBefore ? "before" : "after";
+      if (q.logicalBefore !== undefined) logic.value = q.logicalBefore ? "before" : "after";
+      if (q.indent) ind.value = String(q.indent);
+      if (q.expressionWidth) width.value = String(q.expressionWidth);
+    };
     const update = () => {
       const prefs = read();
       savePrefs(prefs);
+      fComma.hidden = prefs.style === "left";
+      fInd.hidden = prefs.style !== "left";
+      fWidth.hidden = prefs.style === "river";
+      const hint = fWidth.querySelector("small");
+      if (hint) hint.textContent = prefs.style === "left" ? "괄호 식이 이보다 길면 여러 줄로 나눕니다" : "목록을 이 너비까지 한 줄에 채웁니다";
       const r = formatSql(sample, prefs);
       preview.textContent = r.ok ? r.text : r.reason;
     };
-    for (const el of [kw, ind, logic, width]) el.addEventListener("change", update);
+    // 스타일을 고르면 그 스타일의 기본 모양으로 (대소문자는 그대로)
+    style.addEventListener("change", () => { set(STYLE_PRESETS[style.value as FormatPrefs["style"]].prefs); update(); });
+    for (const el of [kw, ident, comma, ind, logic, width]) el.addEventListener("change", update);
+    const fromSample = h("button", { class: "small", title: "마음에 드는 모양으로 정리한 SQL 을 붙여 넣으면 쉼표·AND 위치, 키워드 정렬, 대소문자를 읽어 맞춘다", onclick: async (e: Event) => {
+      e.preventDefault();
+      const ta = h("textarea", { rows: 12, class: "snip-body", placeholder: "SELECT JOB\n     , MGR\n  FROM emp\n WHERE 1 = 1" }) as HTMLTextAreaElement;
+      const ok = await modal("예시로 맞추기", h("div", { class: "form" },
+        h("small", {}, "원하는 모양으로 정리한 SQL 을 붙여 넣으세요. 쉼표·AND 위치, 키워드 정렬, 키워드·이름 대소문자를 읽어 설정을 맞춥니다."), ta),
+        [{ label: "취소", value: false }, { label: "맞추기", value: true, kind: "primary" }], { wide: true });
+      if (!ok || !ta.value.trim()) return;
+      const d = detectPrefs(ta.value);
+      if (!d.found.length) return toast("읽을 수 있는 모양이 없습니다 — SELECT·FROM·쉼표가 든 SQL 을 넣어 보세요", "info");
+      set(d.prefs);
+      update();
+      toast(`맞췄습니다: ${d.found.join(" · ")}`, "ok", 5000);
+    } }, "예시로 맞추기…");
     update();
+    const autoBox = h("div", { class: "auto-format" }, ...([
+      ["caseOnType", "키워드 대소문자 바로 맞추기 (낱말을 다 치면)"],
+      ["onSemicolon", "줄 끝에서 ; 를 치면 그 문장 정리"],
+      ["onPaste", "SQL 문장을 붙여 넣으면 정리"],
+      ["onRun", "실행(Ctrl+Enter)할 때 그 문장 정리"],
+    ] as [keyof AutoFormat, string][]).map(([k, label]) => {
+      const cb = h("input", { type: "checkbox", checked: autoFormat()[k] }) as HTMLInputElement;
+      cb.onchange = () => setAutoFormat({ [k]: cb.checked });
+      return h("label", { class: "check" }, cb, label);
+    }));
     // 실행 이력 켜기/끄기·지우기
     const histOn = h("input", { type: "checkbox" });
     const histDir = h("small", {});
@@ -2406,9 +2487,11 @@ class App {
       colorRow("sel", "편집기 선택 영역 색", "글을 드래그하거나 낱말을 더블클릭해 고른 곳의 배경색 — 밝은 화면·어두운 화면이 따로 기억됩니다"),
       colorRow("match", "같은 낱말 강조 색", "낱말을 고르면 같은 낱말이 나오는 다른 곳에 칠하는 배경색"),
       h("h3", {}, "SQL 포맷 (Ctrl+Shift+F)"),
-      field("키워드", kw), field("들여쓰기", ind), field("AND / OR 위치", logic),
-      field("괄호 식 한 줄 최대 길이", width, "이보다 길면 여러 줄로 나눕니다"),
-      h("small", {}, "바꾸면 바로 저장됩니다. 포맷 결과가 공백·대소문자 말고 원본과 달라지면 적용하지 않습니다. PL/SQL 블록은 아직 포맷하지 않습니다."),
+      field("스타일", h("div", { class: "row", style: "display:flex;gap:8px;align-items:center" }, style, fromSample)),
+      field("쓰는 동안 자동 포맷", autoBox, "파일 메뉴 > 자동 포맷 에서도 켜고 끕니다"),
+      field("키워드", kw), field("테이블·컬럼 이름", ident), fComma, field("AND / OR 위치", logic), fInd, fWidth,
+      h("small", {}, "바꾸면 바로 저장됩니다. 포맷 결과가 공백·대소문자 말고 원본과 달라지면 적용하지 않습니다. PL/SQL 블록은 아직 포맷하지 않습니다. " +
+        "오른쪽 맞춤·간결은 SELECT·WITH·INSERT·UPDATE·DELETE 를 다루고, 그 밖(MERGE·DDL)은 왼쪽 정렬로 정리합니다."),
       field("미리 보기", preview),
       h("h3", {}, "여러 곳 편집 (열 편집)"),
       h("pre", { class: "format-preview" },

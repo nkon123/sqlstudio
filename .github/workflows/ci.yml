@@ -27,6 +27,7 @@ jobs:
         run: |
           npm ci
           npx tsc --noEmit
+          npm test
           npx vite build
       - name: Rust 테스트 (DB 없이)
         run: cargo test --workspace

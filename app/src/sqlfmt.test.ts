@@ -1,0 +1,143 @@
+// npm test — 포맷 결과가 원하는 모양인지, 같은 SQL 인지
+import { detectPrefs, formatSql, sameSql, startsWithDml, DEFAULT_PREFS, type FormatPrefs } from "./format";
+
+// 자동 포맷이 손댈 문장인지 — PL/SQL 조각·DDL 은 아니다
+for (const [s, want] of [["select 1 from dual", true], ["  -- 주석\n  WITH a AS (select 1 from dual) select * from a", true], ["(select a from t) union select b from u", true],
+  ["update t set a = 1", true], ["x := 1;", false], ["create table t (a number)", false], ["begin null; end;", false], ["selected := 1", false]] as [string, boolean][]) {
+  if (startsWithDml(s) !== want) throw new Error(`startsWithDml(${JSON.stringify(s)}) 가 ${want} 가 아님`);
+}
+
+const river: FormatPrefs = { ...DEFAULT_PREFS };
+let n = 0;
+function eq(sql: string, want: string, prefs: FormatPrefs = river) {
+  const r = formatSql(sql, prefs);
+  if (!r.ok) throw new Error(`포맷 실패: ${r.reason}\n${sql}`);
+  if (r.text !== want) throw new Error(`다름\n--- 원하는 것\n${want}\n--- 나온 것\n${r.text}`);
+  if (!sameSql(sql, r.text)) throw new Error("다른 SQL");
+  // 다시 포맷해도 같아야 한다
+  const again = formatSql(r.text, prefs);
+  if (!again.ok || again.text !== want) throw new Error(`두 번째 포맷이 다름\n${again.ok ? again.text : again.reason}`);
+  n++;
+}
+
+// 사용자가 보여 준 모양
+eq("select JOB, MGR, HIREDATE, SAL, COMM from emp where 1=1",
+`SELECT JOB
+     , MGR
+     , HIREDATE
+     , SAL
+     , COMM
+  FROM emp
+ WHERE 1 = 1`);
+
+// 조인·CASE·서브쿼리·GROUP BY·ORDER BY
+eq("select o.order_id, c.cust_nm, sum(i.qty * i.price) total, case when o.status = 'C' then '취소' else '정상' end st from orders o join customers c on c.cust_id = o.cust_id left join order_items i on i.order_id = o.order_id and i.use_yn = 'Y' where o.order_dt >= trunc(sysdate) - 7 and c.grade in ('A', 'B') and exists (select 1 from payments p where p.order_id = o.order_id) group by o.order_id, c.cust_nm, o.status having sum(i.qty) > 0 order by total desc",
+`SELECT o.order_id
+     , c.cust_nm
+     , SUM(i.qty * i.price) total
+     , CASE WHEN o.status = 'C' THEN '취소'
+            ELSE '정상'
+       END st
+  FROM orders o
+  JOIN customers c
+    ON c.cust_id = o.cust_id
+  LEFT JOIN order_items i
+    ON i.order_id = o.order_id
+   AND i.use_yn = 'Y'
+ WHERE o.order_dt >= TRUNC(SYSDATE) - 7
+   AND c.grade IN ('A', 'B')
+   AND EXISTS (SELECT 1
+                 FROM payments p
+                WHERE p.order_id = o.order_id)
+ GROUP BY o.order_id
+        , c.cust_nm
+        , o.status
+HAVING SUM(i.qty) > 0
+ ORDER BY total DESC`);
+
+// UPDATE · IN 서브쿼리
+eq("update orders o set o.status = 'S', o.upd_dt = sysdate where o.order_id in (select x.order_id from tmp x where x.flag = 'Y')",
+`UPDATE orders o
+   SET o.status = 'S'
+     , o.upd_dt = SYSDATE
+ WHERE o.order_id IN (SELECT x.order_id
+                        FROM tmp x
+                       WHERE x.flag = 'Y')`);
+
+// DELETE · BETWEEN 의 AND 는 나누지 않는다 · 음수
+eq("delete from orders where order_dt between date '2026-01-01' and date '2026-01-31' and amt < -1",
+`DELETE FROM orders
+ WHERE order_dt BETWEEN DATE '2026-01-01' AND DATE '2026-01-31'
+   AND amt < -1`);
+
+// INSERT … SELECT · 함수 괄호 · 바인드
+eq("insert into t (a, b) select :a, nvl(x, 0) from s where s.id = :id",
+`INSERT INTO t (a, b)
+SELECT :a
+     , NVL(x, 0)
+  FROM s
+ WHERE s.id = :id`);
+
+// WITH · UNION ALL · 인라인 뷰 · 분석 함수
+eq("with s as (select cust_id, sum(amt) amt from orders group by cust_id) select * from (select s.*, row_number() over (partition by s.cust_id order by s.amt desc) rn from s) t where t.rn = 1 union all select null, 0, 0 from dual",
+`WITH s AS (SELECT cust_id
+                , SUM(amt) amt
+             FROM orders
+            GROUP BY cust_id)
+SELECT *
+  FROM (SELECT s.*
+             , ROW_NUMBER() OVER (PARTITION BY s.cust_id ORDER BY s.amt DESC) rn
+          FROM s) t
+ WHERE t.rn = 1
+UNION ALL
+SELECT NULL
+     , 0
+     , 0
+  FROM dual`);
+
+// 주석 · 힌트 · 따옴표 이름 · 문장 둘
+eq("select /*+ index(e ix_emp) */ e.\"Name\", -- 이름\n e.sal from emp e;\nselect 1 from dual;",
+`SELECT /*+ index(e ix_emp) */ e."Name" -- 이름
+     , e.sal
+  FROM emp e;
+
+SELECT 1
+  FROM dual;`);
+
+// 계층 쿼리 · OR · 쉼표 뒤 · AND 끝
+eq("select level, name from dept start with parent_id is null connect by prior id = parent_id and use_yn = 'Y' or level < 3 order siblings by sort_no",
+`SELECT LEVEL,
+       name
+  FROM dept
+ START WITH parent_id IS NULL
+ CONNECT BY PRIOR id = parent_id AND
+       use_yn = 'Y' OR
+       LEVEL < 3
+ ORDER SIBLINGS BY sort_no`, { ...river, commaBefore: false, logicalBefore: false });
+
+// 간결: 목록을 한 줄에
+eq("select a, b, c, d from t where x = 1",
+`SELECT a, b, c, d
+  FROM t
+ WHERE x = 1`, { ...river, style: "compact", commaBefore: false, expressionWidth: 100 });
+
+// 소문자 키워드 · 이름 대문자
+eq("SELECT a FROM t WHERE x = 1",
+`select A
+  from T
+ where X = 1`, { ...river, keywordCase: "lower", identCase: "upper" });
+
+// MERGE 는 오른쪽 맞춤이 다루지 않는다 → 왼쪽 정렬로 (실패하지 않는다)
+const m = formatSql("merge into t using s on (t.id = s.id) when matched then update set t.a = s.a", river);
+if (!m.ok) throw new Error("MERGE 포맷 실패");
+
+// 예시로 맞추기
+const d = detectPrefs("SELECT JOB\n     , MGR\n  FROM emp\n WHERE 1 = 1\n   AND x = 2");
+const want = { style: "river", commaBefore: true, logicalBefore: true, keywordCase: "upper", identCase: "preserve" };
+for (const [k, v] of Object.entries(want)) if ((d.prefs as Record<string, unknown>)[k] !== v) throw new Error(`예시 읽기: ${k} = ${(d.prefs as Record<string, unknown>)[k]}`);
+const d2 = detectPrefs("select\n    job,\n    mgr\nfrom\n    emp\nwhere\n    a = 1 and\n    b = 2");
+if (d2.prefs.style !== "left" || d2.prefs.indent !== 4 || d2.prefs.commaBefore !== false || d2.prefs.logicalBefore !== false || d2.prefs.keywordCase !== "lower") {
+  throw new Error(`예시 읽기(왼쪽): ${JSON.stringify(d2.prefs)}`);
+}
+
+console.log(`  포맷 ${n}건`);

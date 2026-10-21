@@ -46,6 +46,10 @@ jobs:
         # provider_down_stops_quickly 는 Windows 러너에서 시간 상한을 넘기곤 한다 (리눅스 CI 에서 돈다)
         run: cargo test --workspace -- --skip provider_down_stops_quickly
 
+      - name: 화면 테스트 (SQL 포맷 등)
+        working-directory: app
+        run: npm test
+
       - name: 설치 파일 (라이선스 고지 생성 → 화면 빌드 → NSIS)
         working-directory: app
         run: npx tauri build

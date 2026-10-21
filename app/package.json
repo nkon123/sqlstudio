@@ -10,7 +10,8 @@
     "mock": "vite --mode mock --port 1430 --strictPort --open",
     "tauri": "tauri",
     "tauri:mock": "tauri dev --config src-tauri/tauri.mock.json",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.0",

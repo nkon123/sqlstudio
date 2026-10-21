@@ -22,6 +22,7 @@ import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import type { Command } from "@codemirror/view";
 import { EditorSelection, EditorState, StateEffect, StateField } from "@codemirror/state";
 import { type CaseMode, convertRange } from "./case-convert";
+import { autoFormatExtension, caseWordBefore } from "./autofmt";
 import {
   Decoration, type DecorationSet, EditorView, drawSelection, highlightActiveLine, highlightActiveLineGutter,
   crosshairCursor, keymap, lineNumbers, rectangularSelection,
@@ -30,6 +31,8 @@ import {
 /** Enter — 줄을 나누고, 새 줄을 지금 줄의 들여쓰기(첫 글자 자리)와 같게. 커서가 들여쓰기 안에 있으면 커서 앞까지만 */
 export function newlineSameIndent(view: EditorView): boolean {
   if (view.state.readOnly) return false;
+  // 자동 포맷: 줄을 바꾸기 전에 앞 낱말의 키워드 대소문자
+  if (view.state.selection.ranges.length === 1 && view.state.selection.main.empty) caseWordBefore(view, view.state.selection.main.head, "\n");
   const tr = view.state.changeByRange((range) => {
     const line = view.state.doc.lineAt(range.from);
     const lead = /^[ \t]*/.exec(line.text)![0];
@@ -175,6 +178,7 @@ export class SqlEditor {
           }),
           sql({ dialect: ORACLE, upperCaseKeywords: true }),
           marks,
+          autoFormatExtension(),
           keymap.of([
             { key: "Ctrl-Enter", mac: "Cmd-Enter", run: run(actions.runStatement), preventDefault: true },
             // 줄바꿈: 새 줄은 지금 줄의 첫 글자와 같은 자리에서 시작 (언어 규칙으로 들여쓰기를 따로 정하지 않는다)

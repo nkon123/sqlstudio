@@ -67,7 +67,9 @@ type Progress =
 
 type View = "summary" | "calls" | "dfd" | "tables" | "gaps" | "findings" | "quality";
 const keyOf = (u: UnitRef) => `${u.owner}.${u.name}.${u.unit_type.replace(/ /g, "_")}`;
-const when = (t?: number | null) => (t ? new Date(t * 1000).toLocaleString() : "");
+// 서식 객체를 한 번만 만든다 — toLocaleString 은 부를 때마다 만들어 수천 행 목록에서 느리다
+const WHEN_FMT = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "medium" });
+const when = (t?: number | null) => (t ? WHEN_FMT.format(new Date(t * 1000)) : "");
 const short = (id: string) => id.split(".").slice(1).join(".");
 /** 쓰임의 근거 — 테이블 화면의 배지 */
 const CONF: Record<string, [string, string, string]> = {
@@ -589,7 +591,20 @@ export class AnalysisView {
     this.renderList();
   }
 
+  private listTimer = 0;
+
+  /** 분석 중 단위가 끝날 때마다 — 모아서 0.5초에 한 번만 다시 그린다. 정적 분석은 단위가 1초에 수십 개씩 끝나,
+   *  그때마다 수천 행을 다시 그리면 화면이 묶여 다른 탭의 방향키·입력까지 늦어진다 */
+  private renderListSoon() {
+    if (this.listTimer) return;
+    this.listTimer = window.setTimeout(() => {
+      this.listTimer = 0;
+      this.renderList();
+    }, 500);
+  }
+
   private renderList() {
+    if (this.listTimer) { clearTimeout(this.listTimer); this.listTimer = 0; }
     const rows = this.rows.map((r) => {
       const k = keyOf(r);
       const state = r.warning ? "읽을 수 없음" : r.analyzed_at ? `${r.chunks ?? 0}조각${r.failed ? ` · 실패 ${r.failed}` : ""}` : "—";
@@ -800,7 +815,7 @@ export class AnalysisView {
       } else if (e.type === "unit_done") {
         const k = e.key!;
         const r = this.rows.find((x) => keyOf(x) === k);
-        if (r) { r.analyzed_at = Date.now() / 1000; this.checked.delete(k); this.renderList(); }
+        if (r) { r.analyzed_at = Date.now() / 1000; this.checked.delete(k); this.renderListSoon(); }
       }
     } else if (p.type === "finished") {
       void this.refreshSets();

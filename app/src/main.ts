@@ -294,7 +294,7 @@ export class App {
     t.editor.focus();
   }
 
-  async start() {
+  async start(tModules = 0, tBuilt = 0) {
     applyTheme();
     // 자동완성 캐시 적재 진행 (프로필마다 백그라운드)
     listen<{ profile: string; phase: string; objects: number; columns: number; error?: string | null }>("completion-status", (e) => {
@@ -340,6 +340,11 @@ export class App {
     await this.restoreTabs();
     mark(`탭 ${this.tabs.length}개`);
     void invoke("client_log", { level: "info", message: `시작(화면): ${lap.join(" · ")} · 합계 ${Math.round(performance.now() - t0)}ms (화면을 불러온 지 ${Math.round(t0)}ms 뒤 시작)` }).catch(() => {});
+    // 그 앞 — 문서·스크립트 받기, 모듈 실행, 첫 화면 구성 (어디서 몇 초가 걸리는지)
+    const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+    const js = (performance.getEntriesByType("resource") as PerformanceResourceTiming[]).find((r) => /\/assets\/main-[^/]*\.js/.test(r.name));
+    const ms = (x?: number) => (x == null ? "?" : `${Math.round(x)}ms`);
+    void invoke("client_log", { level: "info", message: `시작(화면 앞): 문서 받음 ${ms(nav?.responseEnd)} · main.js 받기 ${ms(js?.startTime)}~${ms(js?.responseEnd)} · 모듈 실행 끝 ${ms(tModules)} · 첫 화면 구성 ${ms(tBuilt - tModules)} · 시작 작업 시작 ${ms(t0)}` }).catch(() => {});
     // 몇 초마다 바뀐 탭이 있으면 저장 (프로그램이 죽어도 쓰던 SQL 이 남게)
     window.setInterval(() => void this.saveTabs(), 3000);
     if (localStorage.getItem("git.last")) {
@@ -1909,5 +1914,8 @@ function normPath(p: string) {
   return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
+// 시작 시간 나누기 — 모듈을 다 읽고 여기 오기까지(ESM 이라 위의 import 를 모두 실행한 뒤) · 첫 화면 구성
+const T_MODULES = performance.now();
 const app = new App(document.getElementById("app")!);
-app.start().catch((e) => alertBox("시작 오류", errOf(e).message));
+const T_BUILT = performance.now();
+app.start(T_MODULES, T_BUILT).catch((e) => alertBox("시작 오류", errOf(e).message));

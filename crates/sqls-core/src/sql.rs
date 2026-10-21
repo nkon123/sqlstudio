@@ -429,6 +429,11 @@ pub fn bind_names(stmt: &str) -> Vec<String> {
 
 /// 스크립트를 문장 단위로 자른다 (Toad 의 F5 "스크립트 실행").
 pub fn split_script(src: &str) -> Vec<Statement> {
+    split(src, false)
+}
+
+/// `blank_line`: 빈 줄(공백만 있는 줄, CRLF 도)에서도 문장을 끊는다 — 커서 위치 문장용. PL/SQL 블록은 빈 줄로 끊지 않는다
+fn split(src: &str, blank_line: bool) -> Vec<Statement> {
     let mut out = Vec::new();
     let mut start: Option<usize> = None; // 현재 문장 시작 (공백 제외)
     let mut kind: Option<StmtKind> = None; // 시작 직후 판정
@@ -507,6 +512,14 @@ pub fn split_script(src: &str) -> Vec<Statement> {
             push(&mut out, s, pos + 1, k);
             start = None;
         }
+        // 다음 줄이 빈 줄이면 여기서 끝 (문자열·주석 속 줄바꿈은 여기 오지 않는다)
+        if blank_line && ch == '\n' && !block {
+            let rest = &src[pos + 1..];
+            if rest.find('\n').is_some_and(|n| rest[..n].trim().is_empty()) {
+                push(&mut out, s, pos, k);
+                start = None;
+            }
+        }
         true
     });
     if let Some(s) = start {
@@ -549,8 +562,9 @@ fn finish_text(raw: &str, kind: StmtKind) -> String {
 }
 
 /// 커서 위치의 문장 (Toad 의 Ctrl+Enter / F9).
+/// 세미콜론·"/" 줄에 더해 빈 줄에서도 끊는다 (세미콜론 없이 빈 줄로 나눠 쓴 문장들)
 pub fn statement_at(src: &str, cursor: usize) -> Option<Statement> {
-    let stmts = split_script(src);
+    let stmts = split(src, true);
     // 커서가 문장 안이거나, 문장 끝 바로 뒤(같은 줄)에 있으면 그 문장
     stmts
         .iter()
@@ -562,6 +576,29 @@ pub fn statement_at(src: &str, cursor: usize) -> Option<Statement> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statement_at_blank_line() {
+        // 세미콜론 없이 빈 줄로 나눈 문장 (CRLF·공백만 있는 줄도 빈 줄)
+        let src = "select 1\r\n  from dual\r\n\r\nselect 2 from dual\n   \t\nselect 3 from dual";
+        let at = |w: &str| statement_at(src, src.find(w).unwrap()).unwrap().text;
+        assert_eq!(at("1"), "select 1\r\n  from dual");
+        assert_eq!(at("2"), "select 2 from dual");
+        assert_eq!(at("3"), "select 3 from dual");
+        // 빈 줄 바로 위 줄 끝에 커서가 있어도 그 문장
+        assert_eq!(statement_at(src, src.find("dual").unwrap() + 4).unwrap().text, "select 1\r\n  from dual");
+        // 세미콜론은 그대로
+        let s2 = "select 1 from dual; select 2 from dual";
+        assert_eq!(statement_at(s2, s2.find('2').unwrap()).unwrap().text, "select 2 from dual");
+        // 문자열·주석 속 빈 줄은 끊지 않는다
+        let s3 = "select 'a\n\nb' x,\n/* c\n\n */ 1 from dual";
+        assert_eq!(statement_at(s3, 0).unwrap().text, s3);
+        // PL/SQL 블록 안의 빈 줄은 끊지 않는다
+        let s4 = "begin\n  null;\n\n  null;\nend;\n/\n\nselect 1 from dual";
+        assert_eq!(statement_at(s4, 0).unwrap().text, "begin\n  null;\n\n  null;\nend;");
+        // 스크립트 실행(F5)은 빈 줄로 끊지 않는다
+        assert_eq!(split_script("select 1\n\nfrom dual").len(), 1);
+    }
 
     #[test]
     fn classify_basic() {

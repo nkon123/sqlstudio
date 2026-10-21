@@ -80,6 +80,31 @@ pub fn load(user_file: Option<&Path>) -> Vec<Guide> {
     all
 }
 
+/// 기본 카드 (사용자 파일과 견줄 때)
+pub fn builtin_cards() -> &'static [Guide] {
+    builtin()
+}
+
+/// 기본 카드 하나의 원문 ("@@ 머리" 줄부터 다음 카드 앞까지) — 사용자 파일에 옮겨 고치게
+pub fn builtin_block(id: &str) -> Option<String> {
+    let mut out: Option<String> = None;
+    for line in BUILTIN.lines() {
+        if let Some(head) = line.strip_prefix("@@") {
+            if out.is_some() {
+                break;
+            }
+            if head.split('|').next().map(str::trim) == Some(id) {
+                out = Some(String::new());
+            }
+        }
+        if let Some(o) = out.as_mut() {
+            o.push_str(line);
+            o.push('\n');
+        }
+    }
+    out.map(|o| format!("{}\n", o.trim_end()))
+}
+
 /// 사용자 파일을 처음 만들 때 넣을 내용 (형식 설명 + 예)
 pub fn user_template() -> String {
     let head: String = BUILTIN.lines().take_while(|l| !l.starts_with("@@")).map(|l| format!("{l}\n")).collect();
@@ -97,9 +122,17 @@ fn version_ok(g: &Guide, major: Option<u32>) -> bool {
     g.min.is_none_or(|x| m >= x) && g.max.is_none_or(|x| m <= x)
 }
 
-/// 요청에 맞는 카드. 항상 넣는 카드(core 등) + 낱말 점수가 높은 순으로 MAX_CARDS 장, 글자 수 상한 안에서.
-/// 버전을 모르면 11g/12c 로 갈린 카드 중 11g 쪽을 쓴다 (11g 문법은 12c 에서도 돈다).
-pub fn pick<'a>(all: &'a [Guide], task: Task, text: &str, major: Option<u32>) -> Vec<&'a Guide> {
+/// 낱말 점수가 이만큼이면 낱말만으로 충분하다 (자동 모드에서 AI 에게 묻지 않는다).
+/// ORA 번호 하나(20), 긴 낱말 하나(3+8), 짧은 낱말 둘이면 넘는다
+pub const STRONG: i32 = 12;
+
+/// 낱말로 매긴 후보 — 항상 넣는 카드, 점수 순 카드
+struct Scored<'a> {
+    always: Vec<&'a Guide>,
+    scored: Vec<(i32, &'a Guide)>,
+}
+
+fn score<'a>(all: &'a [Guide], task: Task, text: &str, major: Option<u32>) -> Scored<'a> {
     let t = text.to_lowercase();
     let major = major.or(Some(11));
     let mut always: Vec<&Guide> = Vec::new();
@@ -126,20 +159,127 @@ pub fn pick<'a>(all: &'a [Guide], task: Task, text: &str, major: Option<u32>) ->
         }
     }
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
-    let mut used: usize = always.iter().map(|g| g.body.len()).sum();
+    Scored { always, scored }
+}
+
+/// 항상 넣는 카드 뒤에 `order` 순으로 MAX_CARDS 장, 글자 수 상한 안에서
+fn fill<'a, T: Copy>(always: Vec<(&'a Guide, T)>, order: impl IntoIterator<Item = (&'a Guide, T)>) -> Vec<(&'a Guide, T)> {
+    let mut used: usize = always.iter().map(|(g, _)| g.body.len()).sum();
     let mut out = always;
     let mut n = 0;
-    for (_, g) in scored {
+    for (g, why) in order {
         if n >= MAX_CARDS {
             break;
         }
-        if used + g.body.len() > BUDGET && n > 0 {
+        if out.iter().any(|(x, _)| x.id == g.id) || (used + g.body.len() > BUDGET && n > 0) {
             continue;
         }
         used += g.body.len();
-        out.push(g);
+        out.push((g, why));
         n += 1;
     }
+    out
+}
+
+/// 요청에 맞는 카드 (낱말만). 항상 넣는 카드(core 등) + 낱말 점수가 높은 순으로 MAX_CARDS 장, 글자 수 상한 안에서.
+/// 버전을 모르면 11g/12c 로 갈린 카드 중 11g 쪽을 쓴다 (11g 문법은 12c 에서도 돈다).
+pub fn pick<'a>(all: &'a [Guide], task: Task, text: &str, major: Option<u32>) -> Vec<&'a Guide> {
+    let s = score(all, task, text, major);
+    fill(s.always.into_iter().map(|g| (g, ())).collect(), s.scored.into_iter().map(|(_, g)| (g, ()))).into_iter().map(|(g, _)| g).collect()
+}
+
+/// 낱말만으로 충분한가 — 자동 모드에서 AI 에게 고르게 할지 정한다
+pub fn keyword_strong(all: &[Guide], task: Task, text: &str, major: Option<u32>) -> bool {
+    score(all, task, text, major).scored.first().is_some_and(|(s, _)| *s >= STRONG)
+}
+
+/// 카드가 뽑힌 까닭
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Why {
+    /// 항상 넣는 카드
+    Always,
+    Keyword,
+    Ai,
+    /// 낱말도 AI 도
+    Both,
+}
+
+/// 낱말 점수와 AI 가 고른 아이디를 합친다: 둘 다 고른 것 → 낱말이 강하게 맞은 것 → AI 가 고른 것 → 나머지 낱말
+pub fn pick_with<'a>(all: &'a [Guide], task: Task, text: &str, major: Option<u32>, ai: &[String]) -> Vec<(&'a Guide, Why)> {
+    let s = score(all, task, text, major);
+    let by_ai = |g: &Guide| ai.iter().any(|x| *x == g.id);
+    let mut order: Vec<(&Guide, Why)> = Vec::new();
+    order.extend(s.scored.iter().filter(|(_, g)| by_ai(g)).map(|(_, g)| (*g, Why::Both)));
+    order.extend(s.scored.iter().filter(|(sc, g)| *sc >= STRONG && !by_ai(g)).map(|(_, g)| (*g, Why::Keyword)));
+    // AI 가 고른 순서대로 (버전이 맞고 항상 넣는 카드가 아닌 것만)
+    let major_ok = major.or(Some(11));
+    for id in ai {
+        if let Some(g) = all.iter().find(|g| g.id == *id && version_ok(g, major_ok) && !g.keys.iter().any(|k| k == "*")) {
+            if !s.scored.iter().any(|(_, x)| x.id == g.id) {
+                order.push((g, Why::Ai));
+            }
+        }
+    }
+    order.extend(s.scored.iter().filter(|(sc, g)| *sc < STRONG && !by_ai(g)).map(|(_, g)| (*g, Why::Keyword)));
+    fill(s.always.into_iter().map(|g| (g, Why::Always)).collect(), order)
+}
+
+/// AI 에게 카드를 고르게 하는 요청 — 아이디·주제·대표 낱말 목록만 보낸다. 고를 카드가 없으면 None
+pub fn route_request(all: &[Guide], task: Task, text: &str, major: Option<u32>) -> Option<crate::ChatRequest> {
+    let major = major.or(Some(11));
+    let cands: Vec<&Guide> = all.iter().filter(|g| version_ok(g, major) && !g.keys.iter().any(|k| k == "*")).collect();
+    if cands.is_empty() {
+        return None;
+    }
+    let list: String = cands
+        .iter()
+        .map(|g| format!("{} | {} | {}\n", g.id, g.title, g.keys.iter().take(5).cloned().collect::<Vec<_>>().join(", ")))
+        .collect();
+    let kind = match task {
+        Task::Generate => "SQL 만들기",
+        Task::Explain => "SQL 설명",
+        Task::Optimize => "튜닝",
+        Task::Fix => "오류 고치기",
+        Task::Chat => "대화",
+    };
+    // 요청이 길면 앞부분만 (주제를 가늠하는 데는 충분하다)
+    let req: String = text.chars().take(2000).collect();
+    let ids: Vec<&str> = cands.iter().map(|g| g.id.as_str()).collect();
+    Some(crate::ChatRequest {
+        system: "너는 Oracle SQL 도우미의 분류기다. 사용자의 요청에 답할 때 참고하면 좋은 Oracle 문법 안내 카드를 아래 목록에서 고른다.\n\
+                 - 요청에 실제로 필요한 것만, 많아야 3개. 관련 있는 것이 없으면 빈 배열.\n\
+                 - 목록에 있는 아이디만 쓴다.\n\
+                 - 답은 JSON 하나만: {\"ids\": [\"아이디\", ...]} — 설명을 붙이지 않는다."
+            .into(),
+        messages: vec![crate::Message::user(format!("## 카드 목록 (아이디 | 주제 | 예시 낱말)\n{list}\n## 요청 종류\n{kind}\n\n## 요청\n{req}"))],
+        json_schema: Some(serde_json::json!({
+            "type": "object",
+            "properties": { "ids": { "type": "array", "items": { "type": "string", "enum": ids } } },
+            "required": ["ids"],
+        })),
+    })
+}
+
+/// AI 의 답에서 카드 아이디 — 형식이 조금 어긋나도 (앞뒤 글, ```json, 배열만) 읽는다. 없는 아이디는 버리고 많아야 3개
+pub fn parse_route(answer: &str, all: &[Guide]) -> Vec<String> {
+    let t = answer.trim();
+    let v: Option<serde_json::Value> = [('{', '}'), ('[', ']')].iter().find_map(|(a, b)| {
+        let (s, e) = (t.find(*a)?, t.rfind(*b)?);
+        (s < e).then(|| serde_json::from_str(&t[s..=e]).ok()).flatten()
+    });
+    let arr = match &v {
+        Some(serde_json::Value::Array(a)) => a.clone(),
+        Some(o) => o["ids"].as_array().cloned().unwrap_or_default(),
+        None => vec![],
+    };
+    let mut out: Vec<String> = Vec::new();
+    for x in arr.iter().filter_map(|x| x.as_str()) {
+        let id = x.trim();
+        if all.iter().any(|g| g.id == id) && !out.iter().any(|o| o == id) {
+            out.push(id.to_string());
+        }
+    }
+    out.truncate(3);
     out
 }
 
@@ -158,6 +298,50 @@ pub fn render(cards: &[&Guide]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_parse_and_merge() {
+        let all = builtin();
+        // 형식이 조금 어긋나도 읽고, 없는 아이디는 버린다
+        assert_eq!(parse_route("{\"ids\": [\"paging11\", \"없는것\", \"date\"]}", all), vec!["paging11", "date"]);
+        assert_eq!(parse_route("답:\n```json\n[\"merge\"]\n```", all), vec!["merge"]);
+        assert_eq!(parse_route("{\"ids\":[\"a\",\"date\",\"date\",\"join\",\"merge\",\"null\"]}", all), vec!["date", "join", "merge"]);
+        assert!(parse_route("모르겠습니다", all).is_empty());
+        // 낱말에 없는 표현: 낱말로는 약하고, AI 가 고른 카드가 들어간다
+        let q = "앞에서 다섯 개만 보여줘";
+        assert!(!keyword_strong(all, Task::Generate, q, Some(11)));
+        let r = pick_with(all, Task::Generate, q, Some(11), &["paging11".into()]);
+        assert_eq!(r[0].0.id, "core");
+        assert_eq!(r[0].1, Why::Always);
+        assert!(r.iter().any(|(g, w)| g.id == "paging11" && *w == Why::Ai));
+        // 버전이 안 맞는 카드는 AI 가 골라도 넣지 않는다
+        let r = pick_with(all, Task::Generate, q, Some(19), &["paging11".into()]);
+        assert!(!r.iter().any(|(g, _)| g.id == "paging11"));
+        // 둘 다 고르면 Both, 맨 앞
+        let q = "ORA-01722 invalid number";
+        assert!(keyword_strong(all, Task::Fix, q, Some(19)));
+        let kw = pick(all, Task::Fix, q, Some(19));
+        let first = kw.iter().find(|g| g.id != "core").unwrap().id.clone();
+        let r = pick_with(all, Task::Fix, q, Some(19), &[first.clone()]);
+        assert_eq!((r[1].0.id.as_str(), r[1].1), (first.as_str(), Why::Both));
+        // AI 없이 합치면 낱말만 쓴 것과 같다
+        let q = "최근 7일 주문을 고객별로 상위 10건만";
+        assert_eq!(pick_with(all, Task::Generate, q, Some(11), &[]).iter().map(|(g, _)| g.id.clone()).collect::<Vec<_>>(), ids(&pick(all, Task::Generate, q, Some(11))));
+        // 요청 — 아이디 목록이 스키마의 enum 에 들어간다
+        let req = route_request(all, Task::Generate, q, Some(11)).unwrap();
+        let ids_in = req.json_schema.unwrap()["properties"]["ids"]["items"]["enum"].as_array().unwrap().len();
+        assert!(ids_in > 10 && !req.messages[0].content.contains("| Oracle 기본 규칙 |"));
+    }
+
+    #[test]
+    fn builtin_block_round_trips() {
+        for g in builtin() {
+            let block = builtin_block(&g.id).unwrap();
+            assert!(block.starts_with("@@"), "{}", g.id);
+            assert_eq!(parse(&block), vec![g.clone()], "{}", g.id);
+        }
+        assert_eq!(builtin_block("없는_카드"), None);
+    }
 
     fn ids(v: &[&Guide]) -> Vec<String> {
         v.iter().map(|g| g.id.clone()).collect()

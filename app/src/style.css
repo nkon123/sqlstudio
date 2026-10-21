@@ -46,10 +46,48 @@ input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb
 /* ── 툴바 ── */
 .toolbar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .toolbar select { max-width: 220px; }
-.conn-badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; color: var(--dim); border: 1px dashed var(--line); }
-.conn-badge.on { color: #fff; background: var(--accent); border: none; }
-.conn-badge.prod { font-weight: 700; box-shadow: 0 0 0 2px var(--danger); }
-.txn-badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; background: var(--warn); color: #fff; animation: pulse 2s infinite; }
+.toolbar .sep { margin: 2px 2px; }
+/* 접속 단추: 상태 점 · 프로필 · 계정@주소 — 프로필 색이 있으면 왼쪽 띠로 */
+.conn-pill { display: inline-flex; align-items: center; gap: 6px; max-width: 360px; padding: 3px 10px 3px 8px; border-radius: 6px;
+  border-left: 3px solid var(--conn-color, var(--line)); }
+.conn-pill .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); opacity: .5; flex: none; }
+.conn-pill.on .conn-dot { background: var(--ok); opacity: 1; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.conn-pill .conn-name { font-weight: 600; }
+.conn-pill .conn-sub { color: var(--dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.conn-pill.prod { border-color: var(--danger); border-left-color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--panel)); }
+.conn-pill.prod .conn-sub { color: var(--danger); font-weight: 600; }
+.toolbar .caret { color: var(--dim); font-size: 10px; }
+/* 실행 단추 + 펼침 */
+.run-split { display: inline-flex; }
+.run-split > .run-main { border-top-right-radius: 0; border-bottom-right-radius: 0; padding: 3px 14px; font-weight: 600; }
+.run-split > .split-more { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 3px 6px; border-left: 1px solid color-mix(in srgb, var(--accent-text) 35%, var(--accent)); }
+.toolbar button.drop:not(.split-more) { background: transparent; border-color: transparent; }
+.toolbar button.drop:not(.split-more):hover { background: var(--hover); }
+.toolbar button.icon { min-width: 28px; padding: 3px 6px; background: transparent; border-color: transparent; color: var(--dim); }
+.toolbar button.icon:hover { background: var(--hover); color: var(--text); }
+.toolbar button.icon.active { color: var(--text); }
+/* 커밋하지 않은 변경 — 있을 때만 */
+.txn-group { display: inline-flex; align-items: center; gap: 4px; padding: 2px 3px 2px 8px; border-radius: 6px;
+  background: color-mix(in srgb, var(--warn) 16%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent); }
+.txn-label { color: var(--warn); font-size: 12px; font-weight: 600; animation: pulse 2s infinite; }
+.txn-label::before { content: "● "; }
+.txn-group button { padding: 1px 8px; font-size: 12px; }
+/* 명령 검색 단추 — 입력칸처럼 */
+.pal-open { display: inline-flex; align-items: center; gap: 10px; min-width: 220px; justify-content: space-between; color: var(--dim); background: var(--bg); }
+.pal-open kbd, .pal kbd { font: 11px var(--mono); padding: 0 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--dim); background: var(--panel); }
+@media (max-width: 1100px) { .pal-open { min-width: 0; } .pal-open kbd { display: none; } .conn-pill .conn-sub { display: none; } }
+/* 명령 검색 창 */
+.pal-back { position: fixed; inset: 0; z-index: 3000; background: rgba(0, 0, 0, .18); display: flex; justify-content: center; align-items: flex-start; padding-top: 10vh; }
+.pal { width: min(560px, calc(100vw - 32px)); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 12px 40px rgba(0, 0, 0, .28); overflow: hidden; display: flex; flex-direction: column; max-height: 70vh; }
+.pal-q { border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 10px 12px; font-size: 14px; background: transparent; }
+.pal-q:focus { outline: none; }
+.pal-list { overflow: auto; padding: 4px 0; }
+.pal-item { display: flex; align-items: center; gap: 10px; padding: 6px 12px; cursor: pointer; }
+.pal-item.on { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.pal-item.disabled { opacity: .45; cursor: default; }
+.pal-group { width: 64px; flex: none; color: var(--dim); font-size: 12px; }
+.pal-label { flex: 1; }
+.pal-empty { padding: 12px; color: var(--dim); }
 @keyframes pulse { 50% { opacity: .65; } }
 
 /* ── 3단 배치 ── */
@@ -678,3 +716,11 @@ button.danger.running-btn { animation: pulse 1.2s infinite; }
   border-radius: 4px 4px 0 0; box-shadow: 0 4px 14px rgba(0, 0, 0, .35); opacity: .95; }
 .tab-drop { position: fixed; z-index: 3001; width: 3px; border-radius: 2px; background: var(--accent); pointer-events: none; box-shadow: 0 0 6px var(--accent); }
 body.tab-dragging { cursor: grabbing; user-select: none; }
+/* 문법 안내 카드 보기 */
+.guides-view { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.guide-list { max-height: 60vh; overflow: auto; border: 1px solid var(--line); border-radius: 4px; }
+.guide { border-bottom: 1px solid var(--line); padding: 6px 10px; }
+.guide summary { cursor: pointer; display: flex; align-items: center; gap: 6px; }
+.guide summary .dim { color: var(--dim); font-family: var(--mono); }
+.guide .hint { color: var(--dim); font-size: 12px; margin: 6px 0 4px; }
+.guide-body { margin: 0 0 6px; padding: 8px; max-height: 320px; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; font: 12px/1.5 var(--mono); white-space: pre-wrap; }

@@ -316,3 +316,34 @@ fn think_setting_maps_to_each_server() {
     // Anthropic 은 effort 를 쓴다 — think 는 무시
     assert!(build(ProviderKind::Anthropic, Some("off")).get("think").is_none());
 }
+
+/// 로컬 Ollama 로 문법 카드 고르기를 실제로 돌려 본다 (수동: SQLS_ROUTE_MODEL=qwen3.5:4b cargo test -p sqls-llm route_live -- --ignored --nocapture)
+#[tokio::test]
+#[ignore]
+async fn route_live() {
+    let model = std::env::var("SQLS_ROUTE_MODEL").unwrap_or_else(|_| "qwen3.5:4b".into());
+    let mut cfg = ProviderConfig::new("local", ProviderKind::Ollama, &model);
+    cfg.num_ctx = Some(16384);
+    cfg.think = Some("off".into());
+    cfg.max_tokens = 1024;
+    let client = Client::new();
+    let all = guides::load(None);
+    let qs: Vec<String> = match std::env::var("SQLS_ROUTE_QS") {
+        Ok(v) => v.split('|').map(String::from).collect(),
+        Err(_) => ["앞에서 다섯 개만 보여줘", "부서별로 급여 제일 많은 사람 한 명씩", "주문 테이블에 있으면 고치고 없으면 넣어줘", "사원 이름을 쉼표로 이어서 부서마다 한 줄로", "조직도처럼 상하 관계로 보여줘", "어제 하루치 주문만"].map(String::from).to_vec(),
+    };
+    for q in qs.iter().map(String::as_str) {
+        let req = guides::route_request(&all, prompts::Task::Generate, q, Some(19)).unwrap();
+        let t = std::time::Instant::now();
+        let r = client.chat(&cfg, &req, |_| {}).await;
+        let el = t.elapsed();
+        match r {
+            Ok(r) => {
+                let ids = guides::parse_route(&r.text, &all);
+                let kw = guides::keyword_strong(&all, prompts::Task::Generate, q, Some(19));
+                println!("{:>5.1}s  낱말충분={kw:<5} {q}  →  {ids:?}   (원문: {})", el.as_secs_f32(), r.text.replace('\n', " "));
+            }
+            Err(e) => println!("{:>5.1}s  {q}  →  오류 {e}", el.as_secs_f32()),
+        }
+    }
+}

@@ -39,6 +39,7 @@ const GROUPS: [string, [string, string][]][] = [
     ["Ctrl+K", "AI 입력칸으로 (AI 입력칸에서 Esc: 편집기로, Ctrl+Enter: 보내기)"],
     ["Ctrl+Shift+1", "왼쪽 영역(테이블·프로젝트) 접기/펼치기"],
     ["Ctrl+Shift+3", "오른쪽 영역(AI) 접기/펼치기"],
+    ["Ctrl+Shift+P", "명령 검색 — 모든 명령(접속·실행·도구·파일·설정)을 이름으로 찾아 실행"],
     ["F1", "이 단축키 목록"],
   ]],
   ["결과 그리드", [

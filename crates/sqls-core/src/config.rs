@@ -29,6 +29,32 @@ pub struct Config {
     pub llm_providers: Vec<toml::Value>,
     #[serde(default)]
     pub history: HistoryConfig,
+    #[serde(default)]
+    pub ai: AiConfig,
+}
+
+/// AI 질문 (앱)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiConfig {
+    /// 문법 안내 카드를 AI 에게도 고르게 할지: "off" | "auto"(낱말로 약할 때만) | "always"
+    #[serde(default = "default_guide_select")]
+    pub guide_select: String,
+    /// 카드 고르기 질의의 상한(초) — 넘으면 낱말로 고른 것만 쓴다
+    #[serde(default = "default_guide_select_timeout")]
+    pub guide_select_timeout_secs: u64,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self { guide_select: default_guide_select(), guide_select_timeout_secs: default_guide_select_timeout() }
+    }
+}
+
+fn default_guide_select() -> String {
+    "auto".into()
+}
+fn default_guide_select_timeout() -> u64 {
+    10
 }
 
 /// SQL 실행 이력 (앱) — 이 PC 의 설정 폴더 history\ 에 남긴다

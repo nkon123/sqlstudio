@@ -7,7 +7,8 @@
 # 설정 폴더의 oracle-guides.md 에 같은 형식으로 쓰면 더해진다 (같은 아이디면 바꾼다) — 회사 규칙을 넣어 두면 된다.
 
 @@ core | Oracle 기본 규칙 | * |
-- LIMIT, TOP, AUTO_INCREMENT, BOOLEAN 컬럼, `IF EXISTS` 는 없다 (Oracle 문법이 아니다).
+- LIMIT, TOP, AUTO_INCREMENT 는 없다. BOOLEAN 컬럼·`IF [NOT] EXISTS` 도 23ai 전에는 없다 (Oracle 문법이 아니다).
+- SELECT 목록의 별칭은 같은 단계의 WHERE·GROUP BY 에서 쓸 수 없다 (ORDER BY 에서만) — 인라인 뷰로 감싼다.
 - 빈 문자열 '' 는 NULL 이다. NULL 비교는 `IS NULL` / `IS NOT NULL`.
 - 문자열 잇기는 `||`. 따옴표 안의 작은따옴표는 `''`.
 - 상수만 SELECT 할 때는 `FROM DUAL`.
@@ -18,7 +19,7 @@
 @@ paging11 | 페이징·상위 N건 (11g: ROWNUM) | 페이징, 페이지, 상위, top, 처음, 몇 건, 몇건, 최근 n, rownum, limit, 10개, 10건, 100건, 일부만 | -11
 ROWNUM 은 ORDER BY 보다 먼저 매겨진다. 반드시 이 순서로 쓴다:
 ① 안쪽 쿼리에서 JOIN·WHERE·GROUP BY·ORDER BY 를 끝낸다 ② 그것을 괄호로 감싸 별칭 t 를 붙인다 ③ 바깥에서 `WHERE ROWNUM <= n`.
-ORDER BY 뒤에 WHERE 를 다시 쓸 수 없다. 상위 N 의 N 은 상수로 쓴다.
+ORDER BY 뒤에 WHERE 를 다시 쓸 수 없다. 상위 N 의 N 은 상수로 쓴다. `ROWNUM = 2`, `ROWNUM > 5` 는 늘 0건이다 (중간부터는 아래처럼 rn 으로).
 ```sql
 -- 상위 10건: 정렬(·집계)은 안쪽, ROWNUM 은 바깥. GROUP BY 쿼리 안에 ROWNUM 을 넣지 않는다
 SELECT t.* FROM (SELECT o.cust_id, SUM(o.amt) amt FROM orders o GROUP BY o.cust_id ORDER BY amt DESC) t WHERE ROWNUM <= 10;
@@ -76,7 +77,8 @@ SELECT d.deptno, LISTAGG(e.ename, ', ') WITHIN GROUP (ORDER BY e.ename) AS names
  GROUP BY d.deptno;
 ```
 - 11.2 부터 있다 (WITHIN GROUP 필수). GROUP_CONCAT·STRING_AGG 는 Oracle 에 없다. WM_CONCAT 은 비공식이라 쓰지 마라.
-- 결과가 4000바이트를 넘으면 ORA-01489. 길면 `XMLAGG(XMLELEMENT(x, col || ',') ORDER BY col).EXTRACT('//text()').getClobVal()`.
+- 결과가 4000바이트를 넘으면 ORA-01489. 12.2 부터는 `LISTAGG(col, ',' ON OVERFLOW TRUNCATE '...') WITHIN GROUP (ORDER BY col)`.
+  더 길게(CLOB) 모으려면 `RTRIM(XMLAGG(XMLELEMENT(x, col || ',') ORDER BY col).EXTRACT('//text()').getClobVal(), ',')`.
 - 중복을 빼려면 안쪽에서 먼저 DISTINCT 한 인라인 뷰에 LISTAGG 를 쓴다 (LISTAGG(DISTINCT …) 는 19c 부터).
 
 @@ string | 문자열 함수 | substr, instr, 자르, 잘라, 앞자리, 뒷자리, 포함, 찾기, 바꾸, replace, trim, 공백, lpad, rpad, 자릿수, 0 채우, 길이, length, 대문자, 소문자, 문자열 | 
@@ -95,12 +97,12 @@ SELECT REGEXP_COUNT(s, ',') + 1 FROM t;                          -- 조각 수 (
 ```
 쉼표로 나뉜 값을 행으로: `SELECT REGEXP_SUBSTR(:s, '[^,]+', 1, LEVEL) FROM dual CONNECT BY REGEXP_SUBSTR(:s, '[^,]+', 1, LEVEL) IS NOT NULL;`
 
-@@ null | NULL 처리 | null, 널, 빈 값, 빈값, nvl, nvl2, coalesce, 없으면 0, 0으로, 기본값으로, not in, is null | 
+@@ null | NULL 처리 | null, 널, 빈 값, 빈값, nvl, nvl2, coalesce, 없으면 0, 0으로, 기본값으로, not in, is null, 0으로 나누, ora-01476, divisor is equal to zero | 
 - `NVL(a, 0)`, `NVL2(a, 있을 때, 없을 때)`, `COALESCE(a, b, c)`(처음으로 NULL 이 아닌 값), `NULLIF(a, b)`.
 - `= NULL` 은 항상 거짓이다. `IS NULL` 을 쓴다.
 - `NOT IN (서브쿼리)` 에 NULL 이 하나라도 있으면 결과가 0건이 된다 → `NOT EXISTS` 를 쓴다.
 - `COUNT(col)` 은 NULL 을 세지 않는다. `COUNT(*)` 는 행 수.
-- 나눗셈 0 방지: `a / NULLIF(b, 0)`.
+- 나눗셈 0 방지: `a / NULLIF(b, 0)` (0 으로 나누면 ORA-01476).
 
 @@ case | 조건 값 (CASE / DECODE) | case, decode, 조건에 따라, 경우에 따라, 이면, 아니면, 구분값, 코드값을, 변환해서, 표시를 | 
 ```sql
@@ -161,7 +163,7 @@ SELECT * FROM (SELECT cust_id, TO_CHAR(order_dt, 'MM') mm, amt FROM orders)
 - IN 목록은 상수여야 한다 (동적이면 동적 SQL). 11g 부터 있다.
 - 같은 결과를 CASE 로: `SUM(CASE WHEN mm = '01' THEN amt END) AS m01`.
 
-@@ join | 조인 | join, 조인, 외부 조인, outer join, left join, 없는 것도, 매칭 안 되는, (+), exists, in 서브쿼리, 세미 조인, 안티 조인 | 
+@@ join | 조인 | join, 조인, 외부 조인, outer join, left join, 없는 것도, 매칭 안 되는, (+), exists, in 서브쿼리, 세미 조인, 안티 조인, 있는지 확인, 존재 여부, 없는 것만 | 
 - ANSI 조인을 쓴다: `FROM a LEFT JOIN b ON b.id = a.id AND b.use_yn = 'Y'` — 바깥쪽 테이블의 조건을 WHERE 에 쓰면 내부 조인이 된다.
 - 옛 문법 `a.id = b.id(+)` 은 ANSI 와 섞지 않는다. FULL OUTER 는 ANSI 로만.
 - 있는지만 볼 때는 `EXISTS (SELECT 1 FROM b WHERE b.id = a.id)`. 없는 것: `NOT EXISTS` (NOT IN 은 NULL 문제).
@@ -189,7 +191,7 @@ DELETE FROM orders WHERE ROWID IN (
 - 방금 넣은 키: `INSERT … RETURNING order_id INTO :new_id`.
 
 @@ insert | INSERT 여러 행·복사 | insert, 여러 행, 여러건, 한 번에 넣, 복사해서 넣, insert select, insert all, values 여러 | 
-- `VALUES (…), (…)` 처럼 여러 행을 한 문장에 쓰는 것은 23c 전에는 안 된다.
+- `VALUES (…), (…)` 처럼 여러 행을 한 문장에 쓰는 것은 23ai 전에는 안 된다.
 - 다른 테이블에서: `INSERT INTO t (a, b) SELECT x, y FROM s WHERE …;`
 - 여러 행 상수: `INSERT ALL INTO t (a, b) VALUES (1, 'x') INTO t (a, b) VALUES (2, 'y') SELECT * FROM dual;`
   또는 `INSERT INTO t (a, b) SELECT 1, 'x' FROM dual UNION ALL SELECT 2, 'y' FROM dual;`
@@ -303,10 +305,12 @@ ALTER TABLE orders DROP COLUMN status;
 - 형: VARCHAR2(n CHAR)(한글은 CHAR 단위 권장), NUMBER(p,s), DATE, TIMESTAMP, CLOB. BOOLEAN·TEXT·INT AUTO_INCREMENT 없음.
 - DDL 은 자동 커밋된다.
 
-@@ conversion | 형 변환·숫자 오류 | to_number, 숫자로, 문자로, 형 변환, 형변환, 암시적, ora-01722, ora-12899, ora-01438, 자리수 초과, invalid number | 
+@@ conversion | 형 변환·숫자 오류 | to_number, 숫자로, 문자로, 형 변환, 형변환, 암시적, ora-01722, ora-12899, ora-01438, ora-00932, ora-12704, 자리수 초과, invalid number, inconsistent datatypes, character set mismatch | 
 - ORA-01722: 숫자로 바꿀 수 없는 문자가 있다. 문자 컬럼을 숫자와 비교하면(`char_col = 123`) 모든 값을 숫자로 바꾸다 터지고 인덱스도 못 쓴다 → `char_col = '123'` 처럼 형을 맞춘다.
 - 숫자 검사: `REGEXP_LIKE(s, '^-?[0-9]+(\.[0-9]+)?$')` 인 것만 TO_NUMBER.
 - ORA-12899: 값이 컬럼 길이보다 길다 (한글은 바이트로 3배). ORA-01438: NUMBER 자리수 초과.
+- ORA-00932: 형이 다르다 — CLOB 를 `=`·GROUP BY 로 비교, 날짜와 숫자, CASE 각 갈래의 형이 다름 → 형을 맞춘다.
+- ORA-12704: VARCHAR2 와 NVARCHAR2(NCHAR) 를 UNION·CASE·NVL·DECODE 로 섞었다 → `TO_CHAR(ncol)` 또는 `TO_NCHAR(col)` 로 한쪽에 맞춘다.
 
 @@ ora_syntax | 문법 오류 (ORA-00933·00907·00936·00923·00911) | ora-00933, ora-00907, ora-00936, ora-00923, ora-00911, ora-00905, sql command not properly ended, missing right parenthesis, missing expression | 
 - ORA-00933: 문장 끝 이상 — LIMIT/TOP, 테이블 별칭에 AS, ORDER BY 뒤 이상한 절, 문장 끝의 `;` 를 실행기에 그대로 넘긴 경우.
@@ -349,3 +353,208 @@ ALTER TABLE orders DROP COLUMN status;
 - OR 조건이 느리면 UNION ALL 로 나누어 본다. IN (큰 서브쿼리) 보다 EXISTS / 조인.
 - 스칼라 서브쿼리·함수 호출이 행마다 돌면 조인으로 바꾼다.
 - 결합 인덱스는 앞 컬럼이 조건에 있어야 한다. 힌트(/*+ INDEX(t ix) */)는 마지막 수단.
+
+@@ with | WITH 절 (공통 테이블 식) | with 절, with절, cte, 공통 테이블, 서브쿼리 팩토링, materialize, 단계별로 나눠, 중간 결과 | 
+```sql
+WITH s AS (SELECT o.cust_id, SUM(o.amt) amt FROM orders o GROUP BY o.cust_id),
+     big AS (SELECT s.* FROM s WHERE s.amt > 100000)          -- 쉼표로 잇는다 (WITH 를 두 번 쓰지 않는다)
+SELECT c.cust_nm, b.amt FROM big b JOIN customers c ON c.cust_id = b.cust_id;
+INSERT INTO cust_sum (cust_id, amt) WITH s AS (SELECT …) SELECT cust_id, amt FROM s;   -- INSERT 는 INSERT INTO 뒤에 WITH
+```
+- WITH 는 바로 뒤 한 문장에서만 보인다. 각 이름 뒤에 `;` 를 쓰지 않는다.
+- 여러 번 쓰는 무거운 결과를 한 번만 계산하게: `WITH s AS (SELECT /*+ MATERIALIZE */ …)`.
+
+@@ setops | 집합 연산 (UNION·MINUS·INTERSECT) | union, union all, minus, intersect, except, 합집합, 차집합, 교집합, 위아래로 합, 두 결과를 합, 한쪽에만 있는, 에는 있고, 에는 없는, 는 안 한, 는 안 산, 둘 다 있는, ora-01789, ora-01790 | 
+- `UNION` 은 중복을 지우느라 정렬한다 — 중복이 없거나 상관없으면 `UNION ALL`.
+- 차집합은 `MINUS` (`EXCEPT` 는 21c 부터). 교집합 `INTERSECT`.
+- 각 SELECT 의 컬럼 수(ORA-01789)와 형(ORA-01790)이 같아야 한다. NULL 자리는 `CAST(NULL AS VARCHAR2(10))` 처럼 형을 준다.
+- ORDER BY 는 맨 끝에 한 번만 — 첫 SELECT 의 별칭이나 위치 번호(`ORDER BY 2`)로.
+```sql
+SELECT cust_id FROM orders WHERE order_dt >= DATE '2026-01-01'
+MINUS
+SELECT cust_id FROM orders WHERE order_dt < DATE '2026-01-01';   -- 올해 처음 주문한 고객
+```
+
+@@ number | 숫자 함수·형식 (반올림·천 단위) | 반올림, 올림, 버림, 내림, 소수점, 소수 자리, round, ceil, floor, mod, 나머지, 천 단위, 콤마 찍, 쉼표 찍, 금액 형식, 퍼센트, 백분율, 정수로 | 
+- `ROUND(3.456, 2)` = 3.46, `TRUNC(3.456, 2)` = 3.45(버림), `CEIL`(올림)·`FLOOR`(내림), `ROUND(n, -3)` 천 단위 반올림, `MOD(10, 3)` = 1.
+- 몫: `TRUNC(a / b)` (정수 나눗셈 연산자는 없다). 비율: `ROUND(a / NULLIF(b, 0) * 100, 1)`.
+```sql
+TO_CHAR(1234567, 'FM999,999,999')     -- '1,234,567' (FM: 앞 공백 없앰)
+TO_CHAR(0.5, 'FM990.00')              -- '0.50'  (0 은 자리를 꼭 채운다, 9 는 비우면 생략)
+TO_NUMBER('1,234', '9,999')           -- 쉼표가 든 문자 → 숫자
+```
+형식의 9 자리가 모자라면 `####` 로 나온다.
+
+@@ delete | 삭제 (DELETE·TRUNCATE) | delete, 삭제, 지워, 지우기, 지우는, truncate, 비우, 전체 삭제, 조인해서 삭제, 대량 삭제, ora-02266 | 
+- `DELETE a FROM a JOIN b` 문법은 없다 → `DELETE FROM orders o WHERE EXISTS (SELECT 1 FROM cancel_list c WHERE c.order_id = o.order_id);`
+- `TRUNCATE TABLE t` 는 DDL — 바로 커밋되어 되돌릴 수 없고, WHERE 를 못 쓰고, 다른 테이블이 FK 로 가리키면 안 된다 (ORA-02266). 빠르고 공간도 돌려준다.
+- 수백만 건 DELETE 는 UNDO 가 커진다 — 나눠 지우거나, 남길 것만 새 테이블로 옮긴(CTAS) 뒤 바꾼다.
+- 지우기 전에 같은 WHERE 로 `SELECT COUNT(*)` 를 먼저 본다.
+
+@@ rowgen | 행 만들기·날짜 목록 (CONNECT BY LEVEL) | 달력, 날짜 목록, 모든 날짜, 빠짐없이, 빈 날짜, 없는 날짜, 0으로 채, 1부터, 연속 번호, 번호 생성, 행 생성, 일자별 전부, connect by level | 
+```sql
+SELECT LEVEL n FROM dual CONNECT BY LEVEL <= 10;                         -- 1~10
+SELECT TRUNC(SYSDATE, 'MM') + LEVEL - 1 dt FROM dual
+CONNECT BY LEVEL <= LAST_DAY(SYSDATE) - TRUNC(SYSDATE, 'MM') + 1;        -- 이번 달 모든 날짜
+-- 주문 없는 날도 0 으로 (최근 7일)
+SELECT d.dt, NVL(SUM(o.amt), 0) amt
+  FROM (SELECT TRUNC(SYSDATE) - LEVEL + 1 dt FROM dual CONNECT BY LEVEL <= 7) d
+  LEFT JOIN orders o ON o.order_dt >= d.dt AND o.order_dt < d.dt + 1
+ GROUP BY d.dt ORDER BY d.dt;
+```
+
+@@ dictionary | 데이터 사전 조회 (테이블·컬럼·소스 찾기) | 데이터 사전, 딕셔너리, 테이블 목록, 컬럼 목록, 어떤 테이블, 어느 테이블, 컬럼이 있는, 코멘트 조회, 주석 조회, 인덱스 목록, 제약 조건 목록, 메타, all_tab_columns, user_tables, all_objects, all_source, invalid 객체 | 
+USER_(내 것) · ALL_(볼 수 있는 것) · DBA_(전부, 권한 필요). 이름은 대문자로 저장된다 (`table_name = 'ORDERS'`).
+```sql
+SELECT owner, table_name FROM all_tab_columns WHERE column_name = 'CUST_ID';            -- 이 컬럼이 있는 테이블
+SELECT column_name, data_type, data_length, nullable FROM all_tab_columns
+ WHERE owner = 'APP' AND table_name = 'ORDERS' ORDER BY column_id;                      -- 컬럼 목록
+SELECT table_name, column_name, comments FROM all_col_comments WHERE comments LIKE '%주문%';  -- 설명으로 찾기
+SELECT name, type, line, text FROM all_source WHERE UPPER(text) LIKE '%ORDERS%';        -- 소스에서 찾기
+SELECT object_name, object_type FROM user_objects WHERE status = 'INVALID';             -- 깨진 객체
+```
+그 밖에: ALL_TAB_COMMENTS, ALL_INDEXES·ALL_IND_COLUMNS, ALL_CONSTRAINTS·ALL_CONS_COLUMNS, ALL_DEPENDENCIES, USER_ERRORS(컴파일 오류).
+
+@@ trigger | 트리거 | 트리거, trigger, :new, :old, before insert, after update, 변경 이력, 이력 남기, 자동으로 넣, 자동으로 들어가, 자동으로 채, 수정일 자동, 수정일시, 등록일시, ora-04092, ora-04084 | 
+```sql
+CREATE OR REPLACE TRIGGER trg_orders_biu
+BEFORE INSERT OR UPDATE ON orders
+FOR EACH ROW
+BEGIN
+  :NEW.upd_dt := SYSDATE;
+  IF INSERTING THEN :NEW.reg_dt := SYSDATE; END IF;
+END;
+/
+```
+- 값을 바꾸는 것은 BEFORE 행 트리거에서 (AFTER 에서 `:NEW` 를 바꾸면 ORA-04084). 이력은 AFTER 행 트리거에서 `INSERT INTO orders_hist … VALUES (:OLD.order_id, …)`.
+- `WHEN (NEW.amt > 0)` 절에서는 콜론 없이 NEW/OLD. 트리거 안에서 COMMIT 은 안 된다 (ORA-04092).
+- 자기 테이블을 조회하면 ORA-04091 (변경 중인 테이블).
+
+@@ view | 뷰·구체화 뷰 | 뷰 만들, 뷰 생성, create view, create or replace view, 뷰를 만, materialized view, mview, 구체화 뷰, 스냅샷, refresh, with read only | 
+```sql
+CREATE OR REPLACE VIEW v_order_sum AS
+SELECT o.cust_id, SUM(o.amt) amt FROM orders o GROUP BY o.cust_id
+WITH READ ONLY;
+CREATE MATERIALIZED VIEW mv_order_sum BUILD IMMEDIATE REFRESH COMPLETE ON DEMAND AS
+SELECT o.cust_id, SUM(o.amt) amt FROM orders o GROUP BY o.cust_id;
+BEGIN DBMS_MVIEW.REFRESH('MV_ORDER_SUM', 'C'); END;
+```
+- 뷰 안에 ORDER BY 를 넣지 않는다 (쓰는 쪽에서 정렬). 뷰를 거쳐 고칠 때 조건을 지키게 하려면 `WITH CHECK OPTION`.
+- 구체화 뷰는 결과를 저장한다 — 빠른 새로 고침(FAST)은 원본 테이블에 MATERIALIZED VIEW LOG 가 있어야 한다.
+
+@@ index | 인덱스 만들기 | 인덱스 생성, 인덱스 만들, 인덱스 추가, 인덱스 삭제, create index, drop index, 함수 기반 인덱스, unique index, 복합 인덱스, 결합 인덱스, invisible | 
+```sql
+CREATE INDEX ix_orders_cust_dt ON orders (cust_id, order_dt);        -- 같다(=) 조건 컬럼을 앞에, 범위 조건은 뒤에
+CREATE UNIQUE INDEX ux_cust_email ON customers (email);
+CREATE INDEX ix_cust_email_up ON customers (UPPER(email));           -- WHERE UPPER(email) = … 일 때 쓰인다
+CREATE INDEX ix_orders_st ON orders (status) INVISIBLE;              -- 만들고 옵티마이저는 아직 안 씀 (11g+)
+DROP INDEX ix_orders_st;
+```
+- 모든 키 컬럼이 NULL 인 행은 B-tree 인덱스에 없다 — `col IS NULL` 검색에는 안 쓰인다.
+- 운영 중 큰 테이블은 `ONLINE` (Enterprise Edition). 인덱스가 많으면 DML 이 느려진다.
+
+@@ exception | 예외 처리·오류 로그 | 예외, exception, 오류 처리, 에러 처리, when others, sqlerrm, sqlcode, 오류 로그, 에러 로그, backtrace, autonomous, pragma exception_init, raise | 
+```sql
+EXCEPTION
+  WHEN DUP_VAL_ON_INDEX THEN …                  -- 이름 있는 예외: NO_DATA_FOUND, TOO_MANY_ROWS, ZERO_DIVIDE, VALUE_ERROR, INVALID_NUMBER
+  WHEN OTHERS THEN
+    v_code := SQLCODE; v_msg := SQLERRM;        -- SQL 문 안에 SQLERRM 을 바로 못 쓴다 → 변수에 담는다
+    log_err(v_code, v_msg, DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);   -- 몇 번째 줄인지
+    RAISE;                                      -- 삼키지 말고 다시 던진다
+```
+- 롤백돼도 남는 오류 로그: `PROCEDURE log_err(…) IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO err_log …; COMMIT; END;`
+- ORA 번호에 이름 붙이기: `e_busy EXCEPTION; PRAGMA EXCEPTION_INIT(e_busy, -54);`
+- `WHEN OTHERS THEN NULL;` 은 오류를 숨긴다 — 쓰지 않는다.
+
+@@ lob | CLOB·BLOB (긴 텍스트) | clob, blob, nclob, lob, dbms_lob, 긴 텍스트, 긴 문자열, ora-22835, ora-22992, ora-01489 | 
+- SQL 안의 VARCHAR2 는 4000바이트까지(EXTENDED 설정이면 32767). 그보다 긴 것은 CLOB.
+- 일부만: `DBMS_LOB.SUBSTR(c, 1000, 1)` (글자 수, 시작). 길이 `DBMS_LOB.GETLENGTH(c)`. 찾기 `DBMS_LOB.INSTR(c, 'kw') > 0` (LIKE 도 된다).
+- CLOB 는 `=`·GROUP BY·DISTINCT·ORDER BY·UNION 에 못 쓴다 (ORA-00932) → `DBMS_LOB.SUBSTR` 로 잘라 비교하거나 `DBMS_LOB.COMPARE(a, b) = 0`.
+- 4000바이트 넘게 이으려면 앞을 CLOB 로: `TO_CLOB(a) || b`. CLOB → 문자 변환이 넘치면 ORA-22835.
+- DB 링크 너머의 LOB 를 바로 SELECT 하면 ORA-22992 (옛 버전) → `INSERT INTO 로컬 SELECT … FROM t@link` 로 가져온다.
+
+@@ timestamp | TIMESTAMP·INTERVAL·시간대 | timestamp, 타임스탬프, systimestamp, interval, 밀리초, 마이크로초, 시간대, 타임존, utc, extract, numtodsinterval, 초 단위, 초로 | 
+```sql
+TO_TIMESTAMP('2026-10-01 12:00:00.123', 'YYYY-MM-DD HH24:MI:SS.FF3')
+TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.FF3')
+EXTRACT(HOUR FROM ts)            -- DATE 에는 YEAR/MONTH/DAY 만 (시·분은 TO_CHAR)
+ts + NUMTODSINTERVAL(30, 'MINUTE')
+(CAST(ts2 AS DATE) - CAST(ts1 AS DATE)) * 86400                  -- 초 차이 (초 미만 버림)
+SYS_EXTRACT_UTC(SYSTIMESTAMP)
+FROM_TZ(CAST(dt AS TIMESTAMP), 'Asia/Seoul') AT TIME ZONE 'UTC'
+```
+TIMESTAMP 끼리 빼면 숫자가 아니라 INTERVAL DAY TO SECOND 가 나온다.
+
+@@ json | JSON (12c 이상) | json, json_value, json_query, json_table, json_object, json_arrayagg, is json | 12-
+```sql
+SELECT JSON_VALUE(t.doc, '$.customer.name') FROM orders_json t;          -- 값 하나
+SELECT j.* FROM orders_json t,
+       JSON_TABLE(t.doc, '$.items[*]' COLUMNS (item_id NUMBER PATH '$.id', qty NUMBER PATH '$.qty')) j;   -- 배열 → 행
+SELECT JSON_OBJECT('id' VALUE o.order_id, 'amt' VALUE o.amt) FROM orders o;   -- 만들기 (12.2+)
+SELECT JSON_ARRAYAGG(o.order_id ORDER BY o.order_id) FROM orders o;           -- (12.2+)
+```
+- 컬럼은 CLOB/VARCHAR2 에 `CHECK (doc IS JSON)`. 경로는 `$` 부터, 대소문자를 구분한다.
+
+@@ temp | 임시·복사 테이블 (GTT·CTAS) | 임시 테이블, 임시테이블, temp table, temporary, global temporary, 백업 테이블, 테이블 복사, 복사본, create table as, ctas, select into 새 테이블 | 
+- SQL Server 의 `#temp`, `SELECT … INTO 새테이블` 은 없다.
+- 복사·백업: `CREATE TABLE orders_bak_20261021 AS SELECT * FROM orders WHERE …;` (제약·인덱스·기본값은 따라오지 않는다 — NOT NULL 만 온다). 구조만: `WHERE 1 = 0`.
+- 세션별 임시 데이터: 테이블은 한 번만 만들어 두고 계속 쓴다 (프로시저마다 만들지 않는다)
+```sql
+CREATE GLOBAL TEMPORARY TABLE tmp_work (id NUMBER, amt NUMBER) ON COMMIT PRESERVE ROWS;   -- 세션 끝까지 (DELETE ROWS: 커밋하면 비움)
+```
+- 18c+ 는 `CREATE PRIVATE TEMPORARY TABLE ora$ptt_work …` (이름이 ORA$PTT_ 로 시작).
+
+@@ korean | 한글 (정렬·길이·문자셋) | 한글, 가나다, 바이트 수, 글자 수, 문자셋, characterset, nls_sort, 전각, 반각, 깨짐, 깨져, 한글 정렬 | 
+- 문자셋: `SELECT value FROM nls_database_parameters WHERE parameter = 'NLS_CHARACTERSET'` — AL32UTF8 은 한글 3바이트, KO16MSWIN949 는 2바이트.
+- `VARCHAR2(10)` 은 기본이 바이트라 AL32UTF8 에서 한글 3자. 글자 수로 정하려면 `VARCHAR2(10 CHAR)`. 길이 `LENGTH`(글자) / `LENGTHB`(바이트).
+- 바이트로 자르는 `SUBSTRB` 는 한글 중간에서 잘릴 수 있다 — 글자 단위는 `SUBSTR`.
+- 언어 규칙으로 정렬: `ORDER BY NLSSORT(nm, 'NLS_SORT=KOREAN_M')`. 전각↔반각: `TO_SINGLE_BYTE` / `TO_MULTI_BYTE`.
+
+@@ dblink | DB 링크 (다른 DB 조회) | db link, dblink, 디비링크, 디비 링크, 다른 db, 원격 db, 원격 테이블, database link, ora-02019, ora-02063, ora-22992 | 
+```sql
+SELECT * FROM orders@prod_link WHERE order_dt >= TRUNC(SYSDATE);
+CREATE SYNONYM r_orders FOR app.orders@prod_link;                  -- 짧게 부르기
+INSERT INTO orders_copy SELECT * FROM orders@prod_link WHERE …;   -- 가져오기
+```
+- 링크 이름이 틀리면 ORA-02019, 원격 쪽 오류는 ORA-02063 아래에 원래 오류가 붙는다.
+- 원격 테이블과 큰 조인은 느리다 (행을 끌어온다) — 원격에서 먼저 거르거나 `/*+ DRIVING_SITE(r) */`.
+- 원격 DML 도 내 COMMIT 으로 같이 확정된다. 원격 DDL 은 바로 못 한다.
+
+@@ flashback | 실수 되돌리기 (FLASHBACK) | 실수로, 잘못 지운, 잘못 수정, 되살리, 복구, 되돌리, 원래대로, 이전 데이터, flashback, as of timestamp, 휴지통, recyclebin, before drop | 
+커밋 전이면 `ROLLBACK`. 커밋한 뒤라면 (UNDO 가 남아 있는 동안 — 보통 몇 십 분~몇 시간):
+```sql
+SELECT * FROM orders AS OF TIMESTAMP (SYSTIMESTAMP - INTERVAL '10' MINUTE) WHERE order_id = 1001;   -- 10분 전 모습
+INSERT INTO orders
+SELECT * FROM orders AS OF TIMESTAMP (SYSTIMESTAMP - INTERVAL '10' MINUTE) o
+ WHERE NOT EXISTS (SELECT 1 FROM orders x WHERE x.order_id = o.order_id);   -- 지운 행 되살리기
+FLASHBACK TABLE orders TO BEFORE DROP;          -- DROP 한 테이블 (휴지통)
+```
+- 테이블 통째로 시점 되돌리기: `ALTER TABLE orders ENABLE ROW MOVEMENT;` 후 `FLASHBACK TABLE orders TO TIMESTAMP …;`
+- TRUNCATE·DDL 뒤의 시점은 조회할 수 없다 (ORA-01466). 오래 지나 UNDO 가 덮이면 ORA-01555.
+
+@@ hints | 힌트·실행계획 보기·통계 | 힌트, hint, /*+, parallel, append, use_nl, use_hash, leading, dbms_xplan, explain plan, 실제 실행계획, 통계 수집, 통계 정보, gather_table_stats, ora-12838 | 
+```sql
+SELECT /*+ INDEX(o ix_orders_dt) */ … FROM orders o …    -- 별칭을 붙였으면 힌트에도 별칭
+/*+ FULL(o) */  /*+ LEADING(c o) USE_NL(o) */  /*+ USE_HASH(o) */  /*+ PARALLEL(o 4) */
+INSERT /*+ APPEND */ INTO t SELECT …;                     -- 직접 경로. 커밋 전까지 그 테이블 조회 불가 (ORA-12838)
+-- 실제로 돈 계획 (건수·시간 포함)
+SELECT /*+ GATHER_PLAN_STATISTICS */ … ;
+SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL, NULL, 'ALLSTATS LAST'));
+EXPLAIN PLAN FOR SELECT … ;  SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY);   -- 예상 계획
+BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, 'ORDERS'); END;              -- 통계 수집
+```
+힌트는 `/*+` 를 붙여 쓰고 SELECT·INSERT 등 바로 뒤에 둔다. 문법이 틀리면 오류 없이 무시된다.
+
+@@ ora_bind | 바인드 변수 오류 (ORA-01008·01036·01006) | ora-01008, ora-01036, ora-01006, ora-01745, not all variables bound, illegal variable name, 바인드, bind, 바인드 변수, 치환 변수 | 
+- ORA-01008: 바인드에 값을 다 주지 않았다. 동적 SQL 의 USING 은 이름이 아니라 위치 순서라, 같은 이름이 두 번 나오면 두 번 넘긴다.
+- ORA-01036 / ORA-01006: SQL 의 바인드와 넘긴 이름·개수가 다르다. 주석·문자열 속 `:x` 는 바인드가 아니다. DDL 에는 바인드를 쓸 수 없다.
+- `&변수` 는 SQL*Plus 치환 변수 — 일반 실행에서는 `:변수` 바인드를 쓴다.
+- 바인드로 테이블·컬럼 이름은 바꿀 수 없다 (동적 SQL). `IN (:list)` 하나에 '1,2,3' 을 넣을 수 없다 → 쉼표 분리(REGEXP_SUBSTR … CONNECT BY LEVEL)로 행을 만들어 IN.
+
+@@ ora_object | 객체·권한 오류 (ORA-00955·01031·04068·06508·01652) | ora-00955, ora-01031, ora-04063, ora-04068, ora-06508, ora-01652, pls-00905, insufficient privileges, name is already used, 권한, 권한 부여, grant, 동의어, synonym, 컴파일 오류, invalid 상태 | 
+- ORA-00955: 이미 있는 이름 — 뷰·프로시저는 `CREATE OR REPLACE`, 테이블은 먼저 사전에서 확인한다.
+- ORA-01031: 권한 부족 — `GRANT SELECT, INSERT ON app.orders TO scott;` 짧은 이름은 `CREATE SYNONYM orders FOR app.orders;`
+  역할(ROLE)로 받은 권한은 정의자 권한 프로시저 안에서 통하지 않는다 → 직접 GRANT.
+- ORA-04063 / ORA-06508 / PLS-00905: 객체가 INVALID — `ALTER PACKAGE pkg COMPILE BODY;` 후 `SELECT line, text FROM user_errors WHERE name = 'PKG'`.
+- ORA-04068: 패키지를 다시 컴파일해서 세션의 패키지 상태가 버려졌다 — 한 번 더 실행하면 된다.
+- ORA-01652: TEMP 공간 부족 — 큰 정렬·해시 조인. 조건으로 줄이거나 DBA 에게.

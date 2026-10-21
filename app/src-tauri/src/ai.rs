@@ -260,13 +260,61 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
     let text = [ctx.question.as_deref(), ctx.sql.as_deref(), ctx.error.as_deref()].into_iter().flatten().collect::<Vec<_>>().join("\n");
     let all = sqls_llm::guides::load(Some(&guides_file()));
     let major = ctx.server_version.as_deref().and_then(prompts::major_version);
-    let cards = sqls_llm::guides::pick(&all, args.task, &text, major);
+    // 낱말로 고르고, 설정에 따라 AI 에게도 고르게 한다 (자동: 낱말로 약할 때만). 실패·시간 초과면 낱말만
+    let sel = st.cfg.read().unwrap().ai.clone();
+    let route = match sel.guide_select.as_str() {
+        "always" => true,
+        "off" => false,
+        _ => !sqls_llm::guides::keyword_strong(&all, args.task, &text, major),
+    };
+    let mut ai_ids: Vec<String> = Vec::new();
+    if route {
+        if let Some(req) = sqls_llm::guides::route_request(&all, args.task, &text, major) {
+            status("참고할 문법 카드를 고르는 중…");
+            let llm = st.llm.clone();
+            // 생각이 긴 모델도 끝나게 넉넉히 (모델 문맥 크기는 그대로 — Ollama 가 모델을 다시 올리지 않게)
+            let mut rp = p.clone();
+            rp.max_tokens = rp.max_tokens.min(1024);
+            let limit = std::time::Duration::from_secs(sel.guide_select_timeout_secs.max(1));
+            let task = tokio::spawn(async move {
+                let mut req = req;
+                let first = tokio::time::timeout(limit, llm.chat(&rp, &req, |_| {})).await;
+                match first {
+                    // 형식 지정을 못 받는 서버
+                    Ok(Err(sqls_llm::Error::Api { status: 400, .. })) => {
+                        req.json_schema = None;
+                        tokio::time::timeout(limit, llm.chat(&rp, &req, |_| {})).await
+                    }
+                    r => r,
+                }
+            });
+            st.ai_tasks.lock().unwrap().insert(args.request_id, task.abort_handle());
+            let joined = task.await;
+            st.ai_tasks.lock().unwrap().remove(&args.request_id);
+            match joined {
+                Ok(Ok(Ok(r))) => ai_ids = sqls_llm::guides::parse_route(&r.text, &all),
+                Ok(Ok(Err(e))) => tracing::warn!("문법 카드 고르기 실패 — 낱말로 고른 것만 씁니다: {e}"),
+                Ok(Err(_)) => tracing::warn!("문법 카드 고르기가 {}초를 넘겨 낱말로 고른 것만 씁니다", limit.as_secs()),
+                Err(e) if e.is_cancelled() => return Err(ErrView::msg("cancelled", "AI 요청을 취소했습니다")),
+                Err(e) => tracing::warn!("문법 카드 고르기 작업 오류: {e}"),
+            }
+        }
+    }
+    let picked = sqls_llm::guides::pick_with(&all, args.task, &text, major, &ai_ids);
+    let cards: Vec<&sqls_llm::guides::Guide> = picked.iter().map(|(g, _)| *g).collect();
     ctx.guides = sqls_llm::guides::render(&cards);
     let _ = on_event.send(AiEvent::Context {
         tables: used_tables,
         plan: ctx.plan.is_some(),
         remote: p.is_remote(),
-        guides: cards.iter().map(|g| g.title.clone()).collect(),
+        guides: picked
+            .iter()
+            .map(|(g, why)| match why {
+                sqls_llm::guides::Why::Ai => format!("{} (AI 선택)", g.title),
+                sqls_llm::guides::Why::Both => format!("{} (낱말+AI)", g.title),
+                _ => g.title.clone(),
+            })
+            .collect(),
     });
 
     let req = prompts::build(args.task, &ctx, &args.history);
@@ -335,6 +383,69 @@ pub fn ai_guides_edit() -> R<String> {
         std::fs::write(&path, sqls_llm::guides::user_template()).map_err(|e| ErrView::msg("io", format!("{}: {e}", path.display())))?;
     }
     Ok(path.display().to_string())
+}
+
+/// AI 로 문법 카드 고르기 설정 (off · auto · always)
+#[tauri::command]
+pub fn ai_guide_select(st: State<'_, AppState>) -> String {
+    st.cfg.read().unwrap().ai.guide_select.clone()
+}
+
+#[tauri::command]
+pub fn set_ai_guide_select(st: State<'_, AppState>, mode: String) -> R<()> {
+    if !matches!(mode.as_str(), "off" | "auto" | "always") {
+        return Err(ErrView::msg("invalid", format!("알 수 없는 값: {mode}")));
+    }
+    st.cfg.write().unwrap().ai.guide_select = mode;
+    st.save_config()
+}
+
+#[derive(Serialize)]
+pub struct GuideView {
+    id: String,
+    title: String,
+    keys: Vec<String>,
+    /// "12-" · "-11" · 빈칸
+    version: String,
+    body: String,
+    /// builtin · custom(회사 규칙에만) · override(기본을 회사 규칙이 바꿈)
+    source: &'static str,
+}
+
+/// 문법 안내 카드 전체 — 실제로 쓰는 것 (회사 규칙이 바꾼 것은 바뀐 내용으로)
+#[tauri::command]
+pub fn ai_guides_list() -> Vec<GuideView> {
+    let builtin = sqls_llm::guides::builtin_cards();
+    sqls_llm::guides::load(Some(&guides_file()))
+        .into_iter()
+        .map(|g| {
+            let source = match builtin.iter().find(|b| b.id == g.id) {
+                None => "custom",
+                Some(b) if *b == g => "builtin",
+                Some(_) => "override",
+            };
+            let version = match (g.min, g.max) {
+                (None, None) => String::new(),
+                (a, b) => format!("{}-{}", a.map(|x| x.to_string()).unwrap_or_default(), b.map(|x| x.to_string()).unwrap_or_default()),
+            };
+            GuideView { id: g.id, title: g.title, keys: g.keys, version, body: g.body, source }
+        })
+        .collect()
+}
+
+/// 카드 고치기 — 기본 카드면 원문을 회사 규칙 파일 끝에 옮겨 둔다 (같은 아이디라 그쪽이 쓰인다). 파일 경로를 돌려준다
+#[tauri::command]
+pub fn ai_guides_customize(id: String) -> R<String> {
+    let path = ai_guides_edit()?;
+    let io = |e: std::io::Error| ErrView::msg("io", format!("{}: {e}", path));
+    let text = std::fs::read_to_string(&path).map_err(io)?;
+    if sqls_llm::guides::parse(&text).iter().any(|g| g.id == id) {
+        return Ok(path);
+    }
+    let block = sqls_llm::guides::builtin_block(&id).ok_or_else(|| ErrView::msg("config", format!("카드 '{id}' 가 없습니다")))?;
+    let sep = if text.ends_with('\n') { "\n" } else { "\n\n" };
+    std::fs::write(&path, format!("{text}{sep}# 기본 카드 '{id}' 를 옮겨 왔다 — 고치면 이 내용을 쓴다. 지우면 기본으로 돌아간다\n{block}")).map_err(io)?;
+    Ok(path)
 }
 
 #[tauri::command]

@@ -744,8 +744,9 @@ pub async fn object_deps(s: &Session, qualified: &str) -> Result<ObjectDeps> {
     let status = "LEFT JOIN all_objects o ON o.owner = d.owner AND o.object_name = d.name AND o.object_type = d.type";
 
     // Used By: 직접, 동의어를 거쳐, 외래 키로 가리키는 테이블
+    // 바인드(:n)를 그대로 고르면 NVARCHAR2 라 다른 갈래의 VARCHAR2 와 UNION 할 때 ORA-12704 — 사전 컬럼을 고른다
     let used_by = format!(
-        "SELECT d.owner, d.name, d.type, o.status, '직접', :n FROM all_dependencies d {status} \
+        "SELECT d.owner, d.name, d.type, o.status, '직접', d.referenced_name FROM all_dependencies d {status} \
           WHERE d.referenced_owner = :o AND d.referenced_name = :n AND NOT (d.owner = :o AND d.name = :n) \
          UNION \
          SELECT d.owner, d.name, d.type, o.status, '동의어 ' || sy.owner || '.' || sy.synonym_name, sy.synonym_name FROM all_synonyms sy \

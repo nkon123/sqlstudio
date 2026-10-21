@@ -35,6 +35,7 @@ import { openCopyData } from "./copydata";
 import { openHistory } from "./history";
 import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
+import { openPalette, type Command } from "./palette";
 import { DEFAULT_SNIPPETS, loadSnippets, parse as parseSnippets, saveSnippets, snippets, type Snip } from "./snippets";
 import { alertBox, applyTheme, bindBox, confirmBox, editorColorNow, field, h, modal, passwordBox, setEditorColor, themePref, toast, type EditorColorKey, type ThemePref } from "./ui";
 
@@ -434,8 +435,14 @@ class App {
   tabJustDragged = false;
   private tabBodies = h("div", { class: "tab-bodies" });
   private profileSel = h("select", { title: "접속 프로필" });
-  private connBadge = h("span", { class: "conn-badge" });
-  private txnBadge = h("span", { class: "txn-badge", hidden: true }, "트랜잭션 진행 중");
+  /** 접속 단추 — 프로필·상태를 보이고, 누르면 프로필 고르기·끊기 메뉴 */
+  private connName = h("span", { class: "conn-name" });
+  private connSub = h("span", { class: "conn-sub" });
+  private connPill = h("button", { class: "conn-pill" }, h("span", { class: "conn-dot" }), this.connName, this.connSub, h("span", { class: "caret" }, "▾"));
+  /** 실행 단추 묶음 (실행 중에는 중지 단추로 바뀐다) */
+  private runGroup!: HTMLElement;
+  /** 커밋하지 않은 변경이 있을 때만 */
+  private txnGroup = h("span", { class: "txn-group", hidden: true }, h("span", { class: "txn-label", title: "이 탭에 커밋하지 않은 변경이 있습니다 — 탭을 닫거나 프로그램을 끄면 묻습니다" }, "커밋 안 된 변경"));
   private statusLeft = h("span", {});
   private statusRight = h("span", {});
   private compBadge = h("span", { class: "comp-badge", title: "자동완성 캐시 — Ctrl+Space 로 직접 띄운다" });
@@ -459,41 +466,61 @@ class App {
   constructor(root: HTMLElement) {
     const b = (key: string, label: string, title: string, onclick: () => void, cls = "") =>
       (this.btn[key] = h("button", { class: cls, title, onclick }, label));
+    // 단추는 모두 만들어 두고 (쓸 수 있는지는 refresh 가 정한다), 툴바에는 자주 쓰는 것만 — 나머지는 메뉴·명령 검색이 같은 단추를 본다
+    b("connect", "접속", "선택한 프로필로 접속 — 이미 접속한 탭에서 다른 접속을 고르면 새 탭에 접속합니다 (지금 탭은 그대로)", () => void this.connectActive());
+    b("disconnect", "끊기", "현재 탭의 접속을 끊는다", () => this.disconnectActive());
+    b("run", "▶ 실행", "커서 위치 문장 실행 (Ctrl+Enter / F9)", () => this.runStatement(), "primary run-main");
+    b("script", "스크립트", "전체 실행 (F5)", () => this.runScript());
+    b("explain", "실행계획", "실행계획 (Ctrl+E)", () => this.explain());
+    b("debug", "디버그", "PL/SQL 디버거 — 커서 위치 블록을 디버그로 연다 (탐색기에서 프로시저·패키지를 골라도 된다)", () => this.debugActive());
+    b("dfd", "흐름도", "데이터 흐름도를 별도 창으로 — 분석 결과에서 테이블 ← 처리 ← 테이블 흐름 (테이블 상세의 '흐름도'로 열면 그 테이블 기준)", () => this.openDfd());
+    b("analyze", "분석", "PL/SQL 분석 — 패키지·프로시저를 조각내어 (로컬) 모델로 분석하고 호출 관계·테이블 CRUD 를 통합한다", () => this.analyzeActive());
+    b("compare", "비교", "스키마 비교 — 이 탭(원본)과 다른 접속(대상)의 테이블·뷰·시퀀스·소스를 맞대고 맞추는 스크립트를 만든다", () => this.compareActive());
+    b("copy", "데이터 복사", "다른 접속으로 데이터 복사 — 이 탭(원본)의 테이블 행을 다른 접속 탭(대상)의 테이블로 (추가 · 지우고 넣기 · MERGE). 커밋은 대상 탭에서", () => this.copyDataFrom(this.active));
+    b("space", "용량", "용량 — 테이블별 크기(테이블+인덱스+LOB)와 테이블스페이스별 사용량을 그리드로", () => this.spaceActive());
+    b("monitor", "세션", "세션·락 모니터 — 누가 무엇을 막고 있는지, 세션의 SQL·트랜잭션, 세션 종료(확인 후)", () => this.monitorActive());
+    b("cancel", "■ 중지", "실행 중인 쿼리를 취소 (Esc)", () => this.cancel(), "danger");
+    b("commit", "커밋", "COMMIT", () => this.txn("commit"), "primary");
+    b("rollback", "롤백", "ROLLBACK", () => this.txn("rollback"));
+    b("new", "새 탭", "새 에디터 (같은 접속으로)", () => this.newTab(true));
+    b("open", "열기", "SQL 파일 열기", () => this.openFile());
+    b("history", "이력", "SQL 실행 이력 (F8) — 실행한 문장을 찾아 다시 쓴다", () => this.showHistory());
+    b("save", "저장", "저장 (Ctrl+S)", () => this.save());
+    b("saveAs", "다른 이름", "다른 이름으로 저장 (Ctrl+Shift+S)", () => this.saveAs());
+    b("format", "포맷", "SQL 정리 (Ctrl+Shift+F) — 선택 영역, 없으면 커서 위치 문장", () => this.formatSql());
+    b("toggleBrowser", "◧", "왼쪽 영역(테이블·프로젝트) 접기/펼치기 (Ctrl+Shift+1) · 경계선을 끌면 너비 조절", () => this.layout.toggle("left"), "icon");
+    b("toggleAi", "AI", "오른쪽 AI 영역 접기/펼치기 (Ctrl+Shift+3) · AI 입력칸으로 바로: Ctrl+K · 경계선을 끌면 너비 조절", () => this.layout.toggle("right"), "icon");
+    b("keys", "?", "단축키 목록 (F1)", () => showShortcuts(), "icon");
+    b("settings", "⚙", "설정 — 접속·편집기·AI·MCP·데이터 폴더", () => this.settings(), "icon");
+    const drop = (label: string, title: string, items: () => MenuItem[], cls = "") => {
+      const el: HTMLButtonElement = h("button", { class: `drop ${cls}`, title, onclick: () => {
+        const r = el.getBoundingClientRect();
+        showMenu(r.left, r.bottom + 2, items());
+      } }, label);
+      return el;
+    };
+    this.runGroup = h("span", { class: "run-split" }, this.btn.run,
+      drop("▾", "실행 방법 고르기 — 스크립트 전체·실행계획·디버그", () => this.runMenu(), "primary split-more"));
+    this.btn.cancel.hidden = true;
     const toolbar = h("header", { class: "toolbar" },
-      this.profileSel,
-      b("connect", "접속", "선택한 프로필로 접속 — 이미 접속한 탭에서 다른 접속을 고르면 새 탭에 접속합니다 (지금 탭은 그대로)", () => void this.connectActive()),
-      b("disconnect", "끊기", "현재 탭의 접속을 끊는다", () => this.disconnectActive()),
-      this.connBadge, this.txnBadge,
+      this.connPill,
       h("span", { class: "sep" }),
-      b("run", "▶ 실행", "커서 위치 문장 실행 (Ctrl+Enter / F9)", () => this.runStatement(), "primary"),
-      b("script", "스크립트", "전체 실행 (F5)", () => this.runScript()),
-      b("explain", "실행계획", "Ctrl+E", () => this.explain()),
-      b("debug", "디버그", "PL/SQL 디버거 — 커서 위치 블록을 디버그로 연다 (탐색기에서 프로시저·패키지를 골라도 된다)", () => this.debugActive()),
-      b("dfd", "흐름도", "데이터 흐름도를 별도 창으로 — 분석 결과에서 테이블 ← 처리 ← 테이블 흐름 (테이블 상세의 '흐름도'로 열면 그 테이블 기준)", () => this.openDfd()),
-      b("analyze", "분석", "PL/SQL 분석 — 패키지·프로시저를 조각내어 (로컬) 모델로 분석하고 호출 관계·테이블 CRUD 를 통합한다", () => this.analyzeActive()),
-      b("compare", "비교", "스키마 비교 — 이 탭(원본)과 다른 접속(대상)의 테이블·뷰·시퀀스·소스를 맞대고 맞추는 스크립트를 만든다", () => this.compareActive()),
-      b("copy", "데이터 복사", "다른 접속으로 데이터 복사 — 이 탭(원본)의 테이블 행을 다른 접속 탭(대상)의 테이블로 (추가 · 지우고 넣기 · MERGE). 커밋은 대상 탭에서", () => this.copyDataFrom(this.active)),
-      b("space", "용량", "용량 — 테이블별 크기(테이블+인덱스+LOB)와 테이블스페이스별 사용량을 그리드로", () => this.spaceActive()),
-      b("monitor", "세션", "세션·락 모니터 — 누가 무엇을 막고 있는지, 세션의 SQL·트랜잭션, 세션 종료(확인 후)", () => this.monitorActive()),
-      b("cancel", "중지", "실행 중인 쿼리를 취소", () => this.cancel(), "danger"),
+      this.runGroup, this.btn.cancel, this.btn.explain,
+      this.txnGroup,
       h("span", { class: "sep" }),
-      b("commit", "커밋", "COMMIT", () => this.txn("commit")),
-      b("rollback", "롤백", "ROLLBACK", () => this.txn("rollback")),
-      h("span", { class: "sep" }),
-      b("new", "새 탭", "새 에디터 (같은 접속으로)", () => this.newTab(true)),
-      b("open", "열기", "SQL 파일 열기", () => this.openFile()),
-      b("history", "이력", "SQL 실행 이력 (F8) — 실행한 문장을 찾아 다시 쓴다", () => this.showHistory()),
-      b("save", "저장", "Ctrl+S · 우클릭: 다른 이름으로 저장·인코딩 바꿔 저장", () => this.save()),
-      b("saveAs", "다른 이름", "다른 이름으로 저장 (Ctrl+Shift+S)", () => this.saveAs()),
-      b("format", "포맷", "SQL 정리 (Ctrl+Shift+F) — 선택 영역, 없으면 커서 위치 문장", () => this.formatSql()),
-      h("span", { class: "sep" }),
-      b("toggleBrowser", "왼쪽", "왼쪽 영역(테이블·프로젝트) 접기/펼치기 (Ctrl+Shift+1) · 경계선을 끌면 너비 조절", () => this.layout.toggle("left")),
-      b("toggleAi", "AI", "오른쪽 AI 영역 접기/펼치기 (Ctrl+Shift+3) · AI 입력칸으로 바로: Ctrl+K · 경계선을 끌면 너비 조절", () => this.layout.toggle("right")),
+      drop("파일 ▾", "새 탭·열기·저장·인코딩·실행 이력·포맷", () => this.fileMenu()),
+      drop("도구 ▾", "분석·흐름도·디버그·스키마 비교·데이터 복사·용량·세션", () => this.toolsMenu()),
       h("span", { class: "spacer" }),
-      b("keys", "단축키", "단축키 목록 (F1)", () => showShortcuts()),
-      b("settings", "설정", "접속·AI·MCP 설정", () => this.settings()),
+      h("button", { class: "pal-open", title: "모든 명령을 이름으로 찾아 실행 (Ctrl+Shift+P)", onclick: () => this.palette() },
+        h("span", {}, "🔍 명령 검색"), h("kbd", {}, "Ctrl+Shift+P")),
+      h("span", { class: "spacer" }),
+      this.btn.toggleBrowser, this.btn.toggleAi, this.btn.keys, this.btn.settings,
     );
-    this.btn.save.addEventListener("contextmenu", (e) => this.saveMenu(e));
+    this.connPill.addEventListener("click", () => {
+      const r = this.connPill.getBoundingClientRect();
+      showMenu(r.left, r.bottom + 2, this.connMenu());
+    });
+    this.txnGroup.append(this.btn.commit, this.btn.rollback);
     const tablePane = h("div", { class: "side-pane" },
       h("div", { class: "browser-head" }, this.browserOwner, this.browserType),
       this.browserFilter,
@@ -544,6 +571,13 @@ class App {
         e.preventDefault();
         e.stopPropagation();
         showShortcuts();
+        return;
+      }
+      // Ctrl+Shift+P: 명령 검색
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === "KeyP" && !document.querySelector("dialog[open]")) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.palette();
         return;
       }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === "KeyK") {
@@ -1119,7 +1153,7 @@ class App {
       if (t === this.active) {
         this.statusRight.textContent = `실행 중 ${secs.toFixed(1)}s (Esc: 중지)`;
         // 중지 단추에도 — 눈에 띄는 곳에서 돌고 있는 것이 보이게
-        this.btn.cancel.textContent = secs >= 1 ? `중지 ${Math.floor(secs)}s` : "중지";
+        this.btn.cancel.textContent = secs >= 1 ? `■ 중지 ${Math.floor(secs)}s` : "■ 중지";
       }
     };
     t.runTimer = window.setInterval(tick, 200);
@@ -1131,7 +1165,7 @@ class App {
       t.running = false;
       clearInterval(t.runTimer);
       t.showRunning(null);
-      this.btn.cancel.textContent = "중지";
+      this.btn.cancel.textContent = "■ 중지";
       t.editor.clearRunning();
       this.refresh();
     }
@@ -2047,11 +2081,11 @@ class App {
   }
 
   /** 저장 단추 우클릭 — 다른 이름, 인코딩 바꿔 저장 */
-  private saveMenu(e: MouseEvent) {
-    e.preventDefault();
+  /** 인코딩 바꿔 저장 — 파일 메뉴의 하위 메뉴 */
+  private encodingItems(): MenuItem[] {
     const t = this.active;
-    if (!t) return;
-    const enc = (v: string, label: string) => ({
+    if (!t) return [];
+    const enc = (v: string, label: string): MenuItem => ({
       label: `${t.encoding === v ? "✓ " : ""}${label}`,
       run: async () => {
         const before = t.encoding;
@@ -2060,15 +2094,7 @@ class App {
         else { await this.saveAs(); if (!t.filePath) t.encoding = before; }
       },
     });
-    showMenu(e.clientX, e.clientY, [
-      { label: "저장", hint: "Ctrl+S", run: () => this.save() },
-      { label: "다른 이름으로 저장", hint: "Ctrl+Shift+S", run: () => this.saveAs() },
-      { sep: true },
-      { title: `인코딩 바꿔 저장 (지금: ${t.encoding})` },
-      enc("utf-8", "UTF-8"),
-      enc("utf-8-bom", "UTF-8 (BOM)"),
-      enc("cp949", "CP949 (EUC-KR · 한글 Windows 메모장·Toad)"),
-    ]);
+    return [enc("utf-8", "UTF-8"), enc("utf-8-bom", "UTF-8 (BOM)"), enc("cp949", "CP949 (EUC-KR · 한글 Windows 메모장·Toad)")];
   }
 
   /** 탭 내용을 파일로. 실패하면 인코딩을 되돌린다 (CP949 로 못 쓰는 글자 등) */
@@ -2115,18 +2141,120 @@ class App {
     // 분석은 접속 없이도 — 가져온 결과를 본다
     this.btn.analyze.disabled = busy;
     this.btn.cancel.disabled = !busy;
-    if (!busy) this.btn.cancel.textContent = "중지"; // 다른 탭으로 옮겨 와도 남은 경과 시간이 보이지 않게
+    // 실행 중에는 실행 단추 자리에 중지
+    this.runGroup.hidden = busy;
+    this.btn.cancel.hidden = !busy;
+    if (!busy) this.btn.cancel.textContent = "■ 중지"; // 다른 탭으로 옮겨 와도 남은 경과 시간이 보이지 않게
     this.btn.commit.disabled = !c || busy || !t?.txnPending;
     this.btn.rollback.disabled = !c || busy || !t?.txnPending;
-    this.txnBadge.hidden = !t?.txnPending;
-    for (const x of this.tabs) x.refreshTitle();
-    this.connBadge.textContent = c ? `${c.production ? "운영 · " : ""}${c.user}@${c.connect_string}${c.read_only ? " · 읽기 전용" : ""}${c.sid ? ` · SID ${c.sid}` : ""}` : "접속 안 됨";
-    this.connBadge.title = c ? `세션 SID ${c.sid ?? "?"} · ${c.at ? `${new Date(c.at).toLocaleTimeString()} 에 접속` : ""} — 화면을 오가도 SID 가 같으면 같은 접속입니다 (다시 접속하면 바뀝니다)` : "";
-    this.connBadge.classList.toggle("prod", !!c?.production);
-    this.connBadge.style.background = c?.color ?? "";
-    this.connBadge.classList.toggle("on", !!c);
+    this.txnGroup.hidden = !t?.txnPending;
+    this.connPill.disabled = busy;
+    this.connName.textContent = c ? c.profile : this.profileSel.value || "접속";
+    this.connSub.textContent = c ? `${c.production ? "운영 · " : ""}${c.user}@${c.connect_string}${c.read_only ? " · 읽기 전용" : ""}` : "접속 안 됨";
+    this.connPill.title = c ? `세션 SID ${c.sid ?? "?"} · ${c.at ? `${new Date(c.at).toLocaleTimeString()} 에 접속` : ""} — 화면을 오가도 SID 가 같으면 같은 접속입니다 (다시 접속하면 바뀝니다)\n누르면 다른 접속·끊기` : "누르면 접속할 프로필을 고릅니다";
+    this.connPill.classList.toggle("prod", !!c?.production);
+    this.connPill.classList.toggle("on", !!c);
+    this.connPill.style.setProperty("--conn-color", c?.color || "");
     if (!busy) this.statusRight.textContent = c ? c.server_version : "";
     for (const x of this.tabs) x.refreshTitle();
+  }
+
+  /** 접속 메뉴 — 프로필을 고르면 접속 (이미 접속한 탭에서 다른 프로필이면 새 탭), 다시 접속, 끊기, 접속 관리 */
+  private connMenu(): MenuItem[] {
+    const c = this.active?.conn;
+    const pick = (name: string) => { this.profileSel.value = name; void this.connectActive(); };
+    return [
+      { title: c ? "다른 접속은 새 탭에서 엽니다" : "접속할 프로필" },
+      ...(this.profiles.length ? this.profiles.map((p): MenuItem => ({
+        label: `${c?.profile === p.name ? "● " : ""}${p.name}`, hint: p.read_only ? "읽기 전용" : "",
+        disabled: this.btn.connect.disabled, run: () => pick(p.name),
+      })) : [{ label: "프로필 없음 — 설정에서 추가", disabled: true } as MenuItem]),
+      { sep: true },
+      { label: "다시 접속", disabled: !c || this.btn.connect.disabled, run: () => { if (c) pick(c.profile); } },
+      { label: "끊기", disabled: this.btn.disconnect.disabled, run: () => this.disconnectActive() },
+      { sep: true },
+      { label: "접속 관리…", run: () => void this.settings() },
+    ];
+  }
+
+  private runMenu(): MenuItem[] {
+    const off = (k: string) => this.btn[k].disabled;
+    return [
+      { label: "문장 실행", hint: "Ctrl+Enter", disabled: off("run"), run: () => this.runStatement() },
+      { label: "스크립트 전체 실행", hint: "F5", disabled: off("script"), run: () => this.runScript() },
+      { label: "실행계획", hint: "Ctrl+E", disabled: off("explain"), run: () => this.explain() },
+      { sep: true },
+      { label: "디버그", disabled: off("debug"), run: () => this.debugActive() },
+    ];
+  }
+
+  private fileMenu(): MenuItem[] {
+    const t = this.active;
+    return [
+      { label: "새 탭", run: () => this.newTab(true) },
+      { label: "열기…", run: () => void this.openFile() },
+      { sep: true },
+      { label: "저장", hint: "Ctrl+S", run: () => void this.save() },
+      { label: "다른 이름으로 저장…", hint: "Ctrl+Shift+S", run: () => void this.saveAs() },
+      { label: `인코딩 바꿔 저장${t ? ` (지금: ${t.encoding})` : ""}`, disabled: !t, sub: this.encodingItems() },
+      { sep: true },
+      { label: "실행 이력", hint: "F8", run: () => this.showHistory() },
+      { label: "SQL 포맷", hint: "Ctrl+Shift+F", run: () => void this.formatSql() },
+    ];
+  }
+
+  private toolsMenu(): MenuItem[] {
+    const off = (k: string) => this.btn[k].disabled;
+    return [
+      { title: "코드" },
+      { label: "PL/SQL 분석", disabled: off("analyze"), run: () => this.analyzeActive() },
+      { label: "데이터 흐름도", run: () => this.openDfd() },
+      { label: "PL/SQL 디버그", disabled: off("debug"), run: () => this.debugActive() },
+      { title: "DB 사이" },
+      { label: "스키마 비교", disabled: off("compare"), run: () => this.compareActive() },
+      { label: "데이터 복사", disabled: off("copy"), run: () => this.copyDataFrom(this.active) },
+      { title: "운영" },
+      { label: "용량 (테이블·테이블스페이스)", disabled: off("space"), run: () => this.spaceActive() },
+      { label: "세션·락 모니터", disabled: off("monitor"), run: () => this.monitorActive() },
+    ];
+  }
+
+  /** 명령 검색 (Ctrl+Shift+P) — 메뉴와 같은 명령, 접속 프로필도 */
+  palette() {
+    const off = (k: string) => this.btn[k].disabled;
+    const c = this.active?.conn;
+    const connectTo = (name: string) => { this.profileSel.value = name; void this.connectActive(); };
+    const cmds: Command[] = [
+      ...(c ? [{ group: "접속", label: `${c.profile} 다시 접속`, alias: "reconnect", disabled: off("connect"), run: () => connectTo(c.profile) }] : []),
+      ...this.profiles.map((p): Command => ({ group: "접속", label: `${p.name} 에 접속`, alias: "connect", disabled: off("connect"), run: () => connectTo(p.name) })),
+      { group: "접속", label: "접속 끊기", alias: "disconnect", disabled: off("disconnect"), run: () => this.disconnectActive() },
+      { group: "접속", label: "접속 관리", alias: "profile 프로필 설정", run: () => void this.settings() },
+      { group: "실행", label: "문장 실행", keys: "Ctrl+Enter", alias: "run", disabled: off("run"), run: () => this.runStatement() },
+      { group: "실행", label: "스크립트 전체 실행", keys: "F5", alias: "script", disabled: off("script"), run: () => this.runScript() },
+      { group: "실행", label: "실행계획", keys: "Ctrl+E", alias: "explain plan", disabled: off("explain"), run: () => this.explain() },
+      { group: "실행", label: "실행 중지", keys: "Esc", alias: "cancel", disabled: off("cancel"), run: () => this.cancel() },
+      { group: "트랜잭션", label: "커밋", alias: "commit", disabled: off("commit"), run: () => this.txn("commit") },
+      { group: "트랜잭션", label: "롤백", alias: "rollback", disabled: off("rollback"), run: () => this.txn("rollback") },
+      { group: "파일", label: "새 탭", alias: "new tab", run: () => this.newTab(true) },
+      { group: "파일", label: "파일 열기", alias: "open", run: () => void this.openFile() },
+      { group: "파일", label: "저장", keys: "Ctrl+S", alias: "save", run: () => void this.save() },
+      { group: "파일", label: "다른 이름으로 저장", keys: "Ctrl+Shift+S", alias: "save as", run: () => void this.saveAs() },
+      { group: "편집", label: "SQL 포맷", keys: "Ctrl+Shift+F", alias: "format 정리", run: () => void this.formatSql() },
+      { group: "편집", label: "실행 이력", keys: "F8", alias: "history", run: () => this.showHistory() },
+      { group: "도구", label: "PL/SQL 분석", alias: "analyze", disabled: off("analyze"), run: () => this.analyzeActive() },
+      { group: "도구", label: "데이터 흐름도", alias: "dfd flow", run: () => this.openDfd() },
+      { group: "도구", label: "PL/SQL 디버그", alias: "debug", disabled: off("debug"), run: () => this.debugActive() },
+      { group: "도구", label: "스키마 비교", alias: "compare diff", disabled: off("compare"), run: () => this.compareActive() },
+      { group: "도구", label: "데이터 복사", alias: "copy", disabled: off("copy"), run: () => this.copyDataFrom(this.active) },
+      { group: "도구", label: "용량", alias: "space tablespace 테이블스페이스", disabled: off("space"), run: () => this.spaceActive() },
+      { group: "도구", label: "세션·락 모니터", alias: "session lock monitor kill", disabled: off("monitor"), run: () => this.monitorActive() },
+      { group: "보기", label: "왼쪽 영역 접기/펼치기", keys: "Ctrl+Shift+1", alias: "테이블 프로젝트", run: () => this.layout.toggle("left") },
+      { group: "보기", label: "AI 영역 접기/펼치기", keys: "Ctrl+Shift+3", run: () => this.layout.toggle("right") },
+      { group: "보기", label: "AI 입력칸으로", keys: "Ctrl+K", run: () => { this.layout.toggle("right", true); this.ai.focus(); } },
+      { group: "도움말", label: "단축키 목록", keys: "F1", alias: "shortcut", run: () => showShortcuts() },
+      { group: "설정", label: "설정 열기", alias: "settings", run: () => void this.settings() },
+    ];
+    openPalette(cmds);
   }
 
   // ── 설정 ─────────────────────────────────────────
@@ -2462,6 +2590,42 @@ class App {
     return h("div", {}, tnsBox, tnsList, h("div", { class: "split" }, list, form));
   }
 
+  /** 문법 안내 카드 보기 — 실제로 AI 에 보내는 내용. 기본 카드는 회사 규칙 파일로 옮겨 고친다 */
+  private async showGuides() {
+    type Card = { id: string; title: string; keys: string[]; version: string; body: string; source: "builtin" | "custom" | "override" };
+    const cards = await invoke<Card[]>("ai_guides_list").catch((e) => { toast(errOf(e).message, "error"); return null; });
+    if (!cards) return;
+    const SRC = { builtin: ["기본", ""], custom: ["회사 규칙", "ok"], override: ["회사 규칙이 바꿈", "warn"] } as const;
+    const q = h("input", { placeholder: "찾기 (제목·낱말·본문)", class: "sc-q" }) as HTMLInputElement;
+    const list = h("div", { class: "guide-list" });
+    const edit = async (id: string) => {
+      try {
+        const path = await invoke<string>("ai_guides_customize", { id });
+        list.closest("dialog")?.close();
+        await this.openPath(path);
+        toast(`'${id}' 카드를 회사 규칙 파일에 두었습니다 — 고치고 저장하면 다음 질문부터 씁니다`, "info", 6000);
+      } catch (e) { toast(errOf(e).message, "error"); }
+    };
+    const render = () => {
+      const w = q.value.trim().toLowerCase();
+      list.replaceChildren(...cards.filter((c) => !w || `${c.id} ${c.title} ${c.keys.join(" ")} ${c.body}`.toLowerCase().includes(w)).map((c) =>
+        h("details", { class: "guide" },
+          h("summary", {}, h("strong", {}, c.title), h("small", { class: "dim" }, ` ${c.id}`),
+            h("span", { class: `badge ${SRC[c.source][1]}` }, SRC[c.source][0]),
+            c.version ? h("span", { class: "badge" }, c.version.startsWith("-") ? `${c.version.slice(1)} 이하` : c.version.endsWith("-") ? `${c.version.slice(0, -1)} 이상` : c.version) : ""),
+          h("div", { class: "hint" }, c.keys.includes("*") ? "항상 넣는다 (SQL 만들기·고치기·대화)" : `이 낱말이 요청에 있으면: ${c.keys.join(", ")}`),
+          h("pre", { class: "guide-body" }, c.body),
+          h("button", { class: "small", onclick: () => void edit(c.id) }, c.source === "builtin" ? "회사 규칙으로 옮겨 고치기" : "회사 규칙 파일에서 고치기"))));
+    };
+    q.addEventListener("input", render);
+    render();
+    const n = (s: Card["source"]) => cards.filter((c) => c.source === s).length;
+    await modal("Oracle 문법 안내 카드", h("div", { class: "guides-view" },
+      h("p", { class: "hint" }, `요청에 맞는 카드를 몇 장 골라 AI 에 함께 보냅니다. 기본 ${n("builtin") + n("override")}장 (회사 규칙이 바꾼 것 ${n("override")}) · 회사 규칙만 ${n("custom")}장. ` +
+        "기본 카드를 고치면 회사 규칙 파일에 같은 아이디로 옮겨 두고 그것을 씁니다 — 지우면 기본으로 돌아갑니다."),
+      q, list), [{ label: "닫기", value: true, kind: "primary" }], { wide: true });
+  }
+
   private async providersPage() {
     const list = h("div", { class: "list" });
     const form = h("div", { class: "form" });
@@ -2591,6 +2755,10 @@ class App {
     await refreshList();
     // Oracle 문법 안내 — 요청에 맞는 카드를 골라 넣는다. 회사 규칙은 사용자 파일에
     const gi = await invoke<{ path: string; exists: boolean; builtin: number; custom: number }>("ai_guides_info").catch(() => null);
+    const guideSel = h("select", {},
+      h("option", { value: "auto" }, "자동 (낱말로 약할 때만)"),
+      h("option", { value: "always" }, "항상"),
+      h("option", { value: "off" }, "끔 (낱말로만)")) as HTMLSelectElement;
     const guides = h("div", { class: "guides-box" },
       h("strong", {}, "Oracle 문법 안내 "),
       h("span", { class: "hint" }, `질문·SQL·오류에 맞는 안내 카드를 몇 장 골라 AI 에 함께 보냅니다 (기본 ${gi?.builtin ?? "?"}장${gi?.custom ? ` + 회사 규칙 ${gi.custom}장` : ""}). AI 답 위에 '참고 문법'으로 표시됩니다.`),
@@ -2601,7 +2769,14 @@ class App {
           await this.openPath(path);
           toast("편집하고 저장하면 다음 질문부터 씁니다", "info", 5000);
         } catch (err) { toast(errOf(err).message, "error"); }
-      } }, gi?.exists ? "회사 규칙 편집" : "회사 규칙 추가"));
+      } }, gi?.exists ? "회사 규칙 편집" : "회사 규칙 추가"),
+      h("button", { class: "small", title: "AI 에 보내는 문법 안내 카드를 모두 보고, 기본 카드를 회사 규칙으로 옮겨 고친다", onclick: (e: Event) => { e.preventDefault(); void this.showGuides(); } }, "카드 보기"),
+      h("label", { class: "check", title: "카드 주제 목록을 AI 에 먼저 보내 고르게 한 뒤, 고른 카드만 질문과 함께 보낸다 (질의가 한 번 더 — 많아야 10초, 실패하면 낱말로 고른 것만)" },
+        "AI 로도 고르기 ", guideSel));
+    void invoke<string>("ai_guide_select").then((v) => { guideSel.value = v; }).catch(() => {});
+    guideSel.addEventListener("change", () => {
+      invoke("set_ai_guide_select", { mode: guideSel.value }).then(() => toast("저장했습니다", "ok", 1200)).catch((e) => toast(errOf(e).message, "error"));
+    });
     return h("div", {}, guides, h("div", { class: "split" }, list, form));
   }
 

@@ -3,21 +3,27 @@
 // 편집기에서 F4 (커서의 테이블·별칭), 왼쪽 테이블 목록에서 우클릭.
 // 결과 그리드와 같다: 셀 단위 선택(끌기·Shift) · Ctrl+C 고른 셀 복사(컬럼 칸만 고르면 이름만) · 머리 눌러 정렬 · 열 너비
 // 더블클릭: 컬럼 이름 넣기 · 우클릭: 이름 복사·넣기 · Esc: 닫기 · 머리 끌기: 옮기기 · 오른쪽 아래 모서리: 크기
+// 탭: 컬럼 · 인덱스 · 스크립트(DDL) · Used By(이 객체를 쓰는 곳과 그 줄) · Uses(이 객체가 쓰는 것) — 의존 행 더블클릭: 그 객체 열기
 // 키보드: 방향키로 고르기 (Shift+ 넓히기 · Ctrl+ 커서만 · Space 더하기/빼기) · 글자를 치면 거르기 칸으로
 //   Enter: 커서가 있던 절에 맞춰 넣기 · Shift+Enter: 넣을 절 메뉴
 //   Ctrl+Shift(또는 Alt) 를 누르고 있으면 4방향 휠 — 누른 채 ↑ SELECT · ↓ WHERE · ← ORDER BY · → GROUP BY, 떼면 넣는다
 
-import type { Column, TableDesc } from "./api";
+import { errOf, type Column, type DepObj, type ObjectDeps, type TableDesc } from "./api";
 import { TARGET_LABEL, type Target } from "./colinsert";
 import { showMenu, type MenuItem } from "./ctxmenu";
 import { ResultGrid } from "./grid";
 import { h, toast } from "./ui";
+import { KIND } from "./usage";
 
 const col = (name: string, type_name = "VARCHAR2"): Column => ({ name, type_name, nullable: true });
 /** 컬럼 그리드의 열 — 순서는 그리드 왼쪽 번호 (머리를 세 번 누르면 원래 순서) */
 const COLS = [col("컬럼"), col("형식"), col("NULL"), col("기본값"), col("설명"), col("키·인덱스")];
 const NAME = 0;
+const TYPE = 1;
 const IDX_COLS = [col("인덱스"), col("유일"), col("컬럼")];
+const BY_COLS = [col("종류"), col("객체"), col("상태"), col("연결"), col("줄", "NUMBER"), col("내용")];
+const USES_COLS = [col("종류"), col("객체"), col("상태"), col("연결")];
+type View = "cols" | "idx" | "script" | "by" | "uses";
 
 export interface ColPopupOpts {
   /** 화면 좌표 — 이 근처에 띄운다 */
@@ -29,9 +35,15 @@ export interface ColPopupOpts {
   ddl?: () => void;
   /** 컬럼 영향도 (이 컬럼을 쓰는 곳) */
   usage?: (column: string) => void;
+  /** 스크립트 탭의 DDL */
+  script?: () => Promise<string>;
+  /** Used By · Uses 탭 */
+  deps?: () => Promise<ObjectDeps>;
+  /** 의존 객체 열기 (소스면 그 줄로) */
+  openObject?: (owner: string, name: string, kind: string, line?: number) => void;
   /** 고른 컬럼을 SQL 에 넣는다 — "auto" 는 커서가 있던 절에 맞춰. 절을 알 수 없으면 false (메뉴로 고르게).
    *  `from` 은 FROM 에 쓸 테이블 (커서 쪽에 문장이 없으면 새 SELECT 를 만든다) */
-  place?: (target: Target | "auto", cols: string[], from: string) => Promise<boolean>;
+  place?: (target: Target | "auto", cols: string[], from: string, types?: string[]) => Promise<boolean>;
 }
 
 /** 휠을 여는 키 — Ctrl+Shift 가 Windows 입력 언어 전환 키인 PC 는 Alt 로 */
@@ -74,13 +86,24 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
     rows = x.columns.map((c, i) => ({ no: i + 1, ...c }));
   };
   setData(d);
-  let view = "cols" as "cols" | "idx";
+  let view = "cols" as View;
+  // 스크립트·의존은 탭을 처음 열 때 읽는다
+  let ddlText: string | null = null;
+  let deps: ObjectDeps | null = null;
+  let loading = false;
+  /** 그리드 행(종류|객체) → 의존 객체 */
+  const depOf = new Map<string, DepObj>();
+  const depKey = (r: (string | null)[]) => `${r[0]}|${r[1]}`;
+  const scriptEl = h("pre", { class: "cp-script", tabindex: "0" });
 
   const filter = h("input", { placeholder: "컬럼·형식·설명 거르기", class: "cp-filter" });
   const body = h("div", { class: "cp-body" });
   const count = h("span", { class: "cp-count" });
   const tabCols = h("button", { class: "cp-tab on" }, `컬럼 ${d.columns.length}`);
   const tabIdx = h("button", { class: "cp-tab" }, d.partial ? "인덱스 …" : `인덱스 ${d.indexes.length}`);
+  const tabScript = h("button", { class: "cp-tab", title: "DDL (CREATE 문)" }, "스크립트");
+  const tabBy = h("button", { class: "cp-tab", title: "이 객체를 쓰는 곳 — 사전 의존성·외래 키, 소스·뷰에서 이름이 나오는 줄" }, "Used By");
+  const tabUses = h("button", { class: "cp-tab", title: "이 객체가 쓰는 것 — 사전 의존성·외래 키(부모 테이블)" }, "Uses");
   const sub = h("span", { class: "cp-dim" });
   const subText = () => ` ${d.object_type}${d.comment ? ` — ${d.comment}` : ""}${d.num_rows ? ` · ${Number(d.num_rows).toLocaleString()}행` : ""}${d.partial ? " · 나머지 읽는 중…" : ""}`;
   sub.textContent = subText();
@@ -99,7 +122,8 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
     const cols = chosen();
     if (!cols.length) return toast(NONE, "info", 2000);
     if (!o.place) return o.insert(cols.join(", "));
-    if (!(await o.place(target, cols, fromText))) placeMenu();
+    const types = grid.selectedRows().filter((r) => r[NAME]).map((r) => r[TYPE] ?? "");
+    if (!(await o.place(target, cols, fromText, types))) placeMenu();
   };
   const placeItems = (): MenuItem[] => {
     const k = WHEEL_LABEL[wheelKey()];
@@ -122,7 +146,11 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   };
   const grid: ResultGrid = new ResultGrid({
     onStatus: () => { count.textContent = view === "cols" && grid.viewRows().length !== rows.length ? `${grid.viewRows().length}/${rows.length}` : ""; },
-    onDoubleClick: (r) => { if (view === "cols" && r[NAME]) o.insert(prefix + r[NAME]); return true; },
+    onDoubleClick: (r) => {
+      if (view === "by" || view === "uses") { openDep(r); return true; }
+      if (view === "cols" && r[NAME]) o.insert(prefix + r[NAME]);
+      return true;
+    },
     onKeyDown: (e) => {
       if (view !== "cols") return false;
       if (e.key === "Enter" && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -139,6 +167,16 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
       return false;
     },
     onContextMenu: (_r, _c, e) => {
+      if (view === "by" || view === "uses") {
+        const x = depOf.get(depKey(_r));
+        showMenu(e.clientX, e.clientY, [
+          ...(x && o.openObject ? [{ label: x.kind === "TABLE" ? "컬럼 보기" : "소스 열기", hint: "더블클릭", run: () => openDep(_r) }, { sep: true as const }] : []),
+          { label: "고른 셀 복사", hint: "Ctrl+C", run: () => navigator.clipboard.writeText(grid.selectionText()).catch(() => {}) },
+          { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(grid.selectionText(true)).catch(() => {}) },
+          { label: "객체 이름 복사", run: () => navigator.clipboard.writeText([...new Set(grid.selectedRows().map((r) => r[1]).filter(Boolean))].join("\n")).catch(() => {}) },
+        ]);
+        return;
+      }
       if (view !== "cols") return;
       const n = grid.selectedRows().length;
       showMenu(e.clientX, e.clientY, [
@@ -163,14 +201,66 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
       sub,
       h("span", { class: "spacer" }),
       h("button", { class: "cp-x", title: "닫기 (Esc)", onclick: () => close() }, "×")),
-    h("div", { class: "cp-tools" }, tabCols, tabIdx, filter, count, h("span", { class: "spacer" }),
+    h("div", { class: "cp-tools" }, tabCols, tabIdx, o.script ? tabScript : "", o.deps ? tabBy : "", o.deps ? tabUses : "", filter, count, h("span", { class: "spacer" }),
       h("button", { class: "small", title: "고른 행(없으면 보이는 전체)의 컬럼 이름을 줄마다 복사", onclick: copyNames }, "이름 복사"),
       h("button", { class: "small", title: "고른 컬럼(없으면 보이는 전체)을 쉼표로 넣는다", onclick: () => o.insert(names().join(", ")) }, "컬럼 넣기"),
       h("button", { class: "small", title: "SELECT 문을 넣는다", onclick: () => o.insert(`SELECT ${names().join(", ")}\n  FROM ${d.owner}.${d.name}${o.alias ? ` ${o.alias}` : ""}\n WHERE ROWNUM <= 100`) }, "SELECT"),
       o.ddl ? h("button", { class: "small", onclick: () => o.ddl!() }, "DDL") : ""),
     body);
 
+  function openDep(r: (string | null)[]) {
+    const x = depOf.get(depKey(r));
+    if (!x || !o.openObject) return;
+    const line = view === "by" && r[4] ? Number(r[4]) : undefined;
+    o.openObject(x.owner, x.name, x.kind, line);
+  }
+
+  /** 의존 탭 이름에 건수 */
+  function depLabels() {
+    tabBy.textContent = deps ? `Used By ${deps.used_by.length}` : loading ? "Used By …" : "Used By";
+    tabUses.textContent = deps ? `Uses ${deps.uses.length}` : loading ? "Uses …" : "Uses";
+  }
+
+  function loadDeps() {
+    if (deps || loading || !o.deps) return;
+    loading = true;
+    depLabels();
+    o.deps().then((x) => { deps = x; }).catch((e) => { toast(errOf(e).message, "error", 6000); deps = { object: key, used_by: [], uses: [] }; })
+      .finally(() => { loading = false; depLabels(); if (win.isConnected) render(); });
+  }
+
   function render() {
+    if (view === "script") {
+      count.textContent = "";
+      body.replaceChildren(scriptEl);
+      if (ddlText === null && o.script) {
+        ddlText = "";
+        o.script().then((s) => { ddlText = s; }).catch((e) => { ddlText = `-- ${errOf(e).message}`; })
+          .finally(() => { if (view === "script") scriptEl.textContent = ddlText; });
+      }
+      scriptEl.textContent = ddlText || "읽는 중…";
+      return;
+    }
+    if (!grid.el.isConnected) body.replaceChildren(grid.el);
+    if (view === "by" || view === "uses") {
+      const cols = view === "by" ? BY_COLS : USES_COLS;
+      depOf.clear();
+      if (!deps) {
+        loadDeps();
+        grid.setPage({ columns: cols, rows: [], has_more: false, fetched_total: 0 });
+        return;
+      }
+      const rows: (string | null)[][] = [];
+      for (const x of view === "by" ? deps.used_by : deps.uses) {
+        const row = [KIND[x.kind] ?? x.kind, `${x.owner}.${x.name}`, x.status === "VALID" ? "" : x.status || "?", x.how];
+        depOf.set(depKey(row), x);
+        if (view === "uses") rows.push(row);
+        else if (!x.lines.length) rows.push([...row, "", ""]);
+        else for (const l of x.lines) rows.push([...row, String(l.line), (l.in_comment ? "(주석) " : "") + l.text.trim()]);
+      }
+      grid.setPage({ columns: cols, rows, has_more: false, fetched_total: rows.length });
+      return;
+    }
     if (view === "idx") {
       count.textContent = "";
       grid.setPage({ columns: IDX_COLS, rows: d.indexes.map((i) => [i.name, i.unique ? "UNIQUE" : "", i.columns.join(", ")]), has_more: false, fetched_total: d.indexes.length });
@@ -188,8 +278,13 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
     open.splice(open.indexOf(win), 1);
   }
 
-  tabCols.onclick = () => { view = "cols"; tabCols.classList.add("on"); tabIdx.classList.remove("on"); render(); };
-  tabIdx.onclick = () => { view = "idx"; tabIdx.classList.add("on"); tabCols.classList.remove("on"); render(); };
+  const TABS: [View, HTMLElement][] = [["cols", tabCols], ["idx", tabIdx], ["script", tabScript], ["by", tabBy], ["uses", tabUses]];
+  for (const [v, b] of TABS) b.onclick = () => {
+    view = v;
+    for (const [w, x] of TABS) x.classList.toggle("on", w === v);
+    filter.style.visibility = v === "script" ? "hidden" : "";
+    render();
+  };
   // 거르기: 아무 칸에 든 글자 (그리드 필터식도 된다: 형식~DATE)
   filter.addEventListener("input", () => grid.setFilter(filter.value));
   filter.addEventListener("keydown", (e) => {

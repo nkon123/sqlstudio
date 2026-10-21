@@ -415,6 +415,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .cp-filter { width: 160px; padding: 1px 6px; }
 .cp-count { color: var(--dim); }
 .cp-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+.cp-script { flex: 1; margin: 0; padding: 6px 10px; overflow: auto; font: 12px/1.5 var(--mono, Consolas, monospace); color: var(--text); background: var(--bg); white-space: pre; user-select: text; outline: none; }
 /* 4방향 휠 — 고른 컬럼을 어느 절에 넣을지 (Ctrl+Shift 를 누른 채 방향키) */
 .cp-wheel { position: fixed; z-index: 10000; display: grid; grid-template: repeat(3, 34px) / repeat(3, 92px); gap: 4px; pointer-events: none; }
 .cp-wheel button { pointer-events: auto; display: flex; align-items: center; justify-content: center; gap: 4px; font: 600 12px var(--mono); border-radius: 17px;

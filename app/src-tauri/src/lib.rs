@@ -56,6 +56,29 @@ fn open_log_file() -> Option<std::fs::File> {
     std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
 }
 
+/// 데이터 폴더를 옮긴 뒤 남은 WebView 데이터 복사 표시 — 안에 이전 webview 폴더 경로 (db::set_data_dir)
+pub(crate) const WEBVIEW_FROM: &str = ".webview-from";
+
+/// 이전 데이터 폴더의 WebView 데이터를 새 폴더로. 이전 프로세스가 아직 잡고 있을 수 있어 잠깐 기다리며 다시 해 본다
+fn take_pending_webview() {
+    let Some(to) = webview_dir() else { return };
+    let Some(mark) = to.parent().map(|d| d.join(WEBVIEW_FROM)) else { return };
+    let Ok(from) = std::fs::read_to_string(&mark) else { return };
+    if !to.exists() {
+        for _ in 0..10 {
+            let _ = std::fs::remove_dir_all(&to);
+            match std::fs::create_dir_all(&to).and_then(|_| db::copy_tree(std::path::Path::new(from.trim()), &to, &|_| true)) {
+                Ok(()) => break,
+                Err(e) => {
+                    tracing::warn!("WebView 데이터 복사 다시 시도: {e}");
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(mark);
+}
+
 pub fn run() {
     use tracing_subscriber::fmt::writer::MakeWriterExt;
     let filter = || tracing_subscriber::EnvFilter::try_from_env("SQLSTUDIO_LOG").unwrap_or_else(|_| "info".into());
@@ -79,6 +102,7 @@ pub fn run() {
         default_hook(info);
     }));
 
+    take_pending_webview();
     let state = AppState::load();
 
     tauri::Builder::default()
@@ -87,7 +111,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             db::app_info,
             db::column_usage,
+            db::object_deps,
             db::open_log_dir,
+            db::data_dir_info,
+            db::set_data_dir,
+            db::restart_app,
             db::client_log,
             db::conn_event,
             db::conn_report,

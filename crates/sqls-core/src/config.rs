@@ -1,6 +1,7 @@
 //! 접속 프로필 — 앱과 MCP 서버가 같은 파일을 본다.
 //!
 //! 위치: `%APPDATA%\sqlstudio\config.toml` (Windows), `~/.config/sqlstudio/config.toml`
+//! 포터블은 실행 파일 옆 `data\`. 설정 화면에서 다른 폴더를 지정할 수 있다 ([`set_data_dir`]).
 //! 환경변수 `SQLSTUDIO_CONFIG` 로 바꿀 수 있다.
 //!
 //! 비밀번호는 파일에 쓰지 않는다. 순서대로 찾는다:
@@ -112,29 +113,114 @@ pub fn config_path() -> PathBuf {
     if let Ok(p) = std::env::var("SQLSTUDIO_CONFIG") {
         return PathBuf::from(p);
     }
-    if let Some(d) = portable_data_dir() {
-        return d.join("config.toml");
-    }
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("sqlstudio")
-        .join("config.toml")
+    data_dir().join("config.toml")
 }
 
-/// 포터블 표시 파일 — 실행 파일 옆에 있으면 설정·이력·분석 결과를 그 옆 `data\` 에 둔다
+/// 포터블 표시 파일 — 실행 파일 옆에 있으면 설정·이력·분석 결과를 그 옆 `data\` 에 둔다.
+/// 파일 안에 `data_dir=<폴더>` 줄이 있으면 그 폴더를 쓴다 (상대 경로는 실행 파일 폴더 기준) — 버전마다 다른 폴더에 풀어도 설정을 같이 쓰게
 pub const PORTABLE_MARKER: &str = "portable.txt";
+/// 설치판의 데이터 폴더 지정 파일 — `%APPDATA%\sqlstudio\location.txt` 에 `data_dir=<폴더>`
+pub const LOCATION_FILE: &str = "location.txt";
+const DATA_DIR_KEY: &str = "data_dir";
 
 fn exe_dir() -> Option<PathBuf> {
     std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
 }
 
-/// 포터블로 풀어 쓰는 중이면 데이터 폴더 (실행 파일 옆 `data`). 아니면 None
-pub fn portable_data_dir() -> Option<PathBuf> {
-    portable_data_dir_in(&exe_dir()?)
+fn is_portable() -> bool {
+    exe_dir().is_some_and(|d| d.join(PORTABLE_MARKER).is_file())
 }
 
+/// 설치판 기본 폴더 (`%APPDATA%\sqlstudio`)
+fn installed_dir() -> PathBuf {
+    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("sqlstudio")
+}
+
+/// 데이터 폴더를 적어 두는 파일 — 포터블은 `portable.txt`, 설치판은 `%APPDATA%\sqlstudio\location.txt`
+fn location_file() -> PathBuf {
+    match exe_dir().filter(|_| is_portable()) {
+        Some(d) => d.join(PORTABLE_MARKER),
+        None => installed_dir().join(LOCATION_FILE),
+    }
+}
+
+/// `data_dir=` 를 지정하지 않았을 때의 데이터 폴더 (포터블: 실행 파일 옆 `data`, 설치판: `%APPDATA%\sqlstudio`)
+pub fn default_data_dir() -> PathBuf {
+    match exe_dir().filter(|_| is_portable()) {
+        Some(d) => d.join("data"),
+        None => installed_dir(),
+    }
+}
+
+/// 설정·실행 이력·분석 결과를 두는 폴더 (`SQLSTUDIO_CONFIG` 는 따로 — [`config_path`])
+pub fn data_dir() -> PathBuf {
+    let f = location_file();
+    let base = f.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    std::fs::read_to_string(&f).ok().and_then(|t| data_dir_line(&t).map(|v| base.join(v))).unwrap_or_else(default_data_dir)
+}
+
+/// 포터블로 풀어 쓰는 중이면 데이터 폴더 (`data_dir=` 로 지정한 곳, 없으면 실행 파일 옆 `data`). 아니면 None
+pub fn portable_data_dir() -> Option<PathBuf> {
+    is_portable().then(data_dir)
+}
+
+#[cfg(test)]
 fn portable_data_dir_in(dir: &std::path::Path) -> Option<PathBuf> {
-    dir.join(PORTABLE_MARKER).is_file().then(|| dir.join("data"))
+    let marker = std::fs::read_to_string(dir.join(PORTABLE_MARKER)).ok()?;
+    Some(match data_dir_line(&marker) {
+        Some(p) => dir.join(p),
+        None => dir.join("data"),
+    })
+}
+
+/// `data_dir=...` 줄의 값 (따옴표는 벗긴다)
+fn data_dir_line(marker: &str) -> Option<&str> {
+    marker.lines().find_map(|l| {
+        let (k, v) = l.trim().trim_start_matches('\u{feff}').split_once('=')?;
+        let v = v.trim().trim_matches('"');
+        (k.trim().eq_ignore_ascii_case(DATA_DIR_KEY) && !v.is_empty()).then_some(v)
+    })
+}
+
+/// 데이터 폴더 지정 — `portable.txt`(포터블) 또는 `location.txt`(설치판) 의 `data_dir=` 줄을 바꾼다.
+/// None 이면 줄을 지워 기본 폴더로 돌린다. 다시 시작해야 적용된다
+pub fn set_data_dir(dir: Option<&std::path::Path>) -> Result<()> {
+    let f = location_file();
+    let err = |e: std::io::Error| Error::Config(format!("{}: {e}", f.display()));
+    let old = match std::fs::read_to_string(&f) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "SQLStudio 데이터 폴더 위치 — 설정 > 정보 > 데이터 폴더 에서 바꿉니다\n".into(),
+        Err(e) => return Err(err(e)),
+    };
+    let text = with_data_dir(&old, dir);
+    // 설치판에서 기본으로 돌리면 지정 파일을 지운다
+    if dir.is_none() && !is_portable() {
+        return match std::fs::remove_file(&f) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(err(e)),
+            _ => Ok(()),
+        };
+    }
+    if let Some(p) = f.parent() {
+        std::fs::create_dir_all(p).map_err(err)?;
+    }
+    std::fs::write(&f, text).map_err(err)
+}
+
+fn with_data_dir(marker: &str, dir: Option<&std::path::Path>) -> String {
+    let nl = if marker.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut lines: Vec<&str> = marker.lines().filter(|l| data_dir_line(l).is_none()).collect();
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    let mut out = lines.join(nl);
+    if let Some(d) = dir {
+        if !out.is_empty() {
+            out.push_str(&format!("{nl}{nl}"));
+        }
+        out.push_str(&format!("{DATA_DIR_KEY}={}", d.display()));
+    }
+    out.push_str(nl);
+    out
 }
 
 /// 실행 파일 옆에 풀어 둔 Instant Client (`instantclient_19_25` 처럼 oci.dll 이 든 폴더). 설정에 경로가 없을 때 쓴다
@@ -242,11 +328,28 @@ mod tests {
         assert_eq!(portable_data_dir_in(&dir), None);
         std::fs::write(dir.join(PORTABLE_MARKER), "").unwrap();
         assert_eq!(portable_data_dir_in(&dir), Some(dir.join("data")));
+        std::fs::write(dir.join(PORTABLE_MARKER), "\u{feff}설명\r\n# data_dir=예시\r\ndata_dir = ..\\SQLStudio-data\r\n").unwrap();
+        assert_eq!(portable_data_dir_in(&dir), Some(dir.join("..\\SQLStudio-data")));
         assert_eq!(client_dir_in(&dir), None);
         let lib = if cfg!(windows) { "oci.dll" } else { "libclntsh.so" };
         std::fs::write(dir.join("instantclient_19_25").join(lib), "").unwrap();
         assert_eq!(client_dir_in(&dir), Some(dir.join("instantclient_19_25")));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn data_dir_line_set_and_clear() {
+        let base = "SQLStudio 포터블\r\n# data_dir=D:\\예시\r\n\r\n";
+        let set = with_data_dir(base, Some(std::path::Path::new("D:\\SQLStudio-data")));
+        assert_eq!(set, "SQLStudio 포터블\r\n# data_dir=D:\\예시\r\n\r\ndata_dir=D:\\SQLStudio-data\r\n");
+        assert_eq!(data_dir_line(&set), Some("D:\\SQLStudio-data"));
+        let again = with_data_dir(&set, Some(std::path::Path::new("E:\\x")));
+        assert_eq!(data_dir_line(&again), Some("E:\\x"));
+        assert_eq!(again.matches("data_dir=E").count(), 1);
+        let clear = with_data_dir(&again, None);
+        assert_eq!(data_dir_line(&clear), None);
+        assert_eq!(clear, "SQLStudio 포터블\r\n# data_dir=D:\\예시\r\n");
+        assert_eq!(data_dir_line("data_dir=\"C:\\a b\""), Some("C:\\a b"));
     }
 
     const SAMPLE: &str = r##"

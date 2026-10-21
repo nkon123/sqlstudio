@@ -35,6 +35,10 @@ export interface TnsView { dir?: string | null; configured?: string | null; entr
 export interface Analyzed { statement: Statement | null; binds: string[]; confirm: string | null }
 export interface ObjectEntry { owner: string; name: string; object_type: string; status: string; last_ddl_time: string }
 export interface ColumnDesc { name: string; data_type: string; nullable: boolean; default?: string | null; comment?: string | null }
+/** 객체 의존의 상대 하나 — lines 는 Used By 만 (그 소스·뷰 정의에서 이 객체 이름이 나오는 줄) */
+export interface DepObj { owner: string; name: string; kind: string; status: string; how: string; lines: { line: number; text: string; in_comment: boolean }[] }
+export interface ObjectDeps { object: string; used_by: DepObj[]; uses: DepObj[] }
+
 export interface TableDesc {
   owner: string; name: string; object_type: string; comment?: string | null; num_rows?: string | null;
   last_analyzed?: string | null; columns: ColumnDesc[]; primary_key: string[];
@@ -123,6 +127,7 @@ export const api = {
   /** DB 에 묻지 않는 구조 (기억해 둔 것 또는 자동완성 캐시, partial) — 없으면 null */
   describeFast: (id: number, name: string) => invoke<TableDesc | null>("describe_fast", { id, name }),
   getDdl: (id: number, objectType: string, name: string) => invoke<string>("get_ddl", { id, objectType, name }),
+  objectDeps: (id: number, name: string) => invoke<ObjectDeps>("object_deps", { id, name }),
   complete: (id: number, text: string, cursor: number) => invoke<CompletionResultView>("complete", { id, text, cursor }),
   completionStatus: (id: number) => invoke<CompletionStatus>("completion_status", { id }),
   refreshCompletion: (id: number) => invoke<void>("refresh_completion", { id }),

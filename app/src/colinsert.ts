@@ -73,8 +73,21 @@ function continues(sql: string, pos: number): boolean {
   return /^["'(\d:]/.test(tail);
 }
 
-/** Enter: 커서 자리(`from`~`to` 는 고른 글자 — 바꾼다)에 그 절에 맞게. 절을 모르면 null (메뉴로 고르게) */
-export function placeAtCursor(sql: string, from: number, to: number, cols: string[]): Placed | null {
+/** 조건 "열 = 값" — 값 자리는 형식에 맞춘 빈 틀, caret 은 값을 쓸 자리 (문자열이면 따옴표 안) */
+export function condOf(col: string, type = ""): { text: string; caret: number } {
+  const t = type.toUpperCase();
+  const head = `${col} = `;
+  const tpl: [string, number] =
+    /CHAR|CLOB|ROWID|RAW/.test(t) ? ["''", 1]
+    : /^TIMESTAMP/.test(t) ? ["TO_TIMESTAMP('', 'YYYY-MM-DD HH24:MI:SS')", 14]
+    : /^DATE/.test(t) ? ["TO_DATE('', 'YYYY-MM-DD')", 9]
+    : ["", 0];
+  return { text: head + tpl[0], caret: head.length + tpl[1] };
+}
+
+/** Enter: 커서 자리(`from`~`to` 는 고른 글자 — 바꾼다)에 그 절에 맞게. 절을 모르면 null (메뉴로 고르게).
+ *  `types` 는 cols 와 같은 순서의 컬럼 형식 (조건 값 틀에 쓴다) */
+export function placeAtCursor(sql: string, from: number, to: number, cols: string[], types: string[] = []): Placed | null {
   if (!cols.length) return null;
   const clause = clauseAt(sql, from);
   if (clause === "other") return null;
@@ -91,11 +104,13 @@ export function placeAtCursor(sql: string, from: number, to: number, cols: strin
     ws = sql.slice(at, from);
   }
   const lead = fresh ? (b.ch === "," && b.touching ? " " : space) : where ? " AND " : ", ";
-  const body = where ? cols.map((c) => `${c} = `).join("\n   AND ") : cols.join(", ");
-  const trail = continues(sql, to) ? (where ? "AND" : ",") + (ws || gap(sql, to) ? "" : " ") : "";
+  const conds = cols.map((c, k) => condOf(c, types[k]));
+  const body = where ? conds.map((c) => c.text).join("\n   AND ") : cols.join(", ");
+  // 값 틀이 있으면 끝에 빈칸을 두지 않는다 ("a = '' AND")
+  const trail = continues(sql, to) ? (where ? (body.endsWith(" ") ? "AND" : " AND") : ",") + (ws || gap(sql, to) ? "" : " ") : "";
   const insert = lead + body + trail + ws;
-  // 조건이면 첫 "= " 뒤에서 값을 쓰게
-  const first = where ? `${cols[0]} = `.length : body.length;
+  // 조건이면 첫 조건의 값 자리에서 쓰게
+  const first = where ? conds[0].caret : body.length;
   return { from: at, to, insert, cursor: at + lead.length + first };
 }
 
@@ -103,7 +118,7 @@ export function placeAtCursor(sql: string, from: number, to: number, cols: strin
 const gap = (sql: string, pos: number) => /\s/.test(sql[pos] ?? "");
 
 /** 휠·메뉴: 문장의 최상위 절에 넣는다 (없으면 만든다). 못 넣으면 이유 */
-export function placeInClause(sql: string, target: Target, cols: string[]): Placed | { error: string } {
+export function placeInClause(sql: string, target: Target, cols: string[], types: string[] = []): Placed | { error: string } {
   if (!cols.length) return { error: "넣을 컬럼을 고르세요" };
   const { words, end } = scan(sql);
   const first = words[0]?.w;
@@ -132,9 +147,12 @@ export function placeInClause(sql: string, target: Target, cols: string[]): Plac
   }
 
   if (target === "where") {
-    // 첫 조건의 "= " 뒤에 커서를 둔다 — 표시 글자를 넣어 자리를 찾고 뺀다
+    // 첫 조건의 값 자리에 커서를 둔다 — 표시 글자를 넣어 자리를 찾고 뺀다
     const MARK = "\u0001";
-    const cond = cols.map((c, k) => `${c} = ${k === 0 ? MARK : ""}`).join("\n  AND ");
+    const cond = cols.map((c, k) => {
+      const x = condOf(c, types[k]);
+      return k === 0 ? x.text.slice(0, x.caret) + MARK + x.text.slice(x.caret) : x.text;
+    }).join("\n  AND ");
     // WHERE 만 써 두고 비어 있으면 그 뒤에 (addCondition 은 "WHERE AND …" 를 만든다)
     const w = words.findIndex((x, k) => k > from && x.w === "WHERE");
     if (w >= 0) {

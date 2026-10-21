@@ -24,7 +24,7 @@ import { DEFAULT_PREFS, formatSql, loadPrefs, savePrefs, type FormatPrefs } from
 import type { GitPanel } from "./git";
 import { ResultGrid } from "./grid";
 import { guessTable, toCsv as toCsvText, toInserts as toInsertsText, unsupported as unsupportedCols } from "./export-text";
-import { placeAtCursor, placeInClause, TARGET_LABEL, type Placed, type Target } from "./colinsert";
+import { condOf, placeAtCursor, placeInClause, TARGET_LABEL, type Placed, type Target } from "./colinsert";
 import { aliasMap, showColumns } from "./colpopup";
 import { showMenu, type MenuItem } from "./ctxmenu";
 import { SchemaCompareView } from "./schemacmp";
@@ -1460,8 +1460,36 @@ class App {
     const popup = showColumns(d, {
       at, alias,
       insert: (s) => { const t = this.active; if (!t) return; t.editor.insert(s); t.editor.view.focus(); },
-      place: (target, cols, from) => this.placeColumns(target, cols, from),
+      place: (target, cols, from, types) => this.placeColumns(target, cols, from, types),
       ddl: async () => { const t = this.active; if (t?.conn) this.newTab(true, await api.getDdl(t.conn.id, d.object_type, `"${d.owner}"."${d.name}"`)); },
+      script: async () => {
+        const t = this.active;
+        if (!t?.conn) throw new Error("먼저 접속하세요");
+        return api.getDdl(t.conn.id, d.object_type, `"${d.owner}"."${d.name}"`);
+      },
+      deps: async () => {
+        const t = this.active;
+        if (!t?.conn) throw new Error("먼저 접속하세요");
+        return api.objectDeps(t.conn.id, `"${d.owner}"."${d.name}"`);
+      },
+      openObject: async (owner, name, kind, line) => {
+        const t = this.active;
+        if (!t?.conn) return toast("먼저 접속하세요", "error");
+        const id = t.conn.id;
+        if (kind === "TABLE" || kind === "VIEW" || kind === "MATERIALIZED VIEW") {
+          // 테이블·뷰는 컬럼 팝업으로 (뷰를 줄로 열 때만 정의를)
+          if (!(kind === "VIEW" && line)) {
+            try { return this.openColumns(await api.describe(id, `"${owner}"."${name}"`)); } catch (e) { return toast(errOf(e).message, "error"); }
+          }
+        }
+        const ddl = await api.getDdl(id, kind, `"${owner}"."${name}"`).catch((e) => `-- ${errOf(e).message}`);
+        const nt = this.newTab(true, ddl);
+        if (line) {
+          // DDL 앞의 빈 줄을 건너 CREATE 줄이 소스의 1번째 줄
+          const base = ddl.split("\n").findIndex((l) => /^\s*CREATE\b/i.test(l));
+          nt.editor.gotoLine((base < 0 ? 0 : base) + line);
+        }
+      },
       usage: (column) => {
         const t = this.active;
         if (!t?.conn) return toast("먼저 접속하세요", "error");
@@ -1534,7 +1562,7 @@ class App {
   }
 
   /** 컬럼 팝업에서 고른 컬럼을 커서 쪽 문장에 넣는다. "auto" 인데 절을 모르면 false (팝업이 메뉴를 띄운다) */
-  private async placeColumns(target: Target | "auto", cols: string[], from: string): Promise<boolean> {
+  private async placeColumns(target: Target | "auto", cols: string[], from: string, types: string[] = []): Promise<boolean> {
     const t = this.active;
     if (!t) return true;
     const view = t.editor.view;
@@ -1561,7 +1589,7 @@ class App {
     if (target === "auto") {
       if (!st || !inside) return false;
       const sql = text.slice(st.from, st.to);
-      const p = placeAtCursor(sql, sel.from - st.from, sel.to - st.from, cols);
+      const p = placeAtCursor(sql, sel.from - st.from, sel.to - st.from, cols, types);
       if (!p) return false;
       apply(st.from, p);
       return true;
@@ -1570,13 +1598,13 @@ class App {
     if (!st) {
       const head = sel.from > 0 && text[sel.from - 1] !== "\n" ? "\n" : "";
       const body = target === "select" ? `SELECT ${cols.join(", ")}\n  FROM ${from}`
-        : target === "where" ? `SELECT *\n  FROM ${from}\n WHERE ${cols.map((c) => `${c} = `).join("\n   AND ")}`
+        : target === "where" ? `SELECT *\n  FROM ${from}\n WHERE ${cols.map((c, k) => condOf(c, types[k]).text).join("\n   AND ")}`
         : `SELECT ${cols.join(", ")}\n  FROM ${from}\n ${TARGET_LABEL[target]} ${cols.join(", ")}`;
-      const cursor = target === "where" ? body.indexOf(" = ") + 3 : body.length;
+      const cursor = target === "where" ? body.indexOf(" WHERE ") + 7 + condOf(cols[0], types[0]).caret : body.length;
       apply(sel.from, { from: 0, to: sel.to - sel.from, insert: head + body, cursor: head.length + cursor });
       return true;
     }
-    const p = placeInClause(text.slice(st.from, st.to), target, cols);
+    const p = placeInClause(text.slice(st.from, st.to), target, cols, types);
     if ("error" in p) {
       toast(p.error, "error", 5000);
       return true;
@@ -2160,11 +2188,31 @@ class App {
     await modal("접속 진단", body, [{ label: "닫기", value: true }], { wide: true });
   }
 
+  /** 데이터 폴더 지정 — 포터블을 버전마다 다른 폴더에 풀거나 설치판을 다시 깔아도 설정·이력을 같이 쓰게 (portable.txt / location.txt 의 data_dir=) */
+  private async dataDirRow() {
+    const d = await invoke<{ portable: boolean; fixed: boolean; dir: string }>("data_dir_info").catch(() => null);
+    if (!d || d.fixed) return "";
+    const apply = async (dir: string | null) => {
+      try {
+        const now = await invoke<string>("set_data_dir", { dir });
+        if (await confirmBox("데이터 폴더", `${now}\n\n이 폴더를 씁니다. 고른 폴더에 설정이 없으면 지금 쓰던 설정·이력을 복사해 두었습니다.\n다음에 시작할 때부터 적용됩니다. 지금 다시 시작할까요?`, "다시 시작", false)) await invoke("restart_app");
+      } catch (e) { toast(errOf(e).message, "error"); }
+    };
+    const def = d.portable ? "실행 파일 옆 data 폴더" : "%APPDATA%\\sqlstudio";
+    return h("p", { class: "hint" }, `데이터 폴더${d.portable ? " (포터블)" : ""}: ${d.dir} `,
+      h("button", { class: "small", title: `설정·실행 이력·분석 결과를 둘 폴더. 바깥 폴더(예: D:\\SQLStudio-data)를 정해 두면 새 버전을 다른 폴더에 풀거나 다시 설치해도 같은 폴더만 다시 고르면 됩니다. 이전 SQLStudio 포터블 폴더를 고르면 그 안의 data 를 씁니다`, onclick: async () => {
+        const p = await openDialog({ directory: true, multiple: false, title: "데이터 폴더 (설정·이력을 둘 곳, 또는 이전 SQLStudio 폴더)", defaultPath: d.dir });
+        if (p && !Array.isArray(p)) await apply(p);
+      } }, "폴더 지정…"), " ",
+      h("button", { class: "small", title: `기본 위치(${def})로 되돌린다`, onclick: () => void apply(null) }, "기본으로"));
+  }
+
   private async aboutPage() {
     const info = await api.appInfo();
     return h("div", { class: "about" },
       h("p", {}, h("strong", {}, `SQLStudio ${info.version}`)),
       h("p", { class: "hint" }, `설정 파일: ${info.config_path}`),
+      await this.dataDirRow(),
       h("p", {}, h("button", { title: "접속·끊김·다시 접속 기록을 몇 줄로 요약 — 원인(쉬는 동안·실행 중·서버·한도)을 가른다", onclick: () => void this.connReport() }, "접속 진단")),
       info.log_dir ? h("p", { class: "hint" }, `로그: ${info.log_dir} `,
         h("button", { class: "small", title: "접속·끊김·다시 접속 기록 — 문제가 생기면 이 폴더의 sqlstudio.log 를 보내 주세요", onclick: () => invoke("open_log_dir").catch((e) => toast(errOf(e).message, "error")) }, "로그 폴더 열기")) : "",

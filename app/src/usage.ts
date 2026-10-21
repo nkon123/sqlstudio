@@ -12,8 +12,8 @@ interface Line { line: number; text: string; in_comment: boolean }
 interface Obj { owner: string; name: string; kind: string; via?: string | null; lines: Line[] }
 interface Usage { table: string; column: string; hits: Obj[]; silent: Obj[]; indexes: string[]; constraints: string[]; referenced_by: string[] }
 
-const KIND: Record<string, string> = {
-  VIEW: "뷰", "MATERIALIZED VIEW": "구체화 뷰", PACKAGE: "패키지", "PACKAGE BODY": "패키지 본문", PROCEDURE: "프로시저",
+export const KIND: Record<string, string> = {
+  TABLE: "테이블", SEQUENCE: "시퀀스", VIEW: "뷰", "MATERIALIZED VIEW": "구체화 뷰", PACKAGE: "패키지", "PACKAGE BODY": "패키지 본문", PROCEDURE: "프로시저",
   FUNCTION: "함수", TRIGGER: "트리거", TYPE: "타입", "TYPE BODY": "타입 본문", SYNONYM: "동의어",
 };
 

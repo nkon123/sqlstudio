@@ -28,8 +28,8 @@ function classify(sql: string): StmtKind {
   return "other";
 }
 
-/** UTF-16 위치로 문장들 — ';' 또는 '/' 한 줄에서 끊는다 (PL/SQL 블록은 '/' 에서만) */
-function split(src: string): { from: number; to: number; text: string }[] {
+/** UTF-16 위치로 문장들 — ';' 또는 '/' 한 줄, blank 면 빈 줄에서도 끊는다 (PL/SQL 블록은 '/' 에서만) */
+function split(src: string, blank = false): { from: number; to: number; text: string }[] {
   const out: { from: number; to: number; text: string }[] = [];
   let start = -1;
   let i = 0;
@@ -45,6 +45,7 @@ function split(src: string): { from: number; to: number; text: string }[] {
     const ch = src[i];
     // 줄 전체가 "/"
     if (ch === "/" && /(^|\n)[ \t]*$/.test(src.slice(Math.max(0, i - 200), i)) && /^[ \t]*(\n|$)/.test(src.slice(i + 1, i + 200))) { end(i); i++; continue; }
+    if (blank && ch === "\n" && start >= 0 && !PLSQL_HEAD.test(src.slice(start, i)) && /^[ \t\r]*\n/.test(src.slice(i + 1))) { end(i); i++; continue; }
     if (/\s/.test(ch)) { i++; continue; }
     if (start < 0) start = i;
     if (ch === "-" && src[i + 1] === "-") { while (i < n && src[i] !== "\n") i++; continue; }
@@ -65,7 +66,7 @@ function toStatement(src: string, s: { from: number; to: number; text: string })
 function analyze(a: Args) {
   const sel = (a.selection as string | undefined)?.trim() ? (a.selection as string) : null;
   const src = sel ?? (a.text as string);
-  const parts = split(src);
+  const parts = split(src, !sel);
   let s = parts[0];
   if (!sel) {
     const cur = byteToUtf16(src, (a.cursor as number) ?? 0);
@@ -238,6 +239,20 @@ const DB: Record<string, (a: Args) => unknown> = {
   },
   describe: async (a) => { await sleep(80); const t = findTable(a.name as string); if (!t) fail(`'${a.name}' 를 찾지 못했습니다 (가짜 모드)`, "not_found"); return t!.desc; },
   describe_fast: (a) => findTable(a.name as string)?.desc ?? null,
+  object_deps: (a) => {
+    const t = findTable(a.name as string);
+    const n = t?.desc.name ?? "?";
+    const dep = (owner: string, name: string, kind: string, how: string, lines: [number, string][] = [], status = "VALID") =>
+      ({ owner, name, kind, status, how, lines: lines.map(([line, text]) => ({ line, text, in_comment: text.trimStart().startsWith("--") })) });
+    const by = [
+      dep("SCOTT", "PKG_ORDER", "PACKAGE BODY", "직접", [[12, `    SELECT COUNT(*) INTO v_cnt FROM ${n} WHERE ROWNUM = 1;`], [40, `    UPDATE ${n} SET upd_dt = SYSDATE`], [41, `    -- ${n} 마감 처리`]]),
+      dep("SCOTT", "P_CLOSE_DAY", "PROCEDURE", "직접", [[7, `  DELETE FROM ${n} WHERE 1 = 0;`]], "INVALID"),
+      dep("SCOTT", "V_EMP_DEPT", "VIEW", "직접", [[3, `  FROM ${n} x`]]),
+      dep("APP", "TRG_AUDIT", "TRIGGER", `동의어 APP.${n}`),
+    ];
+    const uses = n === "ORDER_ITEMS" ? [dep("SCOTT", "ORDERS", "TABLE", "FK FK_ITEMS_ORDER")] : n === "EMP" ? [dep("SCOTT", "DEPT", "TABLE", "FK FK_EMP_DEPT")] : [];
+    return { object: `SCOTT.${n}`, used_by: by, uses };
+  },
   get_ddl: (a) => { const t = findTable(a.name as string); return t ? ddlOf(t.desc) : `-- (가짜 모드) ${a.objectType} ${a.name} 의 소스는 없습니다`; },
   complete: (a) => complete(a as { text: string; cursor: number }),
   completion_status: () => ({ profile: "가짜 DB", phase: "ready", objects: Object.keys(TABLES).length + OTHER_OBJECTS.length, columns: Object.values(TABLES).reduce((n, t) => n + t.desc.columns.length, 0) }),
@@ -277,9 +292,8 @@ export function installMock() {
   type Internals = { invoke: (cmd: string, args?: Args, opts?: unknown) => Promise<unknown> };
   const internals = (window as unknown as { __TAURI_INTERNALS__?: Internals }).__TAURI_INTERNALS__;
   if (internals?.invoke) {
-    // 앱 창: DB 명령만 가로챈다
-    const real = internals.invoke.bind(internals);
-    internals.invoke = async (cmd, args = {}, opts) => (DB[cmd] ? DB[cmd](args) : real(cmd, args, opts));
+    // 앱 창: DB 명령만 가로챈다 — internals.invoke 는 읽기 전용이라 mock/core.ts 가 이 표를 본다
+    (window as unknown as { __SQLS_MOCK_DB__?: typeof DB }).__SQLS_MOCK_DB__ = DB;
     banner("앱");
     return;
   }

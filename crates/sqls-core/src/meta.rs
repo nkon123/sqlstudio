@@ -709,6 +709,139 @@ pub async fn column_usage(s: &Session, qualified: &str, column: &str) -> Result<
     Ok(u)
 }
 
+// ── 객체 의존: 이 객체를 쓰는 곳(Used By) · 이 객체가 쓰는 것(Uses) ─────────────
+
+/// 의존 관계의 상대 객체 하나
+#[derive(Debug, Clone, Serialize)]
+pub struct DepObj {
+    pub owner: String,
+    pub name: String,
+    pub kind: String,
+    /// VALID · INVALID (사전에서 못 찾으면 빈칸)
+    pub status: String,
+    /// 어떻게 이어졌나: "직접" · "동의어 X.Y" · "FK 이름" · "DB 링크 L"
+    pub how: String,
+    /// Used By 만: 그 객체의 소스·뷰 정의에서 이 객체 이름(동의어를 거치면 동의어 이름)이 나오는 줄
+    pub lines: Vec<UsageLine>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ObjectDeps {
+    pub object: String,
+    pub used_by: Vec<DepObj>,
+    pub uses: Vec<DepObj>,
+}
+
+/// 소스에서 이 객체를 찾아 줄을 모을 때, 한 객체에서 많아야 이만큼
+const DEP_LINES_MAX: usize = 200;
+
+/// 객체 의존. 사전 의존성(ALL_DEPENDENCIES)과 외래 키로 Used By · Uses 를 모으고,
+/// Used By 의 소스·뷰 정의에서 이 객체 이름이 나오는 줄을 붙인다 (어디에서 쓰는지).
+pub async fn object_deps(s: &Session, qualified: &str) -> Result<ObjectDeps> {
+    let (owner, name) = split_qualified(qualified, &s.info().user);
+    let on = || vec![("O".to_string(), Some(owner.clone())), ("N".to_string(), Some(name.clone()))];
+    let mut r = ObjectDeps { object: format!("{owner}.{name}"), ..Default::default() };
+    let status = "LEFT JOIN all_objects o ON o.owner = d.owner AND o.object_name = d.name AND o.object_type = d.type";
+
+    // Used By: 직접, 동의어를 거쳐, 외래 키로 가리키는 테이블
+    let used_by = format!(
+        "SELECT d.owner, d.name, d.type, o.status, '직접', :n FROM all_dependencies d {status} \
+          WHERE d.referenced_owner = :o AND d.referenced_name = :n AND NOT (d.owner = :o AND d.name = :n) \
+         UNION \
+         SELECT d.owner, d.name, d.type, o.status, '동의어 ' || sy.owner || '.' || sy.synonym_name, sy.synonym_name FROM all_synonyms sy \
+           JOIN all_dependencies d ON d.referenced_owner = sy.owner AND d.referenced_name = sy.synonym_name AND d.referenced_type = 'SYNONYM' {status} \
+          WHERE sy.table_owner = :o AND sy.table_name = :n \
+         UNION \
+         SELECT c.owner, c.table_name, 'TABLE', 'VALID', 'FK ' || c.constraint_name, NULL FROM all_constraints c \
+           JOIN all_constraints p ON p.owner = c.r_owner AND p.constraint_name = c.r_constraint_name \
+          WHERE c.constraint_type = 'R' AND p.owner = :o AND p.table_name = :n"
+    );
+    // 줄을 찾을 낱말 (동의어를 거치면 동의어 이름)
+    let mut words: Vec<Option<String>> = Vec::new();
+    for row in s.query(&used_by, on(), 100_000).await?.rows {
+        let (o, n, k, how) = (cell(&row, 0), cell(&row, 1), cell(&row, 2), cell(&row, 4));
+        // 같은 객체가 직접·동의어로 둘 다 나오면 하나로 (직접이 먼저)
+        if let Some(x) = r.used_by.iter_mut().find(|x| x.owner == o && x.name == n && x.kind == k) {
+            if !x.how.contains(&how) {
+                x.how = format!("{}, {how}", x.how);
+            }
+            continue;
+        }
+        r.used_by.push(DepObj { owner: o, name: n, kind: k, status: cell(&row, 3), how, lines: vec![] });
+        words.push(row.get(5).cloned().flatten().map(|w| w.to_uppercase()));
+    }
+
+    // 소스: 낱말이 든 줄만 DB 에서 걸러 받는다
+    let code: Vec<usize> = (0..r.used_by.len()).filter(|&i| words[i].is_some() && USAGE_CODE.contains(&r.used_by[i].kind.as_str())).collect();
+    for chunk in code.chunks(100) {
+        let mut b = Vec::new();
+        let mut ors = Vec::new();
+        for (j, &i) in chunk.iter().enumerate() {
+            ors.push(format!("(owner = :O{j} AND name = :N{j} AND type = :T{j} AND INSTR(UPPER(text), :W{j}) > 0)"));
+            b.push((format!("O{j}"), Some(r.used_by[i].owner.clone())));
+            b.push((format!("N{j}"), Some(r.used_by[i].name.clone())));
+            b.push((format!("T{j}"), Some(r.used_by[i].kind.clone())));
+            b.push((format!("W{j}"), words[i].clone()));
+        }
+        let sql = format!("SELECT owner, name, type, line, text FROM all_source WHERE {} ORDER BY owner, name, type, line", ors.join(" OR "));
+        for row in s.query(&sql, b, 1_000_000).await?.rows {
+            let Some(i) = r.used_by.iter().position(|x| x.owner == cell(&row, 0) && x.name == cell(&row, 1) && x.kind == cell(&row, 2)) else { continue };
+            let text = cell(&row, 4);
+            let Some(in_comment) = word_in_line(&text, words[i].as_deref().unwrap_or_default()) else { continue };
+            if r.used_by[i].lines.len() < DEP_LINES_MAX {
+                r.used_by[i].lines.push(UsageLine { line: cell(&row, 3).parse().unwrap_or(0), text: text.trim_end().to_string(), in_comment });
+            }
+        }
+    }
+    // 뷰: 정의(LONG)는 DB 에서 거를 수 없어 받아서 본다
+    let views: Vec<usize> = (0..r.used_by.len()).filter(|&i| words[i].is_some() && r.used_by[i].kind == "VIEW").collect();
+    for chunk in views.chunks(100) {
+        let mut b = Vec::new();
+        let mut ors = Vec::new();
+        for (j, &i) in chunk.iter().enumerate() {
+            ors.push(format!("(owner = :O{j} AND view_name = :N{j})"));
+            b.push((format!("O{j}"), Some(r.used_by[i].owner.clone())));
+            b.push((format!("N{j}"), Some(r.used_by[i].name.clone())));
+        }
+        for row in s.query(&format!("SELECT owner, view_name, text FROM all_views WHERE {}", ors.join(" OR ")), b, 100_000).await?.rows {
+            let Some(i) = r.used_by.iter().position(|x| x.kind == "VIEW" && x.owner == cell(&row, 0) && x.name == cell(&row, 1)) else { continue };
+            let word = words[i].clone().unwrap_or_default();
+            for (n, l) in cell(&row, 2).lines().enumerate() {
+                if let Some(in_comment) = word_in_line(l, &word) {
+                    if r.used_by[i].lines.len() < DEP_LINES_MAX {
+                        r.used_by[i].lines.push(UsageLine { line: n as u32 + 1, text: l.trim_end().to_string(), in_comment });
+                    }
+                }
+            }
+        }
+    }
+
+    // Uses: 이 객체가 기대는 것 (STANDARD 같은 기본 패키지는 뺀다), 외래 키로 가리키는 부모 테이블
+    let uses = "SELECT d.referenced_owner, d.referenced_name, d.referenced_type, o.status, \
+                       NVL2(d.referenced_link_name, 'DB 링크 ' || d.referenced_link_name, '직접') FROM all_dependencies d \
+                  LEFT JOIN all_objects o ON o.owner = d.referenced_owner AND o.object_name = d.referenced_name AND o.object_type = d.referenced_type \
+                 WHERE d.owner = :o AND d.name = :n AND NOT (d.referenced_owner = :o AND d.referenced_name = :n) \
+                   AND NOT (d.referenced_owner = 'SYS' AND d.referenced_name IN ('STANDARD', 'DBMS_STANDARD', 'SYS_STUB_FOR_PURITY_ANALYSIS')) \
+                UNION \
+                SELECT p.owner, p.table_name, 'TABLE', 'VALID', 'FK ' || c.constraint_name FROM all_constraints c \
+                  JOIN all_constraints p ON p.owner = c.r_owner AND p.constraint_name = c.r_constraint_name \
+                 WHERE c.constraint_type = 'R' AND c.owner = :o AND c.table_name = :n";
+    for row in s.query(uses, on(), 100_000).await?.rows {
+        let (o, n, k, how) = (cell(&row, 0), cell(&row, 1), cell(&row, 2), cell(&row, 4));
+        if let Some(x) = r.uses.iter_mut().find(|x| x.owner == o && x.name == n && x.kind == k) {
+            if !x.how.contains(&how) {
+                x.how = format!("{}, {how}", x.how);
+            }
+            continue;
+        }
+        r.uses.push(DepObj { owner: o, name: n, kind: k, status: cell(&row, 3), how, lines: vec![] });
+    }
+    let key = |a: &DepObj| (a.kind.clone(), a.owner.clone(), a.name.clone());
+    r.used_by.sort_by_key(key);
+    r.uses.sort_by_key(key);
+    Ok(r)
+}
+
 #[cfg(test)]
 mod usage_tests {
     use super::word_in_line;

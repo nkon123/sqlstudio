@@ -1,8 +1,11 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
 // Tauri 가 띄우는 개발 서버. 포트가 바뀌면 tauri.conf.json 의 devUrl 도 바꿔야 한다.
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   clearScreen: false,
+  // 가짜 DB 모드: 앱 코드의 invoke 를 mock/core.ts 로 돌린다
+  resolve: mode === "mock" ? { alias: [{ find: /^@tauri-apps\/api\/core$/, replacement: fileURLToPath(new URL("./src/mock/core.ts", import.meta.url)) }] } : {},
   server: { port: 1420, strictPort: true, watch: { ignored: ["**/src-tauri/**"] } },
   build: {
     target: "es2022",
@@ -12,4 +15,4 @@ export default defineConfig({
     // 화면 둘: 메인, 데이터 흐름도 별도 창
     rollupOptions: { input: { main: "index.html", dfd: "dfd.html" } },
   },
-});
+}));

@@ -44,6 +44,87 @@ pub fn open_log_dir() -> R<()> {
     r.map(|_| ()).map_err(|e| ErrView::msg("io", format!("{}: {e}", d.display())))
 }
 
+#[derive(Serialize)]
+pub struct DataDirInfo {
+    portable: bool,
+    /// SQLSTUDIO_CONFIG 로 정해져 있어 화면에서 바꿀 수 없다
+    fixed: bool,
+    dir: String,
+}
+
+#[tauri::command]
+pub fn data_dir_info() -> DataDirInfo {
+    DataDirInfo {
+        portable: sqls_core::config::portable_data_dir().is_some(),
+        fixed: std::env::var_os("SQLSTUDIO_CONFIG").is_some(),
+        dir: config_path().parent().map(|p| p.display().to_string()).unwrap_or_default(),
+    }
+}
+
+/// 데이터 폴더 바꾸기 (None 이면 기본 폴더로). 고른 폴더에 설정이 없으면 지금 데이터를 복사해 둔다.
+/// 다시 시작해야 적용된다. 돌려주는 값은 새 폴더
+#[tauri::command]
+pub fn set_data_dir(dir: Option<String>) -> R<String> {
+    if data_dir_info().fixed {
+        return Err(ErrView::msg("config", "환경변수 SQLSTUDIO_CONFIG 로 설정 파일을 정해 두어 바꿀 수 없습니다"));
+    }
+    let io = |e: std::io::Error| ErrView::msg("io", e.to_string());
+    let cur = sqls_core::config::data_dir();
+    // 이전 SQLStudio 포터블 폴더를 고르면 그 안의 data
+    let dir = dir.map(std::path::PathBuf::from).map(|p| {
+        if !p.join("config.toml").is_file() && p.join("data").join("config.toml").is_file() {
+            p.join("data")
+        } else {
+            p
+        }
+    });
+    let new = dir.clone().unwrap_or_else(sqls_core::config::default_data_dir);
+    if !same_dir(&cur, &new) && !new.join("config.toml").is_file() {
+        let skip = [crate::WEBVIEW_FROM, "webview", sqls_core::config::LOCATION_FILE];
+        std::fs::create_dir_all(&new).and_then(|_| copy_tree(&cur, &new, &|n| !skip.contains(&n))).map_err(io)?;
+        // 포터블의 WebView 데이터(화면 설정·바인드 이력)는 쓰는 중이라 잠겨 있다 — 다시 시작할 때 옮긴다 (crate::take_pending_webview)
+        if cur.join("webview").is_dir() && !new.join("webview").exists() {
+            std::fs::write(new.join(crate::WEBVIEW_FROM), cur.join("webview").display().to_string()).map_err(io)?;
+        }
+    }
+    sqls_core::config::set_data_dir(dir.as_deref()).map_err(ErrView::from)?;
+    Ok(new.display().to_string())
+}
+
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// 폴더 통째로 복사 (`keep` 이 false 인 이름은 맨 위에서만 뺀다)
+pub(crate) fn copy_tree(from: &std::path::Path, to: &std::path::Path, keep: &dyn Fn(&str) -> bool) -> std::io::Result<()> {
+    if !from.is_dir() {
+        return Ok(());
+    }
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let name = e.file_name();
+        if !keep(&name.to_string_lossy()) {
+            continue;
+        }
+        let dst = to.join(&name);
+        if e.file_type()?.is_dir() {
+            std::fs::create_dir_all(&dst)?;
+            copy_tree(&e.path(), &dst, &|_| true)?;
+        } else {
+            std::fs::copy(e.path(), dst)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 /// 화면이 한 다시 접속의 결과를 접속 기록에 (recover_ok / recover_fail)
 #[tauri::command]
 pub fn conn_event(kind: String, message: String) {
@@ -705,6 +786,13 @@ pub async fn table_sizes(st: State<'_, AppState>, id: u64, owner: Option<String>
 pub async fn column_usage(st: State<'_, AppState>, id: u64, table: String, column: String) -> R<meta::Usage> {
     let s = lookup_session(&st, id)?;
     Ok(meta::column_usage(&s, &table, &column).await?)
+}
+
+/// 객체 의존 — 이 객체를 쓰는 곳(소스·뷰의 줄까지) · 이 객체가 쓰는 것
+#[tauri::command]
+pub async fn object_deps(st: State<'_, AppState>, id: u64, name: String) -> R<meta::ObjectDeps> {
+    let s = lookup_session(&st, id)?;
+    Ok(meta::object_deps(&s, &name).await?)
 }
 
 /// 사전 조회에 쓸 세션: 사전 조회 세션(읽기 전용)이 우선 — 작업 세션에서 긴 쿼리가 돌고 있어도 기다리지 않는다.

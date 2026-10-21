@@ -284,6 +284,13 @@ const LOCAL: Record<string, (a: Args) => unknown> = {
     return v == null ? fail(`${a.path}: 파일이 없습니다`, "io") : { text: v, encoding: "utf-8" };
   },
   write_sql_file: (a) => { localStorage.setItem(`mock.file:${a.path}`, String(a.text)); return null; },
+  // 분석 화면을 열 수 있게 — 결과는 없다. 중단된 가져오기는 localStorage "mock.pending" 으로 시험한다
+  analysis_sets: () => [],
+  analysis_pending_imports: () => { try { return JSON.parse(localStorage.getItem("mock.pending") ?? "[]"); } catch { return []; } },
+  analysis_discard_import: (a) => {
+    try { localStorage.setItem("mock.pending", JSON.stringify(JSON.parse(localStorage.getItem("mock.pending") ?? "[]").filter((p: { id: string }) => p.id !== a.id))); } catch { /* 없음 */ }
+    return null;
+  },
 };
 
 function banner(where: string) {

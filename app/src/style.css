@@ -724,3 +724,7 @@ body.tab-dragging { cursor: grabbing; user-select: none; }
 .guide summary .dim { color: var(--dim); font-family: var(--mono); }
 .guide .hint { color: var(--dim); font-size: 12px; margin: 6px 0 4px; }
 .guide-body { margin: 0 0 6px; padding: 8px; max-height: 320px; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; font: 12px/1.5 var(--mono); white-space: pre-wrap; }
+/* 분석: 중단된 가져오기 */
+.an-pending { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); font-size: 12px; }
+.an-pending-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.an-pending-row .warn { color: var(--warn); }

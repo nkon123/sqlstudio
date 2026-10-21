@@ -4,7 +4,7 @@
 // 분석은 단위를 조각내어 모델에 묻고 조각마다 JSON 으로 남긴다. 끝나면 저장된 결과를 이어 통합 분석한다.
 // 모델은 소스를 읽기만 한다 — 이 화면에서 DB 로 가는 것은 사전 조회(ALL_SOURCE 등)뿐이다.
 
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api, errOf, type Provider } from "./api";
@@ -116,6 +116,10 @@ interface ImportTarget { name: string; kind: "connection" | "imported"; units: n
 interface ImportPeek { manifest: Manifest; targets: ImportTarget[]; suggested?: string | null }
 interface MergeReport { added: number; updated: number; kept: number; reports: number; merged: boolean }
 interface ImportDone extends MergeReport { name: string; connection: boolean }
+/** 가져오기·합치기 진행 (백엔드 bundle::Step) */
+interface ImportStep { step: "unzip" | "merge" | "integrate" | "finish"; done: number; total: number }
+/** 중단된 가져오기 (백엔드 bundle::Pending) */
+interface PendingImport { id: string; file: string; target: string; profile: string; step: ImportStep["step"]; done: number; total: number; updated_at: number; resumable: boolean }
 const mergeText = (r: MergeReport) => {
   const parts = [r.added && `새 단위 ${r.added}`, r.updated && `바꾼 단위 ${r.updated}`, r.kept && `그대로 ${r.kept} (이쪽이 같거나 더 나중)`, r.reports && `흐름도 보고서 ${r.reports}`].filter(Boolean);
   return parts.length ? parts.join(" · ") : "바뀐 것 없음";
@@ -150,6 +154,12 @@ export class AnalysisView {
   private folderBtn = h("button", { hidden: true, title: "폴더를 추가하면 파일 목록만 읽습니다 — 분석은 목록에서 고른 뒤 '분석 시작'. 여러 폴더를 추가할 수 있습니다" }, "폴더 추가…");
   private stopBtn = h("button", { class: "danger", disabled: true }, "중지");
   private statusEl = h("span", { class: "dbg-status" }, "");
+  /** 가져오기·합치기 중지 (진행 중에만 보인다) */
+  private importStopBtn = h("button", { class: "small danger", hidden: true, title: "항목·단위 사이에서 멈춘다 — 풀어 둔 것은 남아 나중에 이어서 한다",
+    onclick: () => { this.importStopBtn.disabled = true; void invoke("analysis_import_stop"); } }, "가져오기 중지");
+  /** 중단된 가져오기 (이어서 · 버리기) */
+  private pendingEl = h("div", { class: "an-pending", hidden: true });
+  private importing = false;
   private bar = h("div", { class: "an-bar-fill" });
   private grid = new ResultGrid({
     hiddenCols: [KEY_COL],
@@ -216,7 +226,7 @@ export class AnalysisView {
       h("label", { class: "check", title: "동시에 물을 조각 수" }, "동시", this.jobsIn),
       h("label", { class: "check", title: "저장된 결과가 있어도 다시 묻는다" }, this.forceBox, "다시"),
       this.startBtn, this.stopBtn,
-      h("span", { class: "spacer" }), this.statusEl,
+      h("span", { class: "spacer" }), this.statusEl, this.importStopBtn,
       h("button", { title: "결과 폴더 경로 복사", onclick: () => this.copyDir() }, "폴더"),
       h("button", { title: "에디터로 돌아간다", onclick: () => this.close() }, "닫기"));
     const nav = h("nav", { class: "pane-tabs" });
@@ -241,7 +251,7 @@ export class AnalysisView {
     this.main.append(colSplitter(this.main, "analysis.col.units"), h("div", { class: "an-right" }, nav, this.content));
     // 가져온 결과를 볼 때는 DB 가 필요한 것을 끈다
     this.liveOnly = [this.ownerIn, this.nameIn, listBtn, this.provSel, this.linesIn, this.jobsIn, this.forceBox, this.startBtn, this.modeSel, this.folderBtn];
-    this.el = h("div", { class: "debugger analysis", hidden: true }, toolbar,
+    this.el = h("div", { class: "debugger analysis", hidden: true }, toolbar, this.pendingEl,
       h("div", { class: "an-progress" }, this.bar), this.main);
   }
 
@@ -281,6 +291,7 @@ export class AnalysisView {
       this.sets = await invoke<SetInfo[]>("analysis_sets");
     } catch { this.sets = []; }
     this.syncSetSel();
+    await this.refreshPending();
   }
 
   private syncSetSel() {
@@ -388,20 +399,80 @@ export class AnalysisView {
       [{ label: "취소", value: false }, { label: "가져오기", value: true, kind: "primary" }]);
     if (!go) return;
     const target = sel.value === NEW ? (nameIn.value.trim() || m.profile) : sel.value;
+    await this.runImport(path, target);
+  }
+
+  /** 가져오기 (새로 또는 이어서) — 멈추거나 실패하면 풀어 둔 것이 남아 '중단된 가져오기' 에서 이어서 한다 */
+  private async runImport(path: string, target: string) {
     let r: ImportDone;
-    this.statusEl.textContent = "가져오는 중…";
+    const prog = this.progress("가져오는 중");
     try {
-      r = await invoke<ImportDone>("analysis_import", { path, target });
+      r = await invoke<ImportDone>("analysis_import", { path, target, onStep: prog.channel });
     } catch (e) {
-      this.statusEl.textContent = "";
-      return toast(errOf(e).message, "error");
+      prog.done();
+      const msg = errOf(e).message;
+      toast(msg.startsWith("중지했습니다") ? `${msg} (위의 '중단된 가져오기' 에서)` : `${msg} — 위의 '중단된 가져오기' 에서 이어서 할 수 있습니다`, msg.startsWith("중지") ? "info" : "error", 8000);
+      await this.refreshPending();
+      return;
     }
-    this.statusEl.textContent = "";
+    prog.done();
     toast(`가져옴 → ${r.name}: ${mergeText(r)}`, "ok", 7000);
     await this.refreshSets();
     // 지금 접속한 DB 의 결과로 들어갔으면 접속 목록으로 (분석 표시가 보이게)
     const live = await this.liveName();
     await this.useSet(r.connection && live === r.name ? null : r.name);
+  }
+
+  /** 중단된 가져오기 — 멈추거나(중지·앱 종료) 실패한 것을 이어서 하거나 버린다 */
+  private async refreshPending() {
+    let list: PendingImport[] = [];
+    try { list = await invoke<PendingImport[]>("analysis_pending_imports"); } catch { /* 가짜 모드 등 */ }
+    const STEP: Record<ImportStep["step"], string> = { unzip: "푸는 중", merge: "합치는 중", integrate: "통합 다시 만드는 중", finish: "마무리 중" };
+    this.pendingEl.hidden = !list.length;
+    this.pendingEl.replaceChildren(...list.map((p) => {
+      const file = p.file.split(/[\\/]/).pop();
+      const at = p.total ? ` ${p.done.toLocaleString()}/${p.total.toLocaleString()}` : "";
+      return h("div", { class: "an-pending-row" },
+        h("span", {}, h("b", {}, "중단된 가져오기 "), `${file} → ${p.target || p.profile} · ${STEP[p.step]}${at} · ${when(p.updated_at)}`,
+          p.resumable ? "" : h("span", { class: "warn" }, " · 원본 파일이 바뀌었거나 없어 이어서 할 수 없습니다")),
+        p.resumable ? h("button", { class: "small primary", disabled: this.importing, title: "다 푼 항목·합친 단위는 건너뛰고 남은 것만", onclick: () => void this.runImport(p.file, p.target || p.profile) }, "이어서") : "",
+        h("button", { class: "small", disabled: this.importing, title: "풀어 둔 것을 지운다 (있던 결과는 그대로 — 이미 합친 단위는 남는다)", onclick: async () => {
+          if (!(await confirmBox("중단된 가져오기 버리기", `${file} 을 풀어 둔 것을 지웁니다.\n이미 합친 단위는 그대로 남습니다.`, "버리기"))) return;
+          await invoke("analysis_discard_import", { id: p.id }).catch((e) => toast(errOf(e).message, "error"));
+          await this.refreshPending();
+        } }, "버리기"));
+    }));
+  }
+
+  /** 가져오기·합치기 진행을 상태 줄에 — 단계·개수·경과 시간. 개수를 모르는 단계(통합 다시 만들기)도 초가 올라가 멈추지 않은 것이 보인다 */
+  private progress(what: string) {
+    const STEP: Record<ImportStep["step"], string> = { unzip: "파일 푸는 중", merge: "단위 합치는 중", integrate: "통합 결과(호출 관계·CRUD·흐름) 다시 만드는 중", finish: "마무리 중" };
+    const started = performance.now();
+    let last: ImportStep | null = null;
+    const show = () => {
+      const secs = Math.floor((performance.now() - started) / 1000);
+      const s = last ? `${STEP[last.step]}${last.total ? ` ${last.done.toLocaleString()}/${last.total.toLocaleString()} (${Math.floor((last.done / last.total) * 100)}%)` : ""}` : "준비 중";
+      this.statusEl.textContent = `${what} · ${s} · ${secs}초`;
+    };
+    const channel = new Channel<ImportStep>();
+    channel.onmessage = (m) => { last = m; show(); };
+    show();
+    const timer = window.setInterval(show, 1000);
+    // 중지: 항목·단위 사이에서 멈추고 풀어 둔 것은 남긴다 (나중에 이어서)
+    this.importing = true;
+    this.importStopBtn.hidden = false;
+    this.importStopBtn.disabled = false;
+    void this.refreshPending();
+    return {
+      channel,
+      done: () => {
+        clearInterval(timer);
+        this.statusEl.textContent = "";
+        this.importing = false;
+        this.importStopBtn.hidden = true;
+        void this.refreshPending();
+      },
+    };
   }
 
   /** 따로 둔 결과를 접속의 결과에 합친다 — 전에 다른 이름으로 가져와 접속 목록에 분석 표시가 안 보이던 것 */
@@ -424,12 +495,15 @@ export class AnalysisView {
       h("label", { class: "check" }, del, "합친 뒤 따로 둔 이 결과는 지우기")),
       [{ label: "취소", value: false }, { label: "합치기", value: true, kind: "primary" }]);
     if (!go) return;
+    const prog = this.progress("합치는 중");
     try {
-      const r = await invoke<MergeReport>("analysis_merge_set", { set: x.name, into: sel.value });
+      const r = await invoke<MergeReport>("analysis_merge_set", { set: x.name, into: sel.value, onStep: prog.channel });
       if (del.checked) await invoke("analysis_remove_set", { name: x.name });
       toast(`'${sel.value}' 에 합침: ${mergeText(r)}`, "ok", 7000);
     } catch (e) {
       return toast(errOf(e).message, "error");
+    } finally {
+      prog.done();
     }
     await this.refreshSets();
     await this.useSet(live === sel.value ? null : sel.value);

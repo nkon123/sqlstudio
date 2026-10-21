@@ -14,6 +14,7 @@ use sqls_analyze::integrate::{self, Integrated};
 use sqls_analyze::run::{analyze_unit, Event, Llm, Options};
 use sqls_analyze::source::{self, UnitRef};
 use sqls_analyze::store::{ChunkResult, Store, UnitResult};
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::complete::hub_for;
@@ -719,7 +720,7 @@ pub struct ImportDone {
 /// 파일을 이 PC 의 결과로 가져온다. `target` 이 접속 이름이면 그 접속의 결과로 (분석 표시·값의 출처에 쓰인다),
 /// 아니면 그 이름의 따로 둔 결과로. 이미 결과가 있으면 합친다 — 단위마다 더 나중에 분석한 것이 남는다
 #[tauri::command]
-pub fn analysis_import(st: State<'_, AppState>, path: String, target: String) -> R<ImportDone> {
+pub async fn analysis_import(st: State<'_, AppState>, path: String, target: String, on_step: Channel<ImportStep>) -> R<ImportDone> {
     let target = target.trim().to_string();
     let connection = st.cfg.rd().connections.iter().any(|p| p.name == target);
     let (name, dest) = if connection {
@@ -729,14 +730,64 @@ pub fn analysis_import(st: State<'_, AppState>, path: String, target: String) ->
         let d = sqls_analyze::analysis_root().join(&n);
         (n, d)
     };
-    let (_, report) = bundle::import_to(std::path::Path::new(&path), &dest, !connection).map_err(|e| ErrView::msg("io", e.to_string()))?;
+    // 큰 파일은 오래 걸린다 — 작업 스레드에서, 단계·개수를 화면에 알리며 (창이 멈춘 것처럼 보이지 않게).
+    // 멈추거나(중지·앱 종료) 실패해도 풀어 둔 것이 남아, 같은 파일을 같은 곳으로 다시 가져오면 이어서 한다
+    IMPORT_STOP.store(false, Ordering::Relaxed);
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        let on = step_sender(on_step);
+        bundle::import_resumable(std::path::Path::new(&path), &dest, !connection, &target, &on, &IMPORT_STOP).map(|(_, r)| r)
+    })
+    .await
+    .map_err(|e| ErrView::msg("io", e.to_string()))?
+    .map_err(|e| ErrView::msg("io", e.to_string()))?;
     Ok(ImportDone { name, connection, report })
+}
+
+/// 가져오기·합치기 중지 — 항목·단위 사이에서 멈추고 풀어 둔 것은 남긴다 (나중에 이어서)
+static IMPORT_STOP: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+pub fn analysis_import_stop() {
+    IMPORT_STOP.store(true, Ordering::Relaxed);
+}
+
+/// 중단된 가져오기 (이어서 · 버리기)
+#[tauri::command]
+pub fn analysis_pending_imports() -> Vec<bundle::Pending> {
+    bundle::pending_imports(&sqls_analyze::analysis_root())
+}
+
+#[tauri::command]
+pub fn analysis_discard_import(id: String) -> R<()> {
+    bundle::discard_pending(&sqls_analyze::analysis_root(), &id).map_err(|e| ErrView::msg("io", e.to_string()))
+}
+
+/// 가져오기·합치기 진행 (화면의 상태 줄)
+#[derive(Serialize, Clone)]
+pub struct ImportStep {
+    step: bundle::Step,
+    done: usize,
+    total: usize,
+}
+
+/// 진행을 화면으로 — 단계가 바뀔 때와 끝났을 때는 바로, 그 밖에는 0.1초에 한 번만 (항목이 수만 개일 수 있다)
+fn step_sender(ch: Channel<ImportStep>) -> impl Fn(bundle::Step, usize, usize) {
+    let last = std::sync::Mutex::new((None::<bundle::Step>, std::time::Instant::now()));
+    move |step, done, total| {
+        let mut l = last.lk();
+        let now = std::time::Instant::now();
+        if l.0 == Some(step) && done != total && now.duration_since(l.1) < std::time::Duration::from_millis(100) {
+            return;
+        }
+        *l = (Some(step), now);
+        let _ = ch.send(ImportStep { step, done, total });
+    }
 }
 
 /// 따로 둔(가져온) 결과를 접속의 결과에 합친다 — 전에 다른 이름으로 가져와 접속에서 분석 표시가 안 보이던 것.
 /// 따로 둔 결과는 그대로 둔다 (지우는 것은 화면이 묻고 따로)
 #[tauri::command]
-pub fn analysis_merge_set(st: State<'_, AppState>, set: String, into: String) -> R<bundle::MergeReport> {
+pub async fn analysis_merge_set(st: State<'_, AppState>, set: String, into: String, on_step: Channel<ImportStep>) -> R<bundle::MergeReport> {
     if !st.cfg.rd().connections.iter().any(|p| p.name == into) {
         return Err(ErrView::msg("invalid", format!("'{into}' 접속이 없습니다")));
     }
@@ -745,7 +796,15 @@ pub fn analysis_merge_set(st: State<'_, AppState>, set: String, into: String) ->
     if from == dest {
         return Err(ErrView::msg("invalid", "같은 결과입니다"));
     }
-    bundle::merge_dir(&from, &dest).map_err(|e| ErrView::msg("io", e.to_string()))
+    IMPORT_STOP.store(false, Ordering::Relaxed);
+    tauri::async_runtime::spawn_blocking(move || {
+        let on = step_sender(on_step);
+        // 합치기는 단위마다 바꿔 끼우므로 멈춰도 다시 하면 남은 것만 — 통합은 다시 만든다
+        bundle::merge_dir_ctl(&from, &dest, &on, &IMPORT_STOP, true)
+    })
+    .await
+    .map_err(|e| ErrView::msg("io", e.to_string()))?
+    .map_err(|e| ErrView::msg("io", e.to_string()))
 }
 
 /// 가져온 결과를 지운다 (접속 프로필의 결과는 지우지 않는다 — 폴더에서 직접)

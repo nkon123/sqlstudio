@@ -10,6 +10,7 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +21,25 @@ const KIND: &str = "sqlstudio-analysis";
 const FORMAT: u32 = 1;
 /// 풀어 놓을 전체 크기 상한 — 깨진·악의적인 파일이 디스크를 채우지 않게
 const MAX_TOTAL: u64 = 4 << 30;
+
+/// 가져오기·합치기 진행 — (단계, 한 것, 전체). 전체가 0 이면 개수를 모르는 단계
+pub type OnStep<'a> = &'a dyn Fn(Step, usize, usize);
+
+/// 가져오기·합치기의 단계
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Step {
+    /// 파일을 임시 폴더에 푸는 중 (항목 수)
+    Unzip,
+    /// 단위마다 있던 결과와 견주어 합치는 중 (단위 수)
+    Merge,
+    /// 통합 결과(호출 관계·CRUD·흐름)를 다시 만드는 중
+    Integrate,
+    /// 마무리 (바꿔 끼우기·기록)
+    Finish,
+}
+
+fn no_step(_: Step, _: usize, _: usize) {}
 const MAX_ENTRIES: usize = 500_000;
 
 /// 묶음의 머리 (manifest.json, 가져온 폴더에는 imported.json)
@@ -129,6 +149,11 @@ pub fn peek(file: &Path) -> io::Result<Manifest> {
 /// 묶음을 `dest` 폴더에 푼다. `overwrite` 가 아니면 이미 있는 폴더에는 풀지 않는다.
 /// 다른 폴더에 다 푼 뒤 바꿔 끼우므로, 도중에 실패해도 있던 결과가 깨지지 않는다.
 pub fn import(file: &Path, dest: &Path, overwrite: bool) -> io::Result<Manifest> {
+    import_with(file, dest, overwrite, &no_step)
+}
+
+/// [`import`] — 푸는 진행을 알린다
+pub fn import_with(file: &Path, dest: &Path, overwrite: bool, on: OnStep) -> io::Result<Manifest> {
     let mut m = peek(file)?;
     if dest.exists() && !overwrite {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("이미 있습니다: {}", dest.display())));
@@ -143,7 +168,9 @@ pub fn import(file: &Path, dest: &Path, overwrite: bool) -> io::Result<Manifest>
     let _ = fs::remove_dir_all(&stage);
     let r = (|| -> io::Result<()> {
         let mut total = 0u64;
-        for i in 0..z.len() {
+        let n = z.len();
+        for i in 0..n {
+            on(Step::Unzip, i, n);
             let mut e = z.by_index(i).map_err(io::Error::other)?;
             if e.is_dir() {
                 continue;
@@ -168,6 +195,7 @@ pub fn import(file: &Path, dest: &Path, overwrite: bool) -> io::Result<Manifest>
             let mut f = fs::File::create(&to)?;
             io::copy(&mut (&mut e).take(MAX_TOTAL), &mut f)?;
         }
+        on(Step::Unzip, n, n);
         fs::create_dir_all(stage.join("units"))?;
         m.imported_at = Some(crate::store::now());
         m.imported_from = Some(file.display().to_string());
@@ -285,11 +313,29 @@ fn updated_at(p: &Path) -> u64 {
 /// 결과 폴더 `from` 을 `into` 에 합친다 — 단위마다 더 나중에 분석한 것을 남기고, 통합 결과를 다시 만든다.
 /// 같은 것을 몇 번 합쳐도 결과는 같다 (같은 시각이면 있던 것을 둔다). `from` 은 그대로 둔다.
 pub fn merge_dir(from: &Path, into: &Path) -> io::Result<MergeReport> {
+    merge_dir_with(from, into, &no_step)
+}
+
+/// [`merge_dir`] — 단위마다 진행을 알린다
+pub fn merge_dir_with(from: &Path, into: &Path, on: OnStep) -> io::Result<MergeReport> {
+    merge_dir_ctl(from, into, on, &AtomicBool::new(false), false)
+}
+
+/// [`merge_dir_with`] — `stop` 이 서면 단위 사이에서 멈춘다 (합친 단위는 그대로 남고, 다시 돌리면 남은 것만 합친다).
+/// `force_integrate` 면 새로 합친 단위가 없어도 통합 결과를 다시 만든다 (이어서 할 때 — 지난번에 합치고 통합 전에 멈췄을 수 있다)
+pub fn merge_dir_ctl(from: &Path, into: &Path, on: OnStep, stop: &AtomicBool, force_integrate: bool) -> io::Result<MergeReport> {
     let src = Store::open(from)?;
     let dst = Store::open(into)?;
     let mut r = MergeReport { merged: true, ..Default::default() };
     let mut taken = std::collections::HashSet::new();
-    for u in src.units() {
+    on(Step::Merge, 0, 0);
+    let units = src.units();
+    let n = units.len();
+    for (i, u) in units.into_iter().enumerate() {
+        if stop.load(Ordering::Relaxed) {
+            return Err(stopped());
+        }
+        on(Step::Merge, i, n);
         let have = dst.read_unit(&u.key);
         if have.as_ref().is_some_and(|h| h.analyzed_at >= u.analyzed_at) {
             r.kept += 1;
@@ -330,7 +376,8 @@ pub fn merge_dir(from: &Path, into: &Path) -> io::Result<MergeReport> {
         }
     }
     let had = dst.read_integrated::<crate::integrate::Integrated>("integrated.json");
-    if r.added + r.updated > 0 || had.is_none() {
+    if r.added + r.updated > 0 || had.is_none() || force_integrate {
+        on(Step::Integrate, 0, 0);
         // 전체 요약(모델이 쓴 것)은 있던 것을, 없으면 가져온 것을
         let overview = had.and_then(|g| g.overview).or_else(|| src.read_integrated::<crate::integrate::Integrated>("integrated.json").and_then(|g| g.overview));
         crate::integrate::write_all(&dst, overview)?;
@@ -342,27 +389,175 @@ pub fn merge_dir(from: &Path, into: &Path) -> io::Result<MergeReport> {
 /// `mark` 면 '가져온 결과' 표시(imported.json)를 남긴다 — 접속 프로필의 결과 폴더로 가져올 때는 남기지 않는다
 /// (남기면 그 접속의 결과가 '가져온 것' 으로 보이고, 이름 바꾼 접속의 결과 이어 붙이기에서도 빠진다).
 pub fn import_to(file: &Path, dest: &Path, mark: bool) -> io::Result<(Manifest, MergeReport)> {
-    let (m, r) = if crate::has_results(dest) {
-        let parent = dest.parent().ok_or_else(|| err("가져올 폴더가 잘못되었습니다"))?;
-        let stage = parent.join(format!(".merge-{}-{}", std::process::id(), crate::store::now()));
-        let m = import(file, &stage, false)?;
-        let r = merge_dir(&stage, dest);
-        let _ = fs::remove_dir_all(&stage);
-        (m, r?)
-    } else {
-        // Store::open 이 만들어 둔 빈 폴더는 바꿔 끼운다
-        let m = import(file, dest, true)?;
-        if !mark {
-            let _ = fs::remove_file(dest.join("imported.json"));
+    import_to_with(file, dest, mark, &no_step)
+}
+
+/// [`import_to`] — 푸는·합치는·통합을 다시 만드는 진행을 알린다
+pub fn import_to_with(file: &Path, dest: &Path, mark: bool, on: OnStep) -> io::Result<(Manifest, MergeReport)> {
+    import_resumable(file, dest, mark, "", on, &AtomicBool::new(false))
+}
+
+// ── 이어서 가져오기 ─────────────────────────────────────
+// 같은 파일(경로·크기·수정 시각)을 같은 곳으로 가져오면 늘 같은 임시 폴더(.import-<id>)를 쓰고, 옆에 기록(.import-<id>.json)을
+// 남긴다. 멈추거나(중지·앱 종료·PC 꺼짐) 실패해도 지우지 않으므로, 다시 가져오면 다 푼 항목은 건너뛰고 합친 단위는 그대로 둔다.
+
+/// 중단된 가져오기 하나 (결과 폴더들 옆의 `.import-<id>.json`)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pending {
+    pub id: String,
+    pub file: String,
+    pub size: u64,
+    pub modified: u64,
+    pub dest: String,
+    /// 화면이 고른 가져올 곳 (접속 이름 또는 따로 둘 이름)
+    #[serde(default)]
+    pub target: String,
+    pub mark: bool,
+    pub profile: String,
+    pub step: Step,
+    pub done: usize,
+    pub total: usize,
+    pub started_at: u64,
+    pub updated_at: u64,
+    /// 원본 파일이 그대로 있어 이어서 할 수 있는지 (읽을 때 채운다)
+    #[serde(default)]
+    pub resumable: bool,
+}
+
+fn file_sig(file: &Path) -> io::Result<(u64, u64)> {
+    let md = fs::metadata(file)?;
+    let modified = md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+    Ok((md.len(), modified))
+}
+
+/// 파일·크기·수정 시각·가져올 곳으로 정하는 아이디 (FNV-1a — 실행마다 같아야 한다)
+fn pending_id(file: &Path, size: u64, modified: u64, dest: &Path) -> String {
+    let key = format!("{}|{size}|{modified}|{}", file.display(), dest.display()).to_lowercase();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in key.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
+fn stopped() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "중지했습니다 — 다시 가져오면 이어서 합니다")
+}
+
+/// 묶음을 `stage` 에 푼다. 이미 다 푼 항목(크기가 같은 파일)은 건너뛴다 — 항목은 .part 로 쓰고 이름을 바꾸므로 쓰다 만 파일은 남지 않는다
+fn unzip_resumable(file: &Path, stage: &Path, on: OnStep, stop: &AtomicBool) -> io::Result<()> {
+    let mut z = zip::ZipArchive::new(fs::File::open(file)?).map_err(io::Error::other)?;
+    let n = z.len();
+    if n > MAX_ENTRIES {
+        return Err(err("항목이 너무 많습니다"));
+    }
+    let mut total = 0u64;
+    for i in 0..n {
+        if stop.load(Ordering::Relaxed) {
+            return Err(stopped());
         }
-        let added = Store::open(dest)?.units().len();
-        (m, MergeReport { added, ..Default::default() })
+        on(Step::Unzip, i, n);
+        let mut e = z.by_index(i).map_err(io::Error::other)?;
+        if e.is_dir() {
+            continue;
+        }
+        let Some(rel) = e.enclosed_name() else { return Err(err(format!("잘못된 항목 이름: {}", e.name()))) };
+        let top = rel.components().next().map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
+        if rel == Path::new("manifest.json") {
+            continue;
+        }
+        if top != "units" && top != "integrated" {
+            return Err(err(format!("모르는 항목: {}", e.name())));
+        }
+        total += e.size();
+        if total > MAX_TOTAL {
+            return Err(err("풀면 너무 큽니다"));
+        }
+        let to = stage.join(&rel);
+        if fs::metadata(&to).is_ok_and(|m| m.len() == e.size()) {
+            continue;
+        }
+        if let Some(d) = to.parent() {
+            fs::create_dir_all(d)?;
+        }
+        let part = to.with_extension(format!("{}part", to.extension().map(|x| format!("{}.", x.to_string_lossy())).unwrap_or_default()));
+        let mut f = fs::File::create(&part)?;
+        io::copy(&mut (&mut e).take(MAX_TOTAL), &mut f)?;
+        drop(f);
+        fs::rename(&part, &to)?;
+    }
+    on(Step::Unzip, n, n);
+    fs::create_dir_all(stage.join("units"))?;
+    Ok(())
+}
+
+/// 묶음을 결과 폴더 `dest` 로 가져온다 — 비어 있으면 풀어서 그대로, 결과가 있으면 합친다.
+/// 멈추거나 실패하면 풀어 둔 것과 기록을 남겨, 같은 파일을 같은 곳으로 다시 가져오면 이어서 한다. `target` 은 기록에 남길 화면의 이름
+pub fn import_resumable(file: &Path, dest: &Path, mark: bool, target: &str, on: OnStep, stop: &AtomicBool) -> io::Result<(Manifest, MergeReport)> {
+    let mut m = peek(file)?;
+    let parent = dest.parent().ok_or_else(|| err("가져올 폴더가 잘못되었습니다"))?;
+    fs::create_dir_all(parent)?;
+    let (size, modified) = file_sig(file)?;
+    let id = pending_id(file, size, modified, dest);
+    let stage = parent.join(format!(".import-{id}"));
+    let note = parent.join(format!(".import-{id}.json"));
+    let resumed = note.is_file();
+    let started_at = fs::read_to_string(&note).ok().and_then(|s| serde_json::from_str::<Pending>(&s).ok()).map(|p| p.started_at).unwrap_or_else(crate::store::now);
+    // 진행을 화면에 알리면서 기록에도 남긴다 (몇 초에 한 번)
+    let last_write = std::cell::Cell::new(0u64);
+    let record = |step: Step, done: usize, total: usize| {
+        on(step, done, total);
+        let now = crate::store::now();
+        if now == last_write.get() && done != total {
+            return;
+        }
+        last_write.set(now);
+        let p = Pending {
+            id: id.clone(), file: file.display().to_string(), size, modified, dest: dest.display().to_string(), target: target.to_string(),
+            mark, profile: m.profile.clone(), step, done, total, started_at, updated_at: now, resumable: true,
+        };
+        let _ = fs::write(&note, serde_json::to_vec_pretty(&p).unwrap_or_default());
     };
+    record(Step::Unzip, 0, 0);
+    unzip_resumable(file, &stage, &record, stop)?;
+    m.imported_at = Some(crate::store::now());
+    m.imported_from = Some(file.display().to_string());
+    fs::write(stage.join("imported.json"), serde_json::to_vec_pretty(&m).map_err(io::Error::other)?)?;
+
+    let r = if crate::has_results(dest) {
+        // 합치기는 단위마다 바꿔 끼우고, 이미 합친 단위는 다시 해도 그대로 — 이어서 할 때는 통합을 꼭 다시 만든다
+        let r = merge_dir_ctl(&stage, dest, &record, stop, resumed)?;
+        record(Step::Finish, 0, 0);
+        let _ = fs::remove_dir_all(&stage);
+        r
+    } else {
+        record(Step::Finish, 0, 0);
+        if !mark {
+            let _ = fs::remove_file(stage.join("imported.json"));
+        }
+        // Store::open 이 만들어 둔 빈 폴더는 바꿔 끼운다
+        if dest.exists() {
+            let old = parent.join(format!(".old-{id}"));
+            let _ = fs::remove_dir_all(&old);
+            fs::rename(dest, &old)?;
+            if let Err(e) = fs::rename(&stage, dest) {
+                let _ = fs::rename(&old, dest);
+                return Err(e);
+            }
+            let _ = fs::remove_dir_all(&old);
+        } else {
+            fs::rename(&stage, dest)?;
+        }
+        MergeReport { added: Store::open(dest)?.units().len(), ..Default::default() }
+    };
+    let _ = fs::remove_file(&note);
+    let m2 = m.clone();
     push_log(dest, ImportLog {
-        profile: m.profile.clone(),
-        db_user: m.db_user.clone(),
-        exported_at: m.exported_at,
-        exported_by: m.exported_by.clone(),
+        profile: m2.profile,
+        db_user: m2.db_user,
+        exported_at: m2.exported_at,
+        exported_by: m2.exported_by,
         imported_at: crate::store::now(),
         from: file.display().to_string(),
         added: r.added,
@@ -370,6 +565,35 @@ pub fn import_to(file: &Path, dest: &Path, mark: bool) -> io::Result<(Manifest, 
         kept: r.kept,
     })?;
     Ok((m, r))
+}
+
+/// 중단된 가져오기들 (`root` 는 결과 폴더들이 있는 곳). 원본 파일이 바뀌었거나 없어졌으면 resumable = false
+pub fn pending_imports(root: &Path) -> Vec<Pending> {
+    let Ok(rd) = fs::read_dir(root) else { return Vec::new() };
+    let mut out: Vec<Pending> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".import-")) && p.extension().is_some_and(|x| x == "json"))
+        .filter_map(|p| fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str::<Pending>(&s).ok()))
+        .map(|mut p| {
+            p.resumable = file_sig(Path::new(&p.file)).is_ok_and(|(s, m)| s == p.size && m == p.modified);
+            p
+        })
+        .collect();
+    out.sort_by_key(|p| std::cmp::Reverse(p.updated_at));
+    out
+}
+
+/// 중단된 가져오기를 버린다 (풀어 둔 것과 기록)
+pub fn discard_pending(root: &Path, id: &str) -> io::Result<()> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(err("잘못된 아이디"));
+    }
+    let _ = fs::remove_dir_all(root.join(format!(".import-{id}")));
+    match fs::remove_file(root.join(format!(".import-{id}.json"))) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// 이 PC 에 있는 결과 하나
@@ -457,6 +681,105 @@ mod tests {
         u.analyzed_at = at;
         store.write_unit(&u).unwrap();
         crate::integrate::write_all(store, None).unwrap();
+    }
+
+    #[tokio::test]
+    async fn import_stops_and_resumes() {
+        let base = std::env::temp_dir().join(format!("sqls-bundle-resume-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let a = Store::open(base.join("A")).unwrap();
+        for (n, at) in [("P", 100), ("Q", 100), ("R", 100)] {
+            analyze(&a, n, at).await;
+        }
+        let fa = base.join("a.sqla");
+        export(&a, &fa, Manifest::new("QA", "0")).unwrap();
+        let root = base.join("sets");
+        let qa = root.join("QA");
+
+        // 1) 푸는 도중에 중지 → 기록이 남고, 다시 하면 끝까지
+        let stop = AtomicBool::new(false);
+        let on = |s: Step, d: usize, _t: usize| if s == Step::Unzip && d >= 2 { stop.store(true, Ordering::Relaxed) };
+        let e = import_resumable(&fa, &qa, false, "QA", &on, &stop).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::Interrupted);
+        let p = pending_imports(&root);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].resumable && p[0].step == Step::Unzip && p[0].target == "QA", "{p:?}");
+        let (_, r) = import_resumable(&fa, &qa, false, "QA", &no_step, &AtomicBool::new(false)).unwrap();
+        assert_eq!(r.added, 3);
+        assert!(pending_imports(&root).is_empty());
+        assert_eq!(Store::open(&qa).unwrap().units().len(), 3);
+        assert!(!fs::read_dir(&root).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with('.')), "임시 폴더·기록을 남기지 않는다");
+
+        // 2) 있던 결과에 합치는 도중에 중지 → 다시 하면 남은 단위만, 통합은 꼭 다시
+        let b = Store::open(base.join("B")).unwrap();
+        for (n, at) in [("P", 200), ("Q", 200), ("R", 200)] {
+            analyze(&b, n, at).await;
+        }
+        let fb = base.join("b.sqla");
+        export(&b, &fb, Manifest::new("QA", "0")).unwrap();
+        let stop = AtomicBool::new(false);
+        let on = |s: Step, d: usize, _t: usize| if s == Step::Merge && d >= 1 { stop.store(true, Ordering::Relaxed) };
+        assert_eq!(import_resumable(&fb, &qa, false, "QA", &on, &stop).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        let p = pending_imports(&root);
+        assert_eq!((p.len(), p[0].step), (1, Step::Merge), "{p:?}");
+        // 반쯤 합친 상태 — 통합 결과를 지워 두면, 이어서 할 때 다시 만드는지 보인다
+        let _ = fs::remove_file(qa.join("integrated").join("integrated.json"));
+        let (_, r) = import_resumable(&fb, &qa, false, "QA", &no_step, &AtomicBool::new(false)).unwrap();
+        assert_eq!(r.added + r.updated + r.kept, 3, "{r:?}");
+        let s = Store::open(&qa).unwrap();
+        assert!(s.units().iter().all(|u| u.analyzed_at == 200), "모든 단위가 새 것으로");
+        assert!(s.read_integrated::<crate::integrate::Integrated>("integrated.json").is_some(), "통합을 다시 만든다");
+        assert!(pending_imports(&root).is_empty());
+
+        // 3) 버리기 · 원본이 바뀌면 이어서 할 수 없다
+        let stop = AtomicBool::new(true);
+        let _ = import_resumable(&fa, &root.join("NEW"), true, "NEW", &no_step, &stop);
+        let p = pending_imports(&root);
+        assert_eq!(p.len(), 1);
+        fs::write(&fa, b"changed").unwrap();
+        assert!(!pending_imports(&root)[0].resumable, "원본 파일이 바뀌었다");
+        discard_pending(&root, &p[0].id).unwrap();
+        assert!(pending_imports(&root).is_empty());
+        assert!(!fs::read_dir(&root).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".import-")));
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn import_reports_steps() {
+        let base = std::env::temp_dir().join(format!("sqls-bundle-steps-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let a = Store::open(base.join("A")).unwrap();
+        analyze(&a, "P", 100).await;
+        let fa = base.join("a.sqla");
+        export(&a, &fa, Manifest::new("QA", "0")).unwrap();
+        let b = Store::open(base.join("B")).unwrap();
+        analyze(&b, "R", 200).await;
+        let fb = base.join("b.sqla");
+        export(&b, &fb, Manifest::new("QA", "0")).unwrap();
+        let seen = std::sync::Mutex::new(Vec::<(Step, usize, usize)>::new());
+        let on = |s: Step, d: usize, t: usize| seen.lock().unwrap().push((s, d, t));
+        let steps = |v: &[(Step, usize, usize)]| {
+            let mut out: Vec<Step> = Vec::new();
+            for (s, _, _) in v {
+                if out.last() != Some(s) {
+                    out.push(*s);
+                }
+            }
+            out
+        };
+        // 빈 곳: 풀고 끝
+        let qa = base.join("QA");
+        import_to_with(&fa, &qa, false, &on).unwrap();
+        let v = std::mem::take(&mut *seen.lock().unwrap());
+        assert_eq!(steps(&v), vec![Step::Unzip, Step::Finish], "{v:?}");
+        let (_, d, t) = v.iter().rev().find(|x| x.0 == Step::Unzip).unwrap();
+        assert!(t > &0 && d == t, "푸는 항목 수가 끝까지: {v:?}");
+        // 결과가 있는 곳: 풀고 · 합치고 · 통합을 다시 만들고 · 끝
+        import_to_with(&fb, &qa, false, &on).unwrap();
+        let v = std::mem::take(&mut *seen.lock().unwrap());
+        assert_eq!(steps(&v), vec![Step::Unzip, Step::Merge, Step::Integrate, Step::Finish], "{v:?}");
+        assert!(v.iter().any(|x| x.0 == Step::Merge && x.2 == 1), "합칠 단위 수: {v:?}");
+        fs::remove_dir_all(&base).unwrap();
     }
 
     #[tokio::test]

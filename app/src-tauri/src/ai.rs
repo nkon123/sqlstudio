@@ -3,6 +3,7 @@
 //! 문맥(스키마, 실행계획)은 여기서 모은다. 화면이 조합하면 공급자마다 형식이 달라지고,
 //! 무엇이 밖으로 나가는지 한 곳에서 볼 수 없다.
 
+use sqls_core::sync::{MutexExt, RwLockExt};
 use serde::{Deserialize, Serialize};
 use sqls_core::meta;
 use sqls_llm::prompts::{self, Context, Task};
@@ -32,7 +33,7 @@ fn view(st: &AppState, p: &ProviderConfig) -> ProviderView {
     let has_key = match p.kind {
         sqls_llm::ProviderKind::Ollama => true,
         _ => {
-            st.api_keys.read().unwrap().contains_key(&p.name)
+            st.api_keys.rd().contains_key(&p.name)
                 || sqls_core::secret::get(&sqls_core::secret::llm_account(&p.name)).is_some()
                 || p.api_key_env
                     .as_deref()
@@ -49,7 +50,7 @@ fn view(st: &AppState, p: &ProviderConfig) -> ProviderView {
 
 #[tauri::command]
 pub fn list_providers(st: State<'_, AppState>) -> Vec<ProviderView> {
-    st.providers.read().unwrap().iter().map(|p| view(&st, p)).collect()
+    st.providers.rd().iter().map(|p| view(&st, p)).collect()
 }
 
 #[tauri::command]
@@ -58,7 +59,7 @@ pub fn save_provider(st: State<'_, AppState>, provider: ProviderConfig, original
         return Err(ErrView::msg("invalid", "이름과 모델은 비울 수 없습니다"));
     }
     {
-        let mut list = st.providers.write().unwrap();
+        let mut list = st.providers.wr();
         let key = original_name.unwrap_or_else(|| provider.name.clone());
         let mut provider = provider;
         // 동의 기록은 화면이 보낸 값을 믿지 않는다 — 원래 기록을 주소가 같을 때만 이어 간다
@@ -75,14 +76,14 @@ pub fn save_provider(st: State<'_, AppState>, provider: ProviderConfig, original
 #[tauri::command]
 pub fn delete_provider(st: State<'_, AppState>, name: String) -> R<()> {
     {
-        let mut list = st.providers.write().unwrap();
+        let mut list = st.providers.wr();
         let before = list.len();
         list.retain(|p| p.name != name);
         if list.len() == before {
             return Err(ErrView::msg("invalid", format!("AI 공급자가 없습니다: {name}")));
         }
     }
-    st.api_keys.write().unwrap().remove(&name);
+    st.api_keys.wr().remove(&name);
     sqls_core::secret::delete(&sqls_core::secret::llm_account(&name));
     st.save_config()
 }
@@ -100,7 +101,7 @@ pub async fn ai_list_models(st: State<'_, AppState>, provider: ProviderConfig) -
         .iter()
         .any(|s| s.name == p.name && s.kind == p.kind && s.base_url().trim_end_matches('/') == p.base_url().trim_end_matches('/'));
     if p.api_key.is_none() && same_server {
-        if let Some(k) = st.api_keys.read().unwrap().get(&p.name) {
+        if let Some(k) = st.api_keys.rd().get(&p.name) {
             p.api_key = Some(k.clone());
         } else if let Some(k) = sqls_core::secret::get(&sqls_core::secret::llm_account(&p.name)) {
             p.api_key = Some(k);
@@ -115,7 +116,7 @@ pub async fn ai_list_models(st: State<'_, AppState>, provider: ProviderConfig) -
 #[tauri::command]
 pub fn ai_ack_remote(st: State<'_, AppState>, provider: String) -> R<()> {
     {
-        let mut list = st.providers.write().unwrap();
+        let mut list = st.providers.wr();
         let p = list.iter_mut().find(|p| p.name == provider).ok_or_else(|| ErrView::msg("invalid", format!("AI 공급자가 없습니다: {provider}")))?;
         p.remote_ack = Some(p.base_url());
     }
@@ -126,7 +127,7 @@ pub fn ai_ack_remote(st: State<'_, AppState>, provider: String) -> R<()> {
 #[tauri::command]
 pub fn set_api_key(st: State<'_, AppState>, provider: String, key: String, remember: Option<bool>) -> R<()> {
     let account = sqls_core::secret::llm_account(&provider);
-    let mut keys = st.api_keys.write().unwrap();
+    let mut keys = st.api_keys.wr();
     if key.trim().is_empty() {
         keys.remove(&provider);
         sqls_core::secret::delete(&account);
@@ -148,7 +149,7 @@ pub(crate) fn provider(st: &AppState, name: &str) -> R<ProviderConfig> {
         .find(|p| p.name == name)
         .cloned()
         .ok_or_else(|| ErrView::msg("invalid", format!("AI 공급자가 없습니다: {name}")))?;
-    if let Some(k) = st.api_keys.read().unwrap().get(name) {
+    if let Some(k) = st.api_keys.rd().get(name) {
         p.api_key = Some(k.clone());
     } else if let Some(k) = sqls_core::secret::get(&sqls_core::secret::llm_account(name)) {
         p.api_key = Some(k);
@@ -261,7 +262,7 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
     let all = sqls_llm::guides::load(Some(&guides_file()));
     let major = ctx.server_version.as_deref().and_then(prompts::major_version);
     // 낱말로 고르고, 설정에 따라 AI 에게도 고르게 한다 (자동: 낱말로 약할 때만). 실패·시간 초과면 낱말만
-    let sel = st.cfg.read().unwrap().ai.clone();
+    let sel = st.cfg.rd().ai.clone();
     let route = match sel.guide_select.as_str() {
         "always" => true,
         "off" => false,
@@ -288,9 +289,9 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
                     r => r,
                 }
             });
-            st.ai_tasks.lock().unwrap().insert(args.request_id, task.abort_handle());
+            st.ai_tasks.lk().insert(args.request_id, task.abort_handle());
             let joined = task.await;
-            st.ai_tasks.lock().unwrap().remove(&args.request_id);
+            st.ai_tasks.lk().remove(&args.request_id);
             match joined {
                 Ok(Ok(Ok(r))) => ai_ids = sqls_llm::guides::parse_route(&r.text, &all),
                 Ok(Ok(Err(e))) => tracing::warn!("문법 카드 고르기 실패 — 낱말로 고른 것만 씁니다: {e}"),
@@ -330,9 +331,9 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
         })
         .await
     });
-    st.ai_tasks.lock().unwrap().insert(args.request_id, task.abort_handle());
+    st.ai_tasks.lk().insert(args.request_id, task.abort_handle());
     let joined = task.await;
-    st.ai_tasks.lock().unwrap().remove(&args.request_id);
+    st.ai_tasks.lk().remove(&args.request_id);
     let resp = match joined {
         Ok(r) => r?,
         Err(e) if e.is_cancelled() => return Err(ErrView::msg("cancelled", "AI 요청을 취소했습니다")),
@@ -388,7 +389,7 @@ pub fn ai_guides_edit() -> R<String> {
 /// AI 로 문법 카드 고르기 설정 (off · auto · always)
 #[tauri::command]
 pub fn ai_guide_select(st: State<'_, AppState>) -> String {
-    st.cfg.read().unwrap().ai.guide_select.clone()
+    st.cfg.rd().ai.guide_select.clone()
 }
 
 #[tauri::command]
@@ -396,7 +397,7 @@ pub fn set_ai_guide_select(st: State<'_, AppState>, mode: String) -> R<()> {
     if !matches!(mode.as_str(), "off" | "auto" | "always") {
         return Err(ErrView::msg("invalid", format!("알 수 없는 값: {mode}")));
     }
-    st.cfg.write().unwrap().ai.guide_select = mode;
+    st.cfg.wr().ai.guide_select = mode;
     st.save_config()
 }
 
@@ -450,7 +451,7 @@ pub fn ai_guides_customize(id: String) -> R<String> {
 
 #[tauri::command]
 pub fn ai_cancel(st: State<'_, AppState>, request_id: u64) {
-    if let Some(h) = st.ai_tasks.lock().unwrap().remove(&request_id) {
+    if let Some(h) = st.ai_tasks.lk().remove(&request_id) {
         h.abort();
     }
 }

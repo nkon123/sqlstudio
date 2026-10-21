@@ -4,6 +4,7 @@
 //! - 결과는 CLI 와 같은 폴더(설정 파일 옆 analysis/<프로필>)에 쌓인다 — 앱에서 시작하고 CLI 로 이어 가도 된다.
 //! - 모델에는 소스 텍스트만 간다. 외부 공급자면 화면이 먼저 확인을 받고 `allow_remote` 로 알려 준다.
 
+use sqls_core::sync::{MutexExt, RwLockExt};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -34,7 +35,7 @@ fn profile_of(st: &AppState, id: u64) -> R<String> {
 /// 접속 이름을 바꿔 결과 폴더를 못 찾으면, 옛 이름으로 남은 결과를 이어 붙인다 (이 접속의 결과가 없고, 옛 결과가 이 접속 계정의 것일 때만)
 fn adopt_old_results(st: &AppState, id: u64, profile: &str) {
     let Ok(owner) = session_user(st, id) else { return };
-    let names: Vec<String> = st.cfg.read().unwrap().connections.iter().map(|p| p.name.clone()).collect();
+    let names: Vec<String> = st.cfg.rd().connections.iter().map(|p| p.name.clone()).collect();
     if let Some(old) = sqls_analyze::adopt_renamed(profile, &names, &owner) {
         tracing::info!("분석 결과 '{old}' 를 '{profile}' 로 이어 붙임 (접속 이름이 바뀐 것으로 보임)");
     }
@@ -152,7 +153,7 @@ pub async fn analysis_start(
     let client = st.llm.clone();
     let run = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
     let cancel = Arc::new(AtomicBool::new(false));
-    st.analyses.lock().unwrap().insert(run, cancel.clone());
+    st.analyses.lk().insert(run, cancel.clone());
 
     tauri::async_runtime::spawn(async move {
         let emit = {
@@ -228,7 +229,7 @@ pub async fn analysis_start(
         };
         emit(fin);
         if let Some(st) = tauri::Manager::try_state::<AppState>(&app) {
-            st.analyses.lock().unwrap().remove(&run);
+            st.analyses.lk().remove(&run);
         }
     });
     Ok(run)
@@ -266,7 +267,7 @@ pub struct CodeRow {
 }
 
 fn session_user(st: &AppState, id: u64) -> R<String> {
-    let g = st.sessions.lock().unwrap();
+    let g = st.sessions.lk();
     g.get(&id).map(|s| s.session.info().user.clone()).ok_or_else(|| ErrView::msg("session_closed", "세션이 닫혀 있습니다"))
 }
 
@@ -357,7 +358,7 @@ pub async fn analysis_code_start(
     let client = st.llm.clone();
     let run = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
     let cancel = Arc::new(AtomicBool::new(false));
-    st.analyses.lock().unwrap().insert(run, cancel.clone());
+    st.analyses.lk().insert(run, cancel.clone());
     tauri::async_runtime::spawn(async move {
         let emit = {
             let app = app.clone();
@@ -410,7 +411,7 @@ pub async fn analysis_code_start(
         };
         emit(fin);
         if let Some(st) = tauri::Manager::try_state::<AppState>(&app) {
-            st.analyses.lock().unwrap().remove(&run);
+            st.analyses.lk().remove(&run);
         }
     });
     Ok(run)
@@ -419,7 +420,7 @@ pub async fn analysis_code_start(
 /// 멈춤 — 진행 중인 조각까지 저장하고 멈춘다
 #[tauri::command]
 pub fn analysis_cancel(st: State<'_, AppState>, run: u64) {
-    if let Some(c) = st.analyses.lock().unwrap().get(&run) {
+    if let Some(c) = st.analyses.lk().get(&run) {
         c.store(true, Ordering::Relaxed);
     }
 }
@@ -543,7 +544,7 @@ static STMTS: std::sync::Mutex<Option<(std::path::PathBuf, std::time::SystemTime
 
 fn statements(path: &std::path::Path) -> Option<Stmts> {
     let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
-    if let Some((p, t, v)) = STMTS.lock().unwrap().as_ref() {
+    if let Some((p, t, v)) = STMTS.lk().as_ref() {
         if p == path && *t == mtime {
             return Some(v.clone());
         }
@@ -551,7 +552,7 @@ fn statements(path: &std::path::Path) -> Option<Stmts> {
     let f = std::fs::File::open(path).ok()?;
     let v: Vec<sqls_analyze::colwrite::StmtLite> = serde_json::from_reader(std::io::BufReader::new(f)).ok()?;
     let v = Arc::new(v);
-    *STMTS.lock().unwrap() = Some((path.to_path_buf(), mtime, v.clone()));
+    *STMTS.lk() = Some((path.to_path_buf(), mtime, v.clone()));
     Some(v)
 }
 
@@ -680,7 +681,7 @@ pub fn analysis_peek(st: State<'_, AppState>, path: String) -> R<ImportPeek> {
         bundle::import_log(dir).iter().rev().find(|l| l.profile == m.profile && l.exported_at == m.exported_at).map(|l| l.imported_at)
     };
     let mut targets = Vec::new();
-    for p in st.cfg.read().unwrap().connections.iter() {
+    for p in st.cfg.rd().connections.iter() {
         let dir = sqls_analyze::default_dir(&p.name);
         let units = sets.iter().find(|x| std::path::Path::new(&x.dir) == dir).map(|x| x.units).unwrap_or(0);
         let same_db = match &m.db_user {
@@ -720,7 +721,7 @@ pub struct ImportDone {
 #[tauri::command]
 pub fn analysis_import(st: State<'_, AppState>, path: String, target: String) -> R<ImportDone> {
     let target = target.trim().to_string();
-    let connection = st.cfg.read().unwrap().connections.iter().any(|p| p.name == target);
+    let connection = st.cfg.rd().connections.iter().any(|p| p.name == target);
     let (name, dest) = if connection {
         (target.clone(), sqls_analyze::default_dir(&target))
     } else {
@@ -736,7 +737,7 @@ pub fn analysis_import(st: State<'_, AppState>, path: String, target: String) ->
 /// 따로 둔 결과는 그대로 둔다 (지우는 것은 화면이 묻고 따로)
 #[tauri::command]
 pub fn analysis_merge_set(st: State<'_, AppState>, set: String, into: String) -> R<bundle::MergeReport> {
-    if !st.cfg.read().unwrap().connections.iter().any(|p| p.name == into) {
+    if !st.cfg.rd().connections.iter().any(|p| p.name == into) {
         return Err(ErrView::msg("invalid", format!("'{into}' 접속이 없습니다")));
     }
     let from = set_dir(&set)?;

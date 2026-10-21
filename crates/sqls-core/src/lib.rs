@@ -25,6 +25,7 @@ pub mod space;
 pub mod browse;
 pub mod schemacmp;
 pub mod sql;
+pub mod sync;
 pub mod tns;
 
 pub use error::{Error, ErrorInfo, Result};

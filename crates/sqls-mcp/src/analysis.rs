@@ -2,6 +2,7 @@
 //!
 //! AI 가 "ORDERS 를 바꾸는 시작점은?", "C_REPORT 커서는 무엇을 하나?" 같은 질문에 소스를 다시 읽지 않고 답하게 한다.
 
+use sqls_core::sync::MutexExt;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -21,7 +22,7 @@ impl Cache {
     pub fn integrated(&self, dir: &Path) -> Result<Arc<Integrated>, String> {
         let p = dir.join("integrated").join("integrated.json");
         let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).map_err(|_| no_analysis(dir))?;
-        if let Some((t, g)) = self.inner.lock().unwrap().get(dir) {
+        if let Some((t, g)) = self.inner.lk().get(dir) {
             if *t == mtime {
                 return Ok(g.clone());
             }
@@ -29,7 +30,7 @@ impl Cache {
         let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
         let g: Integrated = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))?;
         let g = Arc::new(g);
-        self.inner.lock().unwrap().insert(dir.to_path_buf(), (mtime, g.clone()));
+        self.inner.lk().insert(dir.to_path_buf(), (mtime, g.clone()));
         Ok(g)
     }
 }

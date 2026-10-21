@@ -1,5 +1,6 @@
 //! 앱 상태 — 설정, 열린 세션, 진행 중인 AI 요청.
 
+use sqls_core::sync::{MutexExt, RwLockExt};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -49,7 +50,7 @@ impl AppState {
             // 설정이 깨져도 앱은 뜬다 — 화면에 오류를 보여 주고 고치게 한다
             Err(e) => (Config::default(), Some(e.to_string())),
         };
-        if let Err(e) = sqls_core::session::init_client(cfg.oracle.client_lib_dir.clone(), cfg.oracle.tns_admin.clone()) {
+        if let Err(e) = sqls_core::session::init_client(cfg.oracle.client_dir(), cfg.oracle.tns_dir()) {
             tracing::error!("Oracle Client 초기화 실패: {e}");
         }
         let providers = providers_from(&cfg);
@@ -73,7 +74,7 @@ impl AppState {
     }
 
     pub fn session(&self, id: u64) -> Result<(Session, Arc<AtomicBool>, Arc<AtomicBool>), ErrView> {
-        let map = self.sessions.lock().unwrap();
+        let map = self.sessions.lk();
         let s = map.get(&id).ok_or_else(|| ErrView::msg("session_closed", "세션이 닫혀 있습니다"))?;
         Ok((s.session.clone(), s.txn_pending.clone(), s.stop_script.clone()))
     }
@@ -83,14 +84,14 @@ impl AppState {
     }
 
     pub fn close_all(&self) {
-        let mut map = self.sessions.lock().unwrap();
+        let mut map = self.sessions.lk();
         for (_, s) in map.drain() {
             s.session.close();
         }
     }
 
     pub fn save_config(&self) -> Result<(), ErrView> {
-        let mut cfg = self.cfg.write().unwrap();
+        let mut cfg = self.cfg.wr();
         cfg.llm_providers = self
             .providers
             .read()

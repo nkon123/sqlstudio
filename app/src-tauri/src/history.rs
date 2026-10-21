@@ -5,6 +5,7 @@
 //! - 바인드 변수 값은 남기지 않는다. 설정에서 끄거나 지울 수 있다.
 //! - keep_months 보다 오래된 달 파일은 시작할 때 지운다.
 
+use sqls_core::sync::MutexExt;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -108,7 +109,7 @@ impl History {
             }
             e.sql.truncate(cut);
         }
-        if let Some(tx) = self.tx.lock().unwrap().as_ref() {
+        if let Some(tx) = self.tx.lk().as_ref() {
             let _ = tx.send(e);
         }
     }

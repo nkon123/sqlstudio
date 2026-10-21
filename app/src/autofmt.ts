@@ -37,6 +37,12 @@ export function caseWordBefore(view: EditorView, pos: number, next: string) {
   view.dispatch({ changes: { from, to: pos, insert: want }, userEvent: "input.case" });
 }
 
+/** 정리할 범위의 시작 — 그 줄에서 앞에 공백만 있으면 줄 처음부터 (첫 줄 들여쓰기도 같이 정리되게) */
+export function fromLineStart(state: EditorState, pos: number): number {
+  const line = state.doc.lineAt(pos);
+  return line.text.slice(0, pos - line.from).trim() === "" ? line.from : pos;
+}
+
 /** 문자열·주석 밖의 마지막 ; 위치 (없으면 -1) */
 function lastSemicolon(s: string): number {
   let last = -1;
@@ -73,8 +79,10 @@ function formatOnSemicolon(view: EditorView, from: number, to: number): boolean 
   const semi = lastSemicolon(region);
   if (semi >= 0) start += semi + 1;
   while (start < from && /\s/.test(st.sliceDoc(start, start + 1))) start++;
-  // 줄 처음에서 시작하는 문장만 (PL/SQL 안의 들여 쓴 문장 등은 그대로)
-  if (st.doc.lineAt(start).from !== start) return false;
+  // 줄에서 앞에 다른 글이 없는 문장만 — 첫 글자 앞 공백(들여쓰기)도 같이 정리한다
+  const lineFrom = fromLineStart(st, start);
+  if (lineFrom === start && st.doc.lineAt(start).from !== start) return false;
+  start = lineFrom;
   const text = st.sliceDoc(start, from) + ";";
   if (!startsWithDml(text)) return false;
   const r = formatSql(text);

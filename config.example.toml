@@ -3,7 +3,10 @@
 
 [oracle]
 # Instant Client 폴더. 비우면 PATH 에서 찾는다. 11g 서버에는 클라이언트가 꼭 필요하다 (19c 권장).
+# 상대 경로는 sqlstudio.exe 가 있는 폴더 기준이다 — 포터블이면 'instantclient_19_25' 처럼 써 두면 폴더째 옮겨도 그대로 된다.
 client_lib_dir = 'C:\oracle\instantclient_19_25'
+# tnsnames.ora 가 있는 폴더 (비우면 TNS_ADMIN·ORACLE_HOME·Instant Client 폴더에서 찾는다). 상대 경로도 된다.
+# tns_admin = 'instantclient_19_25\network\admin'
 
 [[connection]]
 name = "ERP-DEV"

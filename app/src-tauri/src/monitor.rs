@@ -1,5 +1,6 @@
 //! 세션·락 모니터 명령. 조회는 프로필의 메타 세션(읽기 전용), 종료는 사람이 확인한 뒤 잠깐 쓰는 별도 세션으로.
 
+use sqls_core::sync::MutexExt;
 use serde::Serialize;
 use sqls_core::monitor::{self, SessionDetail, SessionRow, Wait};
 use tauri::State;
@@ -42,7 +43,7 @@ pub async fn monitor_detail(st: State<'_, AppState>, id: u64, sid: i64) -> R<Ses
 /// 세션 종료 — 화면이 확인을 받은 뒤 부른다
 #[tauri::command]
 pub async fn monitor_kill(st: State<'_, AppState>, id: u64, sid: i64, serial: i64, immediate: bool) -> R<String> {
-    let profile = st.sessions.lock().unwrap().get(&id).map(|s| s.profile.clone()).unwrap_or_default();
+    let profile = st.sessions.lk().get(&id).map(|s| s.profile.clone()).unwrap_or_default();
     let p = st
         .cfg
         .read()

@@ -5,6 +5,7 @@
 //! - 결과(양쪽 구조·다른 소스)는 메모리에 두고, 화면이 닫거나 새로 비교하면 버린다.
 //! - 스크립트는 실행하지 않고 문자열로 돌려준다 (화면이 새 탭으로 연다).
 
+use sqls_core::sync::{MutexExt, RwLockExt};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -82,15 +83,15 @@ pub async fn schema_compare_start(
     name_like: Option<String>,
     password: Option<String>,
 ) -> R<u64> {
-    let src_profile = st.sessions.lock().unwrap().get(&id).map(|s| s.profile.clone()).ok_or_else(|| ErrView::msg("session_closed", "원본 탭이 접속되어 있지 않습니다"))?;
+    let src_profile = st.sessions.lk().get(&id).map(|s| s.profile.clone()).ok_or_else(|| ErrView::msg("session_closed", "원본 탭이 접속되어 있지 않습니다"))?;
     let (sp, tp) = {
-        let cfg = st.cfg.read().unwrap();
+        let cfg = st.cfg.rd();
         (
             cfg.profile(&src_profile).cloned().ok_or_else(|| ErrView::msg("invalid", format!("접속 프로필이 없습니다: {src_profile}")))?,
             cfg.profile(&target).cloned().ok_or_else(|| ErrView::msg("invalid", format!("접속 프로필이 없습니다: {target}")))?,
         )
     };
-    let pw_of = |p: &sqls_core::config::Profile| st.passwords.read().unwrap().get(&p.name.to_uppercase()).cloned().or_else(|| p.stored_password());
+    let pw_of = |p: &sqls_core::config::Profile| st.passwords.rd().get(&p.name.to_uppercase()).cloned().or_else(|| p.stored_password());
     let spw = pw_of(&sp).ok_or_else(|| ErrView::msg("invalid", "원본 비밀번호를 모릅니다 — 탭을 다시 접속하세요"))?;
     let typed = password.filter(|p| !p.is_empty());
     let tpw = typed.clone().or_else(|| pw_of(&tp)).ok_or_else(|| ErrView::msg("password_required", format!("{} 비밀번호를 입력하세요", tp.name)))?;
@@ -109,7 +110,7 @@ pub async fn schema_compare_start(
         }
     };
     if typed.is_some() {
-        st.passwords.write().unwrap().insert(tp.name.to_uppercase(), tpw);
+        st.passwords.wr().insert(tp.name.to_uppercase(), tpw);
     }
     let src_owner = src_schema.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| a.info().user.clone()).to_uppercase();
     let tgt_owner = tgt_schema.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| b.info().user.clone()).to_uppercase();
@@ -120,7 +121,7 @@ pub async fn schema_compare_start(
     let cancel = Arc::new(AtomicBool::new(false));
     let r = Arc::new(Run { cancel: cancel.clone(), finished: AtomicBool::new(false), done: Mutex::new(None) });
     {
-        let mut m = runs().lock().unwrap();
+        let mut m = runs().lk();
         m.clear(); // 앞의 결과는 버린다 (메모리)
         m.insert(run, r.clone());
     }
@@ -177,7 +178,7 @@ pub async fn schema_compare_start(
                 let ms = started.elapsed().as_millis() as u64;
                 tracing::info!("스키마 비교 #{run}: {}ms, 대상에 없음 {} · 다름 {} · 대상에만 {}", ms, counts.0, counts.1, counts.2);
                 let items = d.items.clone();
-                *r.done.lock().unwrap() = Some(d);
+                *r.done.lk() = Some(d);
                 emit(Progress::Done { run, items, src: src_label, tgt: tgt_label, ms, counts });
             }
             Err(e) => {
@@ -192,7 +193,7 @@ pub async fn schema_compare_start(
 
 #[tauri::command]
 pub fn schema_compare_cancel(run: u64) {
-    if let Some(r) = runs().lock().unwrap().get(&run) {
+    if let Some(r) = runs().lk().get(&run) {
         r.cancel.store(true, Ordering::Relaxed);
     }
 }
@@ -206,8 +207,8 @@ pub struct Detail {
 }
 
 fn with_done<T>(run: u64, f: impl FnOnce(&Done) -> T) -> R<T> {
-    let r = runs().lock().unwrap().get(&run).cloned().ok_or_else(|| ErrView::msg("invalid", "비교 결과가 없습니다 — 다시 비교하세요"))?;
-    let d = r.done.lock().unwrap();
+    let r = runs().lk().get(&run).cloned().ok_or_else(|| ErrView::msg("invalid", "비교 결과가 없습니다 — 다시 비교하세요"))?;
+    let d = r.done.lk();
     let d = d.as_ref().ok_or_else(|| ErrView::msg("invalid", "비교가 아직 끝나지 않았습니다"))?;
     Ok(f(d))
 }
@@ -239,7 +240,7 @@ pub fn schema_compare_script(run: u64, keys: Vec<String>) -> R<String> {
 /// 화면을 닫으면 결과를 버린다
 #[tauri::command]
 pub fn schema_compare_close(run: u64) {
-    if let Some(r) = runs().lock().unwrap().remove(&run) {
+    if let Some(r) = runs().lk().remove(&run) {
         r.cancel.store(true, Ordering::Relaxed);
     }
 }

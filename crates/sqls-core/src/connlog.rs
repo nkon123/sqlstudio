@@ -4,6 +4,7 @@
 //! (쉬는 동안 끊기는지, 실행 중 끊기는지, 서버가 죽이는지, 접속이 거부되는지).
 //! 앱이 [`init`] 하지 않으면(CLI·MCP) 아무것도 쓰지 않는다.
 
+use crate::sync::MutexExt;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -61,7 +62,7 @@ pub fn init(path: PathBuf) {
 }
 
 pub fn path() -> Option<PathBuf> {
-    SINK.get().map(|m| m.lock().unwrap().clone())
+    SINK.get().map(|m| m.lk().clone())
 }
 
 pub fn record(mut e: Ev) {
@@ -70,7 +71,7 @@ pub fn record(mut e: Ev) {
         e.t = now();
     }
     e.msg = e.msg.chars().take(300).collect();
-    let p = sink.lock().unwrap();
+    let p = sink.lk();
     if std::fs::metadata(&*p).map(|m| m.len() > MAX_BYTES).unwrap_or(false) {
         let _ = std::fs::rename(&*p, p.with_extension("1.jsonl"));
     }

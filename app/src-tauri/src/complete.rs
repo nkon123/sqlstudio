@@ -10,6 +10,7 @@
 //! 메타 세션이 끊기면(방화벽 유휴 끊기, DB 재시작) 알아채는 대로 뒤에서 다시 접속한다.
 //! 캐시는 그대로 두므로 자동완성은 끊긴 동안에도 있는 것으로 계속 답한다.
 
+use sqls_core::sync::{MutexExt, RwLockExt};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -57,15 +58,15 @@ pub struct MetaHub {
 
 impl MetaHub {
     fn set_phase(&self, phase: &'static str, error: Option<String>) {
-        let (objects, columns) = self.cache.read().unwrap().stats();
+        let (objects, columns) = self.cache.rd().stats();
         let st = HubStatus { profile: self.profile.clone(), phase, objects, columns, error };
-        *self.status.lock().unwrap() = st.clone();
+        *self.status.lk() = st.clone();
         let _ = self.app.emit("completion-status", st);
     }
 
     /// 읽기 전용 메타 세션 (사전 조회용). 아직 접속 중이거나 끊겼으면 None — 끊겼으면 뒤에서 다시 접속을 시작한다
     pub fn session(self: &Arc<Self>) -> Option<Session> {
-        let cur = self.session.read().unwrap().clone();
+        let cur = self.session.rd().clone();
         match cur {
             Some(s) if !s.is_lost() => Some(s),
             _ => {
@@ -79,7 +80,7 @@ impl MetaHub {
 
     /// 뒤에서 다시 접속 (방금 실패했으면 잠시 쉬었다가)
     fn kick(self: &Arc<Self>) {
-        if self.last_try.lock().unwrap().is_some_and(|t| t.elapsed() < RETRY_GAP) {
+        if self.last_try.lk().is_some_and(|t| t.elapsed() < RETRY_GAP) {
             return;
         }
         let hub = self.clone();
@@ -91,7 +92,7 @@ impl MetaHub {
     /// 세션을 쓰기 시작한다 — 끊김 신호를 지켜보다가 다시 접속한다
     fn install(self: &Arc<Self>, s: Session) {
         let mut lost = s.lost_signal();
-        *self.session.write().unwrap() = Some(s);
+        *self.session.wr() = Some(s);
         let hub = self.clone();
         tauri::async_runtime::spawn(async move {
             if lost.wait_for(|v| *v).await.is_ok() {
@@ -104,18 +105,18 @@ impl MetaHub {
     /// 끊긴 메타 세션을 새로 연다. 이미 누가 열었으면 그것을 돌려준다. 몇 번 해 보고 안 되면 None
     pub async fn reconnect(self: &Arc<Self>) -> Option<Session> {
         let _g = self.reconnecting.lock().await;
-        if let Some(s) = self.session.read().unwrap().clone().filter(|s| !s.is_lost()) {
+        if let Some(s) = self.session.rd().clone().filter(|s| !s.is_lost()) {
             return Some(s);
         }
-        if let Some(old) = self.session.write().unwrap().take() {
+        if let Some(old) = self.session.wr().take() {
             old.abandon();
         }
-        let had_cache = self.cache.read().unwrap().stats().0 > 0;
+        let had_cache = self.cache.rd().stats().0 > 0;
         self.set_phase("reconnecting", None);
         let mut last_err = String::new();
         for wait in [0u64, 2, 5] {
             tokio::time::sleep(Duration::from_secs(wait)).await;
-            *self.last_try.lock().unwrap() = Some(std::time::Instant::now());
+            *self.last_try.lk() = Some(std::time::Instant::now());
             match tokio::time::timeout(Duration::from_secs(45), Session::connect(self.spec.clone())).await {
                 Ok(Ok(s)) => {
                     tracing::info!("{}: 메타 세션 다시 접속", self.profile);
@@ -151,7 +152,7 @@ impl MetaHub {
                 return None;
             }
             let phase = self.status().phase;
-            if phase == "error" && self.last_try.lock().unwrap().is_some_and(|t| t.elapsed() < RETRY_GAP) {
+            if phase == "error" && self.last_try.lk().is_some_and(|t| t.elapsed() < RETRY_GAP) {
                 return None;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -159,7 +160,7 @@ impl MetaHub {
     }
 
     pub fn status(&self) -> HubStatus {
-        self.status.lock().unwrap().clone()
+        self.status.lk().clone()
     }
 
     async fn load(self: &Arc<Self>, progressive: bool) {
@@ -185,12 +186,12 @@ impl MetaHub {
     /// DDL 뒤에 다시 읽는다. 몰아서 한 번만 (연속 DDL 스크립트).
     /// 기억해 둔 구조 (10분 안의 것)
     pub fn cached_describe(&self, name: &str) -> Option<sqls_core::meta::TableDesc> {
-        let m = self.describes.lock().unwrap();
+        let m = self.describes.lk();
         m.get(&name.to_uppercase()).filter(|(t, _)| t.elapsed() < Duration::from_secs(600)).map(|(_, d)| d.clone())
     }
 
     pub fn remember_describe(&self, name: &str, d: &sqls_core::meta::TableDesc) {
-        let mut m = self.describes.lock().unwrap();
+        let mut m = self.describes.lk();
         if m.len() > 500 {
             m.clear();
         }
@@ -200,7 +201,7 @@ impl MetaHub {
     }
 
     pub fn schedule_reload(self: &Arc<Self>) {
-        self.describes.lock().unwrap().clear();
+        self.describes.lk().clear();
         if self.reload_pending.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -216,7 +217,7 @@ impl MetaHub {
 /// 프로필의 허브를 돌려준다. 처음이면 메타 세션을 열고 백그라운드로 적재를 시작한다.
 pub fn ensure_hub(st: &AppState, app: &AppHandle, profile: &Profile, password: &str) -> Arc<MetaHub> {
     let key = profile.name.to_uppercase();
-    let mut hubs = st.hubs.lock().unwrap();
+    let mut hubs = st.hubs.lk();
     if let Some(h) = hubs.get(&key) {
         if h.status().phase != "error" {
             return h.clone();
@@ -249,7 +250,7 @@ pub fn ensure_hub(st: &AppState, app: &AppHandle, profile: &Profile, password: &
     hubs.insert(key, hub.clone());
     let h = hub.clone();
     tauri::async_runtime::spawn(async move {
-        *h.last_try.lock().unwrap() = Some(std::time::Instant::now());
+        *h.last_try.lk() = Some(std::time::Instant::now());
         match Session::connect(spec).await {
             Ok(s) => {
                 h.install(s);
@@ -266,7 +267,7 @@ pub fn ensure_hub(st: &AppState, app: &AppHandle, profile: &Profile, password: &
 
 pub(crate) fn hub_for(st: &AppState, id: u64) -> Result<Arc<MetaHub>, ErrView> {
     let profile = {
-        let map = st.sessions.lock().unwrap();
+        let map = st.sessions.lk();
         map.get(&id)
             .map(|s| s.profile.to_uppercase())
             .ok_or_else(|| ErrView::msg("session_closed", "세션이 닫혀 있습니다"))?
@@ -287,7 +288,7 @@ pub async fn complete(st: State<'_, AppState>, id: u64, text: String, cursor: us
     let mut last = None;
     for _ in 0..3 {
         let c = {
-            let cache = hub.cache.read().unwrap();
+            let cache = hub.cache.rd();
             complete::complete(&text, cursor, &cache, LIMIT)
         };
         if c.missing.is_empty() {
@@ -296,7 +297,7 @@ pub async fn complete(st: State<'_, AppState>, id: u64, text: String, cursor: us
         let Some(s) = hub.session() else { return Ok(c) };
         // 이미 채우는 중인 것은 다시 묻지 않는다
         let todo: Vec<Missing> = {
-            let mut inflight = hub.inflight.lock().unwrap();
+            let mut inflight = hub.inflight.lk();
             c.missing.iter().filter(|m| inflight.insert((*m).clone())).take(3).cloned().collect()
         };
         if todo.is_empty() {
@@ -307,14 +308,14 @@ pub async fn complete(st: State<'_, AppState>, id: u64, text: String, cursor: us
             for m in &todo {
                 match load::fill(&s, m).await {
                     Ok(fills) => {
-                        let mut cache = h.cache.write().unwrap();
+                        let mut cache = h.cache.wr();
                         for f in fills {
                             cache.apply(f);
                         }
                     }
                     Err(e) => tracing::debug!("자동완성 채우기 실패 {m:?}: {e}"),
                 }
-                h.inflight.lock().unwrap().remove(m);
+                h.inflight.lk().remove(m);
             }
         });
         // 늦으면 있는 것으로 먼저 답한다 — 채우기는 뒤에서 계속된다
@@ -330,14 +331,14 @@ pub async fn complete(st: State<'_, AppState>, id: u64, text: String, cursor: us
 #[tauri::command]
 pub fn column_notes(st: State<'_, AppState>, id: u64, sql: String) -> Result<std::collections::BTreeMap<String, String>, ErrView> {
     let hub = hub_for(&st, id)?;
-    let cache = hub.cache.read().unwrap();
+    let cache = hub.cache.rd();
     Ok(complete::column_notes(&sql, &cache))
 }
 
 /// 결과 열이 만들어진 길 (테이블.열까지). 캐시로 풀고, 모자라면 메타 세션으로 그 테이블들의 열을 채워 한 번 더 (우클릭할 때만)
 pub async fn column_lineage(st: &AppState, id: u64, sql: &str, pos: Option<usize>, name: &str) -> Result<complete::Lineage, ErrView> {
     let hub = hub_for(st, id)?;
-    let (first, missing) = complete::column_lineage(sql, pos, name, &hub.cache.read().unwrap());
+    let (first, missing) = complete::column_lineage(sql, pos, name, &hub.cache.rd());
     if missing.is_empty() {
         return Ok(first);
     }
@@ -352,7 +353,7 @@ pub async fn column_lineage(st: &AppState, id: u64, sql: &str, pos: Option<usize
     let fill = async {
         for m in &todo {
             if let Ok(fills) = load::fill(&s, m).await {
-                let mut cache = hub.cache.write().unwrap();
+                let mut cache = hub.cache.wr();
                 for f in fills {
                     cache.apply(f);
                 }
@@ -362,7 +363,7 @@ pub async fn column_lineage(st: &AppState, id: u64, sql: &str, pos: Option<usize
     if tokio::time::timeout(Duration::from_secs(5), fill).await.is_err() {
         tracing::debug!("열 출처: 열 채우기가 늦어 있는 것으로 답함");
     }
-    let (again, _) = complete::column_lineage(sql, pos, name, &hub.cache.read().unwrap());
+    let (again, _) = complete::column_lineage(sql, pos, name, &hub.cache.rd());
     Ok(again)
 }
 

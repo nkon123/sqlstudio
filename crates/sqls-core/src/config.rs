@@ -82,11 +82,75 @@ fn default_keep_months() -> u32 {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OracleConfig {
-    /// Instant Client 폴더. 비우면 PATH 에서 찾는다.
+    /// Instant Client 폴더. 비우면 PATH 에서 찾는다. 상대 경로는 실행 파일 폴더 기준 ([`resolve_path`])
     pub client_lib_dir: Option<PathBuf>,
-    /// tnsnames.ora·sqlnet.ora 가 있는 폴더 (TNS_ADMIN 과 같음). 비우면 Oracle Client 기본 위치
+    /// tnsnames.ora·sqlnet.ora 가 있는 폴더 (TNS_ADMIN 과 같음). 비우면 Oracle Client 기본 위치. 상대 경로는 실행 파일 폴더 기준
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tns_admin: Option<PathBuf>,
+}
+
+impl OracleConfig {
+    /// 실제로 쓸 Instant Client 폴더 (상대 경로를 풀어서)
+    pub fn client_dir(&self) -> Option<PathBuf> {
+        self.client_lib_dir.as_deref().map(resolve_path)
+    }
+    /// 실제로 쓸 TNS 폴더 (상대 경로를 풀어서)
+    pub fn tns_dir(&self) -> Option<PathBuf> {
+        self.tns_admin.as_deref().map(resolve_path)
+    }
+}
+
+/// 설정에 적힌 경로 — 상대 경로면 실행 파일 폴더 기준으로 푼다 (포터블 폴더째 옮겨도 그대로 쓰게).
+/// `.\instantclient_19_25`, `..\oracle\network\admin` 처럼 쓴다
+pub fn resolve_path(p: &std::path::Path) -> PathBuf {
+    if p.is_absolute() || p.as_os_str().is_empty() {
+        return p.to_path_buf();
+    }
+    match exe_dir() {
+        Some(d) => normalize(&d.join(p)),
+        None => p.to_path_buf(),
+    }
+}
+
+/// `.`·`..` 를 접어 보기 좋은 경로로 (디스크에 묻지 않는다)
+fn normalize(p: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// 저장할 경로 — 실행 파일 폴더 안이면 그 기준 상대 경로로 (대소문자·구분자 차이는 무시). 밖이면 그대로
+pub fn relative_to_app(p: &std::path::Path) -> PathBuf {
+    match exe_dir() {
+        Some(d) => relative_in(p, &d),
+        None => p.to_path_buf(),
+    }
+}
+
+fn relative_in(p: &std::path::Path, base: &std::path::Path) -> PathBuf {
+    let key = |c: std::path::Component| c.as_os_str().to_string_lossy().to_lowercase();
+    let pc: Vec<_> = p.components().collect();
+    let bc: Vec<_> = base.components().collect();
+    if !p.is_absolute() || pc.len() < bc.len() || !bc.iter().zip(&pc).all(|(a, b)| key(*a) == key(*b)) {
+        return p.to_path_buf();
+    }
+    let rest: PathBuf = pc[bc.len()..].iter().collect();
+    if rest.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        rest
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,6 +425,27 @@ mod tests {
         std::fs::write(dir.join("instantclient_19_25").join(lib), "").unwrap();
         assert_eq!(client_dir_in(&dir), Some(dir.join("instantclient_19_25")));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn relative_paths() {
+        let base = std::path::Path::new(r"C:\Tools\SQLStudio");
+        // 안이면 상대로 (대소문자 무시), 밖이면 그대로, 같은 폴더면 "."
+        assert_eq!(relative_in(std::path::Path::new(r"c:\tools\sqlstudio\instantclient_19_25"), base), PathBuf::from("instantclient_19_25"));
+        assert_eq!(relative_in(std::path::Path::new(r"C:\Tools\SQLStudio\ic\network\admin"), base), PathBuf::from(r"ic\network\admin"));
+        assert_eq!(relative_in(std::path::Path::new(r"D:\oracle\admin"), base), PathBuf::from(r"D:\oracle\admin"));
+        assert_eq!(relative_in(std::path::Path::new(r"C:\Tools\SQLStudio2\x"), base), PathBuf::from(r"C:\Tools\SQLStudio2\x"));
+        assert_eq!(relative_in(base, base), PathBuf::from("."));
+        assert_eq!(relative_in(std::path::Path::new("already_relative"), base), PathBuf::from("already_relative"));
+        // 상대 경로는 실행 파일 폴더 기준으로 풀린다
+        let exe = exe_dir().unwrap();
+        assert_eq!(resolve_path(std::path::Path::new(r".\ic")), exe.join("ic"));
+        assert_eq!(resolve_path(std::path::Path::new(r"..\oracle\admin")), exe.parent().unwrap().join("oracle").join("admin"));
+        assert_eq!(resolve_path(std::path::Path::new(r"D:\abs")), PathBuf::from(r"D:\abs"));
+        let o = OracleConfig { client_lib_dir: Some("instantclient_19_25".into()), tns_admin: None };
+        assert_eq!(o.client_dir(), Some(exe.join("instantclient_19_25")));
+        assert_eq!(o.tns_dir(), None);
     }
 
     #[test]

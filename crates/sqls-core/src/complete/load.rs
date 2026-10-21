@@ -4,6 +4,7 @@
 //! 다른 스키마·공개 동의어 대상은 처음 쓸 때 그것만 읽는다.
 //! USER_* / ALL_* 뷰만 쓰고, 11g 에 있는 컬럼만 쓴다.
 
+use crate::sync::RwLockExt;
 use std::time::Instant;
 
 use super::{ColInfo, ForeignKey, Missing, ObjInfo, ObjKind, SchemaCache};
@@ -48,7 +49,7 @@ pub async fn load_user_schema(
     let user = c.user.clone();
     let publish = |c: &SchemaCache, phase: Phase, on_phase: &mut dyn FnMut(Phase)| {
         if progressive || phase == Phase::Done {
-            *target.write().unwrap() = c.clone();
+            *target.wr() = c.clone();
         }
         on_phase(phase);
     };

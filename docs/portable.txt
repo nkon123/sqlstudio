@@ -19,6 +19,8 @@
      예) SQLStudio\instantclient_19_25\oci.dll
      설정에 경로가 없으면 이 폴더를 자동으로 찾습니다. PATH 에 이미 있으면 넣지 않아도 됩니다.
      tnsnames.ora 는 instantclient_19_25\network\admin 에 두거나 설정에서 TNS 폴더를 지정합니다.
+     config.toml 의 경로(client_lib_dir, tns_admin)는 상대 경로로 써도 됩니다 — 이 폴더 기준.
+     설정 화면에서 이 폴더 안의 폴더를 고르면 상대 경로로 저장되어, 폴더째 옮겨도 그대로 씁니다.
   3. sqlstudio.exe 를 실행합니다.
 
 참고

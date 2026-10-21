@@ -1,5 +1,6 @@
 //! DB 명령 — 접속, 실행, 스크립트, 사전 조회.
 
+use sqls_core::sync::{MutexExt, RwLockExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -207,7 +208,7 @@ pub fn save_profile(st: State<'_, AppState>, profile: Profile, original_name: Op
         return Err(ErrView::msg("invalid", "이름, 사용자, 접속 문자열은 비울 수 없습니다"));
     }
     {
-        let mut cfg = st.cfg.write().unwrap();
+        let mut cfg = st.cfg.wr();
         let key = original_name.unwrap_or_else(|| profile.name.clone());
         if !key.eq_ignore_ascii_case(&profile.name) && cfg.profile(&profile.name).is_some() {
             return Err(ErrView::msg("invalid", format!("같은 이름의 접속이 있습니다: {}", profile.name)));
@@ -237,7 +238,7 @@ pub fn save_profile(st: State<'_, AppState>, profile: Profile, original_name: Op
 #[tauri::command]
 pub fn delete_profile(st: State<'_, AppState>, name: String) -> R<()> {
     {
-        let mut cfg = st.cfg.write().unwrap();
+        let mut cfg = st.cfg.wr();
         cfg.connections.retain(|p| !p.name.eq_ignore_ascii_case(&name));
         cfg.mcp.allowed_connections.retain(|n| !n.eq_ignore_ascii_case(&name));
     }
@@ -279,7 +280,7 @@ pub async fn connect(
     let typed = password.filter(|s| !s.is_empty());
     let pw = typed
         .clone()
-        .or_else(|| st.passwords.read().unwrap().get(&key).cloned())
+        .or_else(|| st.passwords.rd().get(&key).cloned())
         .or_else(|| p.stored_password())
         .ok_or_else(|| ErrView::msg("password_required", "비밀번호를 입력하세요"))?;
     let account = sqls_core::secret::db_account(&p.name);
@@ -290,7 +291,7 @@ pub async fn connect(
         Err(e) => {
             // 기억해 둔 비밀번호가 틀렸으면 (ORA-01017) 잊는다 — 저장소의 것도
             if matches!(e, sqls_core::Error::Db { code: 1017, .. }) {
-                st.passwords.write().unwrap().remove(&key);
+                st.passwords.wr().remove(&key);
                 if typed.is_none() {
                     sqls_core::secret::delete(&account);
                 }
@@ -298,7 +299,7 @@ pub async fn connect(
             return Err(e.into());
         }
     };
-    st.passwords.write().unwrap().insert(key, pw.clone());
+    st.passwords.wr().insert(key, pw.clone());
     // 접속에 성공한 비밀번호만 저장한다
     if typed.is_some() && remember == Some(true) {
         if let Err(e) = sqls_core::secret::set(&account, &pw) {
@@ -318,7 +319,7 @@ pub async fn connect(
             let _ = tauri::Emitter::emit(&app, "session-lost", serde_json::json!({ "id": id }));
         }
     });
-    st.sessions.lock().unwrap().insert(
+    st.sessions.lk().insert(
         id,
         OpenSession {
             session,
@@ -360,7 +361,7 @@ pub struct HistorySettings {
 
 #[tauri::command]
 pub fn history_settings(st: State<'_, AppState>) -> HistorySettings {
-    let c = st.cfg.read().unwrap().history.clone();
+    let c = st.cfg.rd().history.clone();
     let dir = sqls_core::config::config_path().parent().map(|p| p.join("history").display().to_string()).unwrap_or_default();
     HistorySettings { enabled: c.enabled, keep_months: c.keep_months, dir }
 }
@@ -368,7 +369,7 @@ pub fn history_settings(st: State<'_, AppState>) -> HistorySettings {
 #[tauri::command]
 pub fn set_history_enabled(st: State<'_, AppState>, enabled: bool) -> R<()> {
     st.history.set_enabled(enabled);
-    st.cfg.write().unwrap().history.enabled = enabled;
+    st.cfg.wr().history.enabled = enabled;
     st.save_config()
 }
 
@@ -385,9 +386,9 @@ pub struct TnsView {
 
 #[tauri::command]
 pub fn tns_list(st: State<'_, AppState>) -> TnsView {
-    let o = st.cfg.read().unwrap().oracle.clone();
+    let o = st.cfg.rd().oracle.clone();
     let configured = o.tns_admin.as_ref().map(|p| p.display().to_string());
-    let Some(dir) = sqls_core::tns::locate(o.tns_admin.as_deref(), o.client_lib_dir.as_deref()) else {
+    let Some(dir) = sqls_core::tns::locate(o.tns_dir().as_deref(), o.client_dir().as_deref()) else {
         return TnsView { dir: None, configured, entries: Vec::new(), error: None };
     };
     match sqls_core::tns::load(&dir) {
@@ -401,17 +402,19 @@ pub fn tns_list(st: State<'_, AppState>) -> TnsView {
 pub fn set_tns_admin(st: State<'_, AppState>, dir: Option<String>) -> R<()> {
     let dir = dir.map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).map(std::path::PathBuf::from);
     if let Some(d) = &dir {
-        if !d.join("tnsnames.ora").is_file() {
-            return Err(ErrView::msg("invalid", format!("{} 에 tnsnames.ora 가 없습니다", d.display())));
+        let real = sqls_core::config::resolve_path(d);
+        if !real.join("tnsnames.ora").is_file() {
+            return Err(ErrView::msg("invalid", format!("{} 에 tnsnames.ora 가 없습니다", real.display())));
         }
     }
-    st.cfg.write().unwrap().oracle.tns_admin = dir;
+    // 실행 파일 폴더 안이면 상대 경로로 남긴다 (포터블 폴더째 옮겨도 그대로)
+    st.cfg.wr().oracle.tns_admin = dir.map(|d| sqls_core::config::relative_to_app(&d));
     st.save_config()
 }
 
 #[tauri::command]
 pub fn disconnect(st: State<'_, AppState>, id: u64) {
-    if let Some(s) = st.sessions.lock().unwrap().remove(&id) {
+    if let Some(s) = st.sessions.lk().remove(&id) {
         s.session.close();
     }
 }
@@ -465,9 +468,9 @@ fn opts(page: Option<usize>, binds: Vec<(String, Option<String>)>) -> ExecOption
 
 /// 이 세션의 프로필이 운영 DB 인지 (모르면 운영으로 — 안전한 쪽)
 pub(crate) fn is_production(st: &AppState, id: u64) -> bool {
-    let profile = st.sessions.lock().unwrap().get(&id).map(|s| s.profile.clone());
+    let profile = st.sessions.lk().get(&id).map(|s| s.profile.clone());
     match profile {
-        Some(p) => st.cfg.read().unwrap().profile(&p).map(|x| x.production).unwrap_or(true),
+        Some(p) => st.cfg.rd().profile(&p).map(|x| x.production).unwrap_or(true),
         None => false,
     }
 }
@@ -477,7 +480,7 @@ fn remember(st: &AppState, id: u64, user: &str, sql_text: &str, r: &Result<sqls_
     if !st.history.enabled() {
         return;
     }
-    let profile = st.sessions.lock().unwrap().get(&id).map(|s| s.profile.clone()).unwrap_or_default();
+    let profile = st.sessions.lk().get(&id).map(|s| s.profile.clone()).unwrap_or_default();
     let (kind, ms, rows, error) = match r {
         Ok(x) => (
             serde_json::to_value(x.kind).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(),
@@ -631,7 +634,7 @@ pub fn cancel(st: State<'_, AppState>, id: u64) -> R<()> {
 /// 취소가 서버에 닿지 않을 때: 세션을 버리고 같은 프로필로 새로 붙을 수 있게 한다.
 #[tauri::command]
 pub fn abandon(st: State<'_, AppState>, id: u64) {
-    if let Some(s) = st.sessions.lock().unwrap().remove(&id) {
+    if let Some(s) = st.sessions.lk().remove(&id) {
         s.session.abandon();
     }
 }
@@ -818,7 +821,7 @@ pub fn describe_fast(st: State<'_, AppState>, id: u64, name: String) -> Option<m
     if let Some(d) = hub.cached_describe(&name) {
         return Some(d);
     }
-    let cache = hub.cache.read().unwrap();
+    let cache = hub.cache.rd();
     cache.quick_describe(&name)
 }
 
@@ -850,7 +853,7 @@ pub struct McpSettings {
 
 #[tauri::command]
 pub fn get_mcp_settings(st: State<'_, AppState>) -> McpSettings {
-    let c = st.cfg.read().unwrap();
+    let c = st.cfg.rd();
     McpSettings {
         allowed_connections: c.mcp.allowed_connections.clone(),
         call_timeout_secs: c.mcp.call_timeout_secs,
@@ -866,7 +869,7 @@ pub fn set_mcp_settings(
     allow_explain: bool,
 ) -> R<()> {
     {
-        let mut c = st.cfg.write().unwrap();
+        let mut c = st.cfg.wr();
         for n in &allowed_connections {
             if c.profile(n).is_none() {
                 return Err(ErrView::msg("invalid", format!("접속 프로필이 없습니다: {n}")));
@@ -883,7 +886,7 @@ pub fn set_mcp_settings(
 #[tauri::command]
 pub fn forget_password(st: State<'_, AppState>, profile: String) {
     sqls_core::secret::delete(&sqls_core::secret::db_account(&profile));
-    st.passwords.write().unwrap().remove(&profile.to_uppercase());
+    st.passwords.wr().remove(&profile.to_uppercase());
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -900,8 +903,8 @@ pub struct EditableView {
 }
 
 fn require_writable(st: &AppState, id: u64) -> R<()> {
-    let profile = st.sessions.lock().unwrap().get(&id).map(|s| s.profile.clone()).unwrap_or_default();
-    let ro = st.cfg.read().unwrap().profile(&profile).map(|p| p.read_only).unwrap_or(true);
+    let profile = st.sessions.lk().get(&id).map(|s| s.profile.clone()).unwrap_or_default();
+    let ro = st.cfg.rd().profile(&profile).map(|p| p.read_only).unwrap_or(true);
     if ro {
         return Err(ErrView::msg("read_only", "읽기 전용 프로필에서는 결과를 편집할 수 없습니다"));
     }

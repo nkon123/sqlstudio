@@ -12,6 +12,7 @@
 //! 필요한 권한: DEBUG CONNECT SESSION, 그리고 대상 단위에 대한 DEBUG (남의 것은 DEBUG ANY PROCEDURE).
 //! 대상 단위는 디버그 정보로 컴파일되어 있어야 한다 (`ALTER ... COMPILE DEBUG`).
 
+use crate::sync::MutexExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -227,7 +228,7 @@ impl Debugger {
                 let out = t
                     .execute(&b, ExecOptions { binds, first_page: 200, ..Default::default() })
                     .await;
-                *r.lock().unwrap() = Some(out);
+                *r.lk() = Some(out);
                 d.notify_waiters();
             });
         }
@@ -257,7 +258,7 @@ impl Debugger {
     }
 
     fn target_done(&self) -> bool {
-        self.result.lock().unwrap().is_some()
+        self.result.lk().is_some()
     }
 
     /// 다음 사건(멈춤·끝)까지 기다린다. `sync` 면 SYNCHRONIZE(첫 대기), 아니면 CONTINUE.
@@ -544,7 +545,7 @@ impl Debugger {
         if !self.target_done() {
             let _ = tokio::time::timeout(Duration::from_secs(5), self.done.notified()).await;
         }
-        let r = self.result.lock().unwrap().take();
+        let r = self.result.lk().take();
         if r.is_none() {
             // 대상이 아직 붙잡혀 있다 — 기다리지 않고 끊는다 (서버에서 롤백된다)
             self.target.abandon();
@@ -560,7 +561,7 @@ impl Debugger {
 
     /// 대상 블록의 결과를 지우지 않고 본다 (끝난 뒤 화면 표시용)
     pub fn result(&self) -> Option<std::result::Result<ExecResult, String>> {
-        self.result.lock().unwrap().as_ref().map(|r| r.as_ref().map(|x| x.clone()).map_err(|e| e.to_string()))
+        self.result.lk().as_ref().map(|r| r.as_ref().map(|x| x.clone()).map_err(|e| e.to_string()))
     }
 }
 

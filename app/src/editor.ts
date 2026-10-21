@@ -38,6 +38,10 @@ export function newlineSameIndent(view: EditorView): boolean {
     const lead = /^[ \t]*/.exec(line.text)![0];
     const indent = lead.slice(0, Math.min(lead.length, range.from - line.from));
     const ins = "\n" + indent;
+    // 공백만 있는 줄 끝에서 Enter — 남는 빈 줄에 공백을 남기지 않는다
+    if (range.empty && line.text.trim() === "" && range.from === line.to && line.length > 0) {
+      return { changes: { from: line.from, to: line.to, insert: ins }, range: EditorSelection.cursor(line.from + ins.length) };
+    }
     return { changes: { from: range.from, to: range.to, insert: ins }, range: EditorSelection.cursor(range.from + ins.length) };
   });
   view.dispatch(view.state.update(tr, { scrollIntoView: true, userEvent: "input" }));

@@ -9,6 +9,7 @@
 //! 취소는 작업 큐를 거치지 않는다. 다른 스레드에서 `break_execution` 을 바로 부른다
 //! (OCI 가 허용하는 유일한 동시 호출이다).
 
+use crate::sync::MutexExt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -387,7 +388,7 @@ impl Session {
 
     /// keepalive ping 을 몇 번 했고 마지막으로 무엇 때문에 실패했는지
     pub fn keepalive_state(&self) -> (u32, Option<String>) {
-        self.pings.lock().unwrap().clone()
+        self.pings.lk().clone()
     }
 
     fn mark_lost(&self) {
@@ -605,7 +606,7 @@ impl Worker {
             let _ = self.conn.set_call_timeout(self.spec.call_timeout);
         }
         {
-            let mut p = self.pings.lock().unwrap();
+            let mut p = self.pings.lk();
             p.0 += 1;
             if let Err(e) = &r {
                 p.1 = Some(format!("{e:?}"));
@@ -849,22 +850,22 @@ impl Worker {
         arr: u32,
     ) -> Result<ResultSet<'static, Row>> {
         let rs = stmt.into_result_set::<Row>(&[])?;
-        let cols: Vec<(String, bool)> = rs
+        let cols: Vec<(String, Option<String>)> = rs
             .column_info()
             .iter()
-            .map(|c| (c.name().to_string(), matches!(c.oracle_type(), OracleType::Rowid)))
+            .map(|c| (c.name().to_string(), text_expr(c.name(), c.oracle_type())))
             .collect();
-        if !cols.iter().any(|(_, r)| *r) {
+        if cols.iter().all(|(_, w)| w.is_none()) {
             return Ok(rs);
         }
         drop(rs);
-        let hint = "ROWID 열은 ROWIDTOCHAR(a.ROWID) 처럼 문자로 바꿔 조회해 주세요";
-        let wrapped = rowid_as_text(sql_text, &cols)
-            .ok_or_else(|| Error::Invalid(format!("열 이름이 겹치거나 따옴표가 있어 ROWID 열을 자동으로 바꾸지 못했습니다 — {hint}")))?;
+        let hint = "ROWID·XMLTYPE·객체 형식 열은 ROWIDTOCHAR(a.ROWID)·XMLSERIALIZE(CONTENT x AS CLOB) 처럼 문자로 바꿔 조회해 주세요";
+        let wrapped = wrap_columns(sql_text, &cols)
+            .ok_or_else(|| Error::Invalid(format!("열 이름이 겹치거나 따옴표가 있어 ROWID·객체 열을 자동으로 바꾸지 못했습니다 — {hint}")))?;
         let mut stmt = self.conn.statement(&wrapped).fetch_array_size(arr).prefetch_rows(arr).build()?;
         bind_all(&mut stmt, binds)?;
         stmt.into_result_set::<Row>(&[]).map_err(|e| match Error::from(e) {
-            Error::Db { message, .. } => Error::Invalid(format!("ROWID 열을 문자로 바꿔 다시 조회하다 실패했습니다 ({message}) — {hint}")),
+            Error::Db { message, .. } => Error::Invalid(format!("ROWID·객체 열을 문자로 바꿔 다시 조회하다 실패했습니다 ({message}) — {hint}")),
             e => e,
         })
     }
@@ -1068,16 +1069,34 @@ fn row_to_cells(row: &Row, max_chars: usize) -> Vec<Option<String>> {
         .collect()
 }
 
-/// `SELECT "A", ROWIDTOCHAR("RID") AS "RID" FROM (원문)` — ROWID 열만 문자로. 열 이름이 겹치거나
+/// 행을 가져오기 전에 SQL 로 문자로 바꿔 둘 열의 식 — 드라이버가 그대로 받으면 프로세스가 죽거나(ROWID)
+/// 화면에 보일 수 없는(객체·컬렉션) 형식. 그 밖은 None (그대로 받는다)
+fn text_expr(name: &str, t: &OracleType) -> Option<String> {
+    let q = format!("\"{name}\"");
+    let xml = || format!("XMLSERIALIZE(CONTENT {q} AS CLOB)");
+    match t {
+        OracleType::Rowid => Some(format!("ROWIDTOCHAR({q})")),
+        OracleType::Xml => Some(xml()),
+        OracleType::Object(o) if o.schema().eq_ignore_ascii_case("SYS") && o.name().eq_ignore_ascii_case("XMLTYPE") => Some(xml()),
+        // SDO_GEOMETRY·사용자 정의 객체·VARRAY·중첩 테이블: 형식 이름만 (NULL 은 NULL 로)
+        OracleType::Object(o) => Some(format!("CASE WHEN {q} IS NULL THEN NULL ELSE '({}.{})' END", o.schema(), o.name())),
+        _ => None,
+    }
+}
+
+/// `SELECT ROWIDTOCHAR("RID") AS "RID", "A" FROM (원문)` — 바꿀 열만 식으로. 열 이름이 겹치거나
 /// 따옴표가 들어 있으면 바깥에서 가리킬 수 없으므로 None.
-fn rowid_as_text(sql_text: &str, cols: &[(String, bool)]) -> Option<String> {
+fn wrap_columns(sql_text: &str, cols: &[(String, Option<String>)]) -> Option<String> {
     let mut seen = std::collections::HashSet::new();
     let mut list = Vec::with_capacity(cols.len());
-    for (name, rowid) in cols {
+    for (name, expr) in cols {
         if name.is_empty() || name.contains('"') || !seen.insert(name.as_str()) {
             return None;
         }
-        list.push(if *rowid { format!("ROWIDTOCHAR(\"{name}\") AS \"{name}\"") } else { format!("\"{name}\"") });
+        list.push(match expr {
+            Some(e) => format!("{e} AS \"{name}\""),
+            None => format!("\"{name}\""),
+        });
     }
     let body = sql_text.trim().trim_end_matches(';').trim_end();
     // 원문 끝이 -- 주석이어도 닫는 괄호가 묻히지 않게 줄을 바꾼다
@@ -1112,15 +1131,17 @@ mod tests {
 
     #[test]
     fn rowid_columns_become_text() {
-        let cols = vec![("RID".to_string(), true), ("ENAME".to_string(), false)];
+        let cols = vec![("RID".to_string(), text_expr("RID", &OracleType::Rowid)), ("ENAME".to_string(), text_expr("ENAME", &OracleType::Varchar2(10)))];
         assert_eq!(
-            rowid_as_text("select a.rowid rid, a.ename from emp a -- x", &cols).unwrap(),
+            wrap_columns("select a.rowid rid, a.ename from emp a -- x", &cols).unwrap(),
             "SELECT ROWIDTOCHAR(\"RID\") AS \"RID\", \"ENAME\" FROM (
 select a.rowid rid, a.ename from emp a -- x
 )"
         );
-        let dup = vec![("ID".to_string(), false), ("ID".to_string(), false), ("ROWID".to_string(), true)];
-        assert!(rowid_as_text("select a.id, b.id, a.rowid from a, b", &dup).is_none());
+        let dup = vec![("ID".to_string(), None), ("ID".to_string(), None), ("ROWID".to_string(), Some("ROWIDTOCHAR(\"ROWID\")".into()))];
+        assert!(wrap_columns("select a.id, b.id, a.rowid from a, b", &dup).is_none());
+        assert_eq!(text_expr("X", &OracleType::Xml).unwrap(), "XMLSERIALIZE(CONTENT \"X\" AS CLOB)");
+        assert!(text_expr("N", &OracleType::Number(10, 0)).is_none());
     }
 
     #[test]

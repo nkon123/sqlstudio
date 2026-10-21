@@ -36,6 +36,7 @@ import { openHistory } from "./history";
 import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
 import { openPalette, type Command } from "./palette";
+import { fromLineStart } from "./autofmt";
 import { DEFAULT_SNIPPETS, loadSnippets, parse as parseSnippets, saveSnippets, snippets, type Snip } from "./snippets";
 import { alertBox, applyTheme, bindBox, confirmBox, editorColorNow, field, h, modal, passwordBox, setEditorColor, themePref, toast, type EditorColorKey, type ThemePref } from "./ui";
 
@@ -612,6 +613,8 @@ class App {
       if (!cur) return toast("포맷할 문장이 없습니다", "info");
       ({ from, to } = cur);
     }
+    // 첫 글자 앞 들여쓰기도 같이 (앞에 공백만 있을 때)
+    from = fromLineStart(view.state, from);
     const src = view.state.sliceDoc(from, to);
     const r = formatSql(src);
     if (!r.ok) return toast(r.reason, "error", 6000);
@@ -908,10 +911,12 @@ class App {
     if (!cur) return toast("실행할 문장이 없습니다", "error");
     // 자동 포맷: 실행하는 문장을 먼저 정리 (선택해서 실행할 때는 그대로)
     if (autoFormat().onRun && !t.editor.selection()) {
-      const src = t.editor.view.state.sliceDoc(cur.from, cur.to);
+      // 첫 글자 앞 들여쓰기도 같이 (앞에 공백만 있을 때)
+      const start = fromLineStart(t.editor.view.state, cur.from);
+      const src = t.editor.view.state.sliceDoc(start, cur.to);
       const r = startsWithDml(src) ? formatSql(src) : null;
       if (r?.ok && r.text !== src) {
-        t.editor.view.dispatch({ changes: { from: cur.from, to: cur.to, insert: r.text }, selection: { anchor: cur.from + r.text.length }, userEvent: "input.format" });
+        t.editor.view.dispatch({ changes: { from: start, to: cur.to, insert: r.text }, selection: { anchor: start + r.text.length }, userEvent: "input.format" });
         cur = await this.currentStatement(t);
         if (!cur) return toast("실행할 문장이 없습니다", "error");
       }
@@ -2665,7 +2670,8 @@ class App {
     };
     const tnsBox = h("div", { class: "tns-box" },
       h("strong", {}, "tnsnames.ora "),
-      tns.dir ? h("span", { title: tns.dir }, `${tns.dir} · 별칭 ${tns.entries.length}개${tns.configured ? "" : " (자동으로 찾음)"}`)
+      tns.dir ? h("span", { title: tns.configured && tns.configured !== tns.dir ? `설정: ${tns.configured} (프로그램 폴더 기준 상대 경로)` : tns.dir },
+        `${tns.dir} · 별칭 ${tns.entries.length}개${tns.configured ? (tns.configured !== tns.dir ? ` (설정: ${tns.configured})` : "") : " (자동으로 찾음)"}`)
         : h("span", { class: "warn" }, "찾지 못했습니다 — TNS_ADMIN·ORACLE_HOME·Instant Client 폴더를 봤습니다"),
       tns.error ? h("span", { class: "warn" }, ` · 읽기 실패: ${tns.error}`) : "",
       h("button", { class: "small", onclick: pickTns }, "폴더 지정"),

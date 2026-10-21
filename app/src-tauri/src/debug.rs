@@ -1,6 +1,7 @@
 //! PL/SQL 디버거 명령. 세션 두 개(대상·제어)는 sqls_core::debug 가 연다.
 //! 이 탭의 작업 세션은 소스·사전 조회에만 쓴다 (디버그 중에도 비어 있다).
 
+use sqls_core::sync::MutexExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -31,11 +32,11 @@ impl DebugRun {
             return Ok(Arc::new(self.block_lines.clone()));
         }
         let key = (owner.to_string(), name.to_string(), unit_type.to_string());
-        if let Some(s) = self.sources.lock().unwrap().get(&key) {
+        if let Some(s) = self.sources.lk().get(&key) {
             return Ok(s.clone());
         }
         let src = Arc::new(debug::source(&self.meta, owner, name, unit_type).await?);
-        self.sources.lock().unwrap().insert(key, src.clone());
+        self.sources.lk().insert(key, src.clone());
         Ok(src)
     }
 }
@@ -179,7 +180,7 @@ pub async fn debug_start(
     #[allow(unused_variables)] break_on_exception: bool,
 ) -> R<Started> {
     let (meta, _, _) = st.session(id)?;
-    let profile = st.sessions.lock().unwrap().get(&id).map(|s| s.profile.clone()).unwrap_or_default();
+    let profile = st.sessions.lk().get(&id).map(|s| s.profile.clone()).unwrap_or_default();
     let p = st
         .cfg
         .read()
@@ -225,7 +226,7 @@ pub async fn debug_start(
     let snap = snapshot(&run, &mut d, first).await?;
     *run.dbg.lock().await = Some(d);
     let did = st.next_id();
-    st.debuggers.lock().unwrap().insert(did, run);
+    st.debuggers.lk().insert(did, run);
     Ok(Started { did, snapshot: snap, breakpoints: results })
 }
 
@@ -310,7 +311,7 @@ pub async fn debug_source(st: State<'_, AppState>, did: u64, owner: String, name
 /// 끝낸다. 대상 세션의 변경은 `commit` 이 아니면 롤백.
 #[tauri::command]
 pub async fn debug_finish(st: State<'_, AppState>, did: u64, commit: bool) -> R<Option<Finished>> {
-    let Some(r) = st.debuggers.lock().unwrap().remove(&did) else { return Ok(None) };
+    let Some(r) = st.debuggers.lk().remove(&did) else { return Ok(None) };
     let d = r.dbg.lock().await.take();
     let Some(d) = d else { return Ok(None) };
     Ok(d.finish(commit).await.map(|x| match x {

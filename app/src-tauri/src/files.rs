@@ -3,6 +3,7 @@
 //! 사내 SQL 파일은 CP949(EUC-KR) 인 경우가 많다. UTF-8 로 못 읽으면 CP949 로 읽고,
 //! 저장할 때는 원래 인코딩으로 되돌린다 — 저장하다 한글이 깨지면 안 된다.
 
+use sqls_core::sync::RwLockExt;
 use serde::Serialize;
 use sqls_core::config::{config_path, password_env_name};
 use tauri::State;
@@ -114,7 +115,7 @@ pub fn mcp_snippet(st: State<'_, AppState>) -> String {
         .and_then(|p| p.parent().map(|d| d.join(if cfg!(windows) { "sqlstudio-mcp.exe" } else { "sqlstudio-mcp" })))
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "sqlstudio-mcp".into());
-    let cfg = st.cfg.read().unwrap();
+    let cfg = st.cfg.rd();
     let mut env = serde_json::Map::new();
     for n in &cfg.mcp.allowed_connections {
         env.insert(password_env_name(n), serde_json::Value::String("<비밀번호>".into()));

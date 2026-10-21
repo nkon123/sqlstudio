@@ -630,6 +630,15 @@ async fn column_usage_finds_lines() {
     s.close();
 }
 
+/// 단계를 남기고 60초를 넘기면 실패 — 형식 테스트가 어디서 멈추는지 보이게
+async fn step(s: &Session, sql: &str) -> sqls_core::ExecResult {
+    eprintln!("단계: {}", sql.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect::<String>());
+    match tokio::time::timeout(Duration::from_secs(60), s.execute(sql, ExecOptions::default())).await {
+        Ok(r) => r.unwrap_or_else(|e| panic!("{sql}: {e}")),
+        Err(_) => panic!("60초 넘게 멈춤: {sql}"),
+    }
+}
+
 /// Oracle 형식마다 조회가 죽지 않고 보일 만한 값이 나오는지 — ROWID(IOT 논리 ROWID 포함)·XMLTYPE·객체·컬렉션 등은
 /// 행을 가져오기 전에 SQL 로 문자로 바꾼다 (드라이버가 그대로 받다 프로세스가 죽은 적이 있다)
 #[tokio::test]
@@ -638,28 +647,28 @@ async fn every_column_type_shows_without_crash() {
     let s = Session::connect(spec(false)).await.unwrap();
     for d in ["DROP TABLE sqls_t_types PURGE", "DROP TABLE sqls_t_iot PURGE", "DROP TABLE sqls_t_lraw PURGE",
         "DROP TYPE sqls_t_tab", "DROP TYPE sqls_t_arr", "DROP TYPE sqls_t_pt"] {
-        let _ = s.execute(d, ExecOptions::default()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(60), s.execute(d, ExecOptions::default())).await;
     }
-    exec(&s, "CREATE TYPE sqls_t_pt AS OBJECT (x NUMBER, y NUMBER)").await;
-    exec(&s, "CREATE TYPE sqls_t_arr AS VARRAY(5) OF NUMBER").await;
-    exec(&s, "CREATE TYPE sqls_t_tab AS TABLE OF VARCHAR2(10)").await;
-    exec(&s, "CREATE TABLE sqls_t_types (
+    step(&s, "CREATE TYPE sqls_t_pt AS OBJECT (x NUMBER, y NUMBER)").await;
+    step(&s, "CREATE TYPE sqls_t_arr AS VARRAY(5) OF NUMBER").await;
+    step(&s, "CREATE TYPE sqls_t_tab AS TABLE OF VARCHAR2(10)").await;
+    step(&s, "CREATE TABLE sqls_t_types (
         n NUMBER(10,2), bf BINARY_FLOAT, bd BINARY_DOUBLE, c CHAR(3), nc NCHAR(3), nv NVARCHAR2(10), v VARCHAR2(10),
         d DATE, ts TIMESTAMP(6), tstz TIMESTAMP WITH TIME ZONE, tsltz TIMESTAMP WITH LOCAL TIME ZONE,
         iym INTERVAL YEAR TO MONTH, ids INTERVAL DAY TO SECOND,
         r RAW(4), cl CLOB, ncl NCLOB, bl BLOB, fx BFILE, x XMLTYPE, pt sqls_t_pt, arr sqls_t_arr, tb sqls_t_tab, ur UROWID, lg LONG)
         NESTED TABLE tb STORE AS sqls_t_types_tb").await;
-    exec(&s, "INSERT INTO sqls_t_types VALUES (12.5, 1.5, BINARY_DOUBLE_INFINITY, 'ab', N'가', N'나다', 'v',
+    step(&s, "INSERT INTO sqls_t_types VALUES (12.5, 1.5, BINARY_DOUBLE_INFINITY, 'ab', N'가', N'나다', 'v',
         DATE '2026-10-21', TIMESTAMP '2026-10-21 12:34:56.123456', TIMESTAMP '2026-10-21 12:00:00 +09:00', SYSTIMESTAMP,
         INTERVAL '1-2' YEAR TO MONTH, INTERVAL '3 04:05:06' DAY TO SECOND,
         HEXTORAW('DEADBEEF'), 'clob 글', N'nclob', HEXTORAW('00FF'), BFILENAME('SQLS_NO_DIR', 'none.txt'), XMLTYPE('<a>1</a>'),
         sqls_t_pt(1, 2), sqls_t_arr(1, 2), sqls_t_tab('a'), NULL, 'long 글')").await;
-    exec(&s, "INSERT INTO sqls_t_types (n) VALUES (0)").await;
-    exec(&s, "CREATE TABLE sqls_t_iot (id NUMBER PRIMARY KEY, v VARCHAR2(10)) ORGANIZATION INDEX").await;
-    exec(&s, "INSERT INTO sqls_t_iot VALUES (1, 'x')").await;
-    exec(&s, "CREATE TABLE sqls_t_lraw (lr LONG RAW)").await;
-    exec(&s, "INSERT INTO sqls_t_lraw VALUES (HEXTORAW('ABCD'))").await;
-    exec(&s, "COMMIT").await;
+    step(&s, "INSERT INTO sqls_t_types (n) VALUES (0)").await;
+    step(&s, "CREATE TABLE sqls_t_iot (id NUMBER PRIMARY KEY, v VARCHAR2(10)) ORGANIZATION INDEX").await;
+    step(&s, "INSERT INTO sqls_t_iot VALUES (1, 'x')").await;
+    step(&s, "CREATE TABLE sqls_t_lraw (lr LONG RAW)").await;
+    step(&s, "INSERT INTO sqls_t_lraw VALUES (HEXTORAW('ABCD'))").await;
+    step(&s, "COMMIT").await;
 
     let me = s.info().user.clone();
     let cell = |p: &sqls_core::RowPage, row: usize, col: &str| -> Option<String> {
@@ -667,7 +676,7 @@ async fn every_column_type_shows_without_crash() {
         p.rows[row][i].clone()
     };
 
-    let r = exec(&s, "SELECT * FROM sqls_t_types ORDER BY n DESC").await;
+    let r = step(&s, "SELECT * FROM sqls_t_types ORDER BY n DESC").await;
     let p = rows(&r.outcome);
     println!("{:?}\n{:?}", p.columns.iter().map(|c| &c.name).collect::<Vec<_>>(), p.rows);
     assert_eq!(p.rows.len(), 2);
@@ -685,28 +694,29 @@ async fn every_column_type_shows_without_crash() {
     }
 
     // ROWID — 일반 테이블과 IOT(논리 ROWID)
-    let r = exec(&s, "SELECT t.ROWID rid, t.n FROM sqls_t_types t").await;
+    let r = step(&s, "SELECT t.ROWID rid, t.n FROM sqls_t_types t").await;
     assert!(rows(&r.outcome).rows.iter().all(|row| row[0].as_ref().is_some_and(|v| v.len() >= 18)), "{:?}", rows(&r.outcome).rows);
-    let r = exec(&s, "SELECT i.ROWID, i.* FROM sqls_t_iot i").await;
+    let r = step(&s, "SELECT i.ROWID, i.* FROM sqls_t_iot i").await;
     assert!(rows(&r.outcome).rows[0][0].as_ref().is_some_and(|v| !v.is_empty()), "IOT 논리 ROWID: {:?}", rows(&r.outcome).rows);
 
     // LONG RAW · CURSOR 식 · ANYDATA · SDO_GEOMETRY(있으면)
-    let r = exec(&s, "SELECT lr FROM sqls_t_lraw").await;
+    let r = step(&s, "SELECT lr FROM sqls_t_lraw").await;
     println!("LONG RAW {:?}", rows(&r.outcome).rows);
-    let r = s.execute("SELECT CURSOR(SELECT 1 FROM dual) c FROM dual", ExecOptions::default()).await;
+    eprintln!("단계: CURSOR 식");
+    let r = tokio::time::timeout(Duration::from_secs(60), s.execute("SELECT CURSOR(SELECT 1 FROM dual) c FROM dual", ExecOptions::default())).await.expect("CURSOR 식에서 60초 넘게 멈춤");
     println!("CURSOR 식 {:?}", r.as_ref().map(|x| rows(&x.outcome).rows.clone()));
-    let r = exec(&s, "SELECT SYS.ANYDATA.CONVERTNUMBER(1) a FROM dual").await;
+    let r = step(&s, "SELECT SYS.ANYDATA.CONVERTNUMBER(1) a FROM dual").await;
     assert_eq!(rows(&r.outcome).rows[0][0].as_deref(), Some("(SYS.ANYDATA)"));
-    let has_sdo = exec(&s, "SELECT COUNT(*) FROM all_types WHERE owner = 'MDSYS' AND type_name = 'SDO_GEOMETRY'").await;
+    let has_sdo = step(&s, "SELECT COUNT(*) FROM all_types WHERE owner = 'MDSYS' AND type_name = 'SDO_GEOMETRY'").await;
     if rows(&has_sdo.outcome).rows[0][0].as_deref() != Some("0") {
-        let r = exec(&s, "SELECT SDO_GEOMETRY(2001, NULL, SDO_POINT_TYPE(1, 2, NULL), NULL, NULL) g FROM dual").await;
+        let r = step(&s, "SELECT SDO_GEOMETRY(2001, NULL, SDO_POINT_TYPE(1, 2, NULL), NULL, NULL) g FROM dual").await;
         assert_eq!(rows(&r.outcome).rows[0][0].as_deref(), Some("(MDSYS.SDO_GEOMETRY)"));
     }
 
     // 정리
     for d in ["DROP TABLE sqls_t_types PURGE", "DROP TABLE sqls_t_iot PURGE", "DROP TABLE sqls_t_lraw PURGE",
         "DROP TYPE sqls_t_tab", "DROP TYPE sqls_t_arr", "DROP TYPE sqls_t_pt"] {
-        let _ = s.execute(d, ExecOptions::default()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(60), s.execute(d, ExecOptions::default())).await;
     }
     s.close();
 }

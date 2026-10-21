@@ -698,10 +698,11 @@ async fn every_column_type_shows_without_crash() {
     assert_eq!(cell(p, 0, "PT"), Some(format!("({me}.SQLS_T_PT)")), "객체는 형식 이름만");
     assert_eq!(cell(p, 0, "ARR"), Some(format!("({me}.SQLS_T_ARR)")));
     assert_eq!(cell(p, 0, "TB"), Some(format!("({me}.SQLS_T_TAB)")));
-    for col in ["N", "BF", "BD", "C", "NC", "NV", "V", "D", "TS", "TSTZ", "TSLTZ", "IYM", "IDS", "R", "CL", "NCL", "BL", "FX", "LG"] {
+    for col in ["N", "BF", "BD", "C", "NC", "NV", "V", "D", "TS", "TSTZ", "TSLTZ", "IYM", "IDS", "R", "CL", "NCL", "BL", "LG"] {
         assert!(cell(p, 0, col).is_some_and(|v| !v.is_empty()), "{col} 이 비었다: {:?}", cell(p, 0, col));
     }
     assert_eq!(cell(p, 0, "CL").as_deref(), Some("clob 글"));
+    assert_eq!(cell(p, 0, "FX").as_deref(), Some("(BFILE)"), "BFILE 은 파일을 열지 않고 표시만");
     // NULL 은 NULL 로 (객체·XML 도)
     for col in ["X", "PT", "ARR", "TB", "UR", "FX", "CL"] {
         assert_eq!(cell(p, 1, col), None, "두 번째 행의 {col} 은 NULL");

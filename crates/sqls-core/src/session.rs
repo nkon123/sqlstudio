@@ -1076,6 +1076,8 @@ fn text_expr(name: &str, t: &OracleType) -> Option<String> {
     let xml = || format!("XMLSERIALIZE(CONTENT {q} AS CLOB)");
     match t {
         OracleType::Rowid => Some(format!("ROWIDTOCHAR({q})")),
+        // BFILE: 드라이버가 글자로 바꾸려고 서버의 파일을 열다 멈춘다 (디렉터리·파일이 없으면) — 표시만
+        OracleType::BFILE => Some(format!("CASE WHEN {q} IS NULL THEN NULL ELSE '(BFILE)' END")),
         OracleType::Xml => Some(xml()),
         OracleType::Object(o) if o.schema().eq_ignore_ascii_case("SYS") && o.name().eq_ignore_ascii_case("XMLTYPE") => Some(xml()),
         // SDO_GEOMETRY·사용자 정의 객체·VARRAY·중첩 테이블: 형식 이름만 (NULL 은 NULL 로)
@@ -1142,6 +1144,7 @@ select a.rowid rid, a.ename from emp a -- x
         assert!(wrap_columns("select a.id, b.id, a.rowid from a, b", &dup).is_none());
         assert_eq!(text_expr("X", &OracleType::Xml).unwrap(), "XMLSERIALIZE(CONTENT \"X\" AS CLOB)");
         assert!(text_expr("N", &OracleType::Number(10, 0)).is_none());
+        assert_eq!(text_expr("F", &OracleType::BFILE).unwrap(), "CASE WHEN \"F\" IS NULL THEN NULL ELSE '(BFILE)' END");
     }
 
     #[test]

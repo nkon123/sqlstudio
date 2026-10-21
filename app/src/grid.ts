@@ -688,8 +688,12 @@ export class ResultGrid {
   private onMouseDown(e: MouseEvent) {
     const at = this.cellAt(e);
     if (!at) return;
+    // 고치는 중인 셀의 입력 칸은 브라우저 기본 동작대로 (커서 놓기·글자 고르기)
+    if ((e.target as HTMLElement).closest("input, textarea")) return;
+    // 기본 동작(포커스 옮기기·글자 드래그 선택)을 막는다 — 아래 update() 가 누른 셀을 다시 그려 문서에서 빠지면
+    // 브라우저가 포커스를 그리드에서 빼 방향키가 안 먹고, 드래그하면 글자 선택이 셀 선택과 겹쳐 보였다
+    e.preventDefault();
     if (e.detail >= 2) {
-      e.preventDefault();
       this.onDblClick(e);
       return;
     }

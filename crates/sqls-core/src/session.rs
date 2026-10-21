@@ -742,8 +742,18 @@ impl Worker {
             b.with_batch_errors();
         }
         let mut batch = b.build()?;
+        // 열마다 같은 형식으로 (가장 긴 값에 맞춘 VARCHAR2) — 행마다 형식이 다르면 묶음 바인드가 버퍼를 다시 잡는다
+        let ncol = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        let types: Vec<Option<OracleType>> = (0..ncol)
+            .map(|c| text_type(rows.iter().filter_map(|r| r.get(c).and_then(|v| v.as_ref()).map(|v| v.len())).max().unwrap_or(0)))
+            .collect();
         for r in rows {
-            let params: Vec<&dyn ToSql> = r.iter().map(|v| v as &dyn ToSql).collect();
+            let typed: Vec<(&Option<String>, &OracleType)> = r.iter().zip(&types).filter_map(|(v, t)| t.as_ref().map(|t| (v, t))).collect();
+            let params: Vec<&dyn ToSql> = if typed.len() == r.len() {
+                typed.iter().map(|p| p as &dyn ToSql).collect()
+            } else {
+                r.iter().map(|v| v as &dyn ToSql).collect()
+            };
             batch.append_row(&params)?;
         }
         match batch.execute() {
@@ -976,8 +986,7 @@ impl Worker {
         }
         let mut stmt = self.conn.statement(sql_text).build()?;
         for (n, v) in ins {
-            let v: &dyn ToSql = v;
-            stmt.bind(n.as_str(), v)?;
+            bind_text(&mut stmt, n.as_str(), v)?;
         }
         // 4000 바이트를 넘는 VARCHAR2 바인드는 LONG 으로 바뀌어 숫자를 넣으면 PLS-00382 가 난다.
         // 긴 값이 필요한 OUT 은 이름 앞에 `l_` 를 붙인다 (LONG 으로 받는다 — 블록에서 문자열만 넣을 것).
@@ -1022,8 +1031,22 @@ fn bind_all(stmt: &mut oracle::Statement, binds: &[(String, Option<String>)]) ->
             // 문장에 없는 바인드를 넘기면 ORA-01036 이 난다 — 미리 거른다
             continue;
         }
-        let v: &dyn ToSql = value;
-        stmt.bind(key.as_str(), v)?;
+        bind_text(stmt, key.as_str(), value)?;
+    }
+    Ok(())
+}
+
+/// 문자열 바인드의 형식. 드라이버 기본(NVARCHAR2)으로 보내면 VARCHAR2 컬럼과 비교할 때 Oracle 이 컬럼 쪽을
+/// 바꿔(`SYS_OP_C2C(col) = :b`) 인덱스를 못 쓴다 — 값을 직접 쓰면 0.1초, 바인드로는 전체를 읽어 몇 분.
+/// Toad·SQL*Plus 처럼 VARCHAR2 로 보낸다. 4000 바이트를 넘는 값은 드라이버 기본에 맡긴다 (VARCHAR2 로 주면 LONG 으로 바뀐다)
+fn text_type(bytes: usize) -> Option<OracleType> {
+    (bytes <= 4000).then(|| OracleType::Varchar2(bytes.max(1) as u32))
+}
+
+fn bind_text(stmt: &mut oracle::Statement, name: &str, value: &Option<String>) -> Result<()> {
+    match text_type(value.as_ref().map_or(0, |v| v.len())) {
+        Some(t) => stmt.bind(name, &(value, &t))?,
+        None => stmt.bind(name, value)?,
     }
     Ok(())
 }
@@ -1125,6 +1148,14 @@ fn truncate_chars(s: String, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_binds_are_varchar2() {
+        assert_eq!(text_type(0), Some(OracleType::Varchar2(1)));
+        assert_eq!(text_type(12), Some(OracleType::Varchar2(12)));
+        assert_eq!(text_type(4000), Some(OracleType::Varchar2(4000)));
+        assert_eq!(text_type(4001), None, "긴 값은 드라이버 기본");
+    }
 
     #[test]
     fn truncate_is_char_safe() {

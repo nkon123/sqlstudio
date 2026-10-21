@@ -735,3 +735,32 @@ async fn every_column_type_shows_without_crash() {
     }
     s.close();
 }
+
+/// 문자열 바인드는 VARCHAR2 로 — NVARCHAR2 로 가면 VARCHAR2 컬럼 쪽이 SYS_OP_C2C 로 바뀌어 인덱스를 못 쓴다
+/// (Toad 에서 0.06초인 조회가 바인드로 1분 넘게 걸리던 것)
+#[tokio::test]
+#[ignore]
+async fn string_binds_use_index() {
+    let s = Session::connect(spec(false)).await.unwrap();
+    let _ = s.execute("DROP TABLE sqls_t_bind PURGE", ExecOptions::default()).await;
+    exec(&s, "CREATE TABLE sqls_t_bind (code VARCHAR2(20) NOT NULL, v NUMBER)").await;
+    exec(&s, "INSERT INTO sqls_t_bind SELECT 'C' || LPAD(LEVEL, 6, '0'), LEVEL FROM dual CONNECT BY LEVEL <= 20000").await;
+    exec(&s, "CREATE INDEX sqls_t_bind_ix ON sqls_t_bind (code)").await;
+    exec(&s, "BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, 'SQLS_T_BIND'); END;").await;
+    // 바인드 형식: NVARCHAR2 면 DUMP 에 CharacterSet=AL16UTF16 이 붙는다
+    let mut o = ExecOptions::default();
+    o.binds = vec![("x".into(), Some("C000123".into()))];
+    let r = s.execute("SELECT DUMP(:x) FROM dual", o.clone()).await.unwrap();
+    let dump = rows(&r.outcome).rows[0][0].clone().unwrap_or_default();
+    assert!(!dump.contains("AL16UTF16"), "VARCHAR2 로 바인드해야 한다: {dump}");
+    // 실제 계획: 인덱스를 쓰고, 컬럼을 바꾸지 않는다
+    let r = s.execute("SELECT /* sqls_bind_ix */ v FROM sqls_t_bind WHERE code = :x", o).await.unwrap();
+    assert_eq!(rows(&r.outcome).rows, vec![vec![Some("123".to_string())]]);
+    let plan = exec(&s, "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL, NULL, 'BASIC +PREDICATE'))").await;
+    let text: String = rows(&plan.outcome).rows.iter().filter_map(|r| r[0].clone()).collect::<Vec<_>>().join("\n");
+    println!("{text}");
+    assert!(text.contains("SQLS_T_BIND_IX"), "인덱스를 써야 한다:\n{text}");
+    assert!(!text.contains("SYS_OP_C2C"), "컬럼을 바꾸면 안 된다:\n{text}");
+    let _ = s.execute("DROP TABLE sqls_t_bind PURGE", ExecOptions::default()).await;
+    s.close();
+}

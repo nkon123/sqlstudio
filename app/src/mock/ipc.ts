@@ -278,6 +278,12 @@ const LOCAL: Record<string, (a: Args) => unknown> = {
   history_search: () => [],
   client_log: () => null,
   conn_event: () => null,
+  // 파일은 브라우저 저장소에 (탭 되살리기·저장을 시험할 수 있게)
+  read_sql_file: (a) => {
+    const v = localStorage.getItem(`mock.file:${a.path}`);
+    return v == null ? fail(`${a.path}: 파일이 없습니다`, "io") : { text: v, encoding: "utf-8" };
+  },
+  write_sql_file: (a) => { localStorage.setItem(`mock.file:${a.path}`, String(a.text)); return null; },
 };
 
 function banner(where: string) {

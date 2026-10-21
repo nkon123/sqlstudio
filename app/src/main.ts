@@ -7,27 +7,18 @@ import "./mock/install"; // 가짜 DB 모드 (npm run mock) — 맨 먼저
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import {
-  api, byteToUtf16, errOf, utf16ToByte,
-  type Column, type Connected, type ErrView, type ExecView, type ObjectEntry, type Profile, type Provider, type TableDesc, type TnsEntry, type TnsView, type RowPage } from "./api";
+import { api, byteToUtf16, errOf, utf16ToByte, type Column, type ErrView, type ExecView, type ObjectEntry, type Profile, type TableDesc, type RowPage } from "./api";
 import { AiPanel } from "./ai";
 import { listen } from "@tauri-apps/api/event";
-import { sqlCompletion } from "./completion";
-import { AnalysisView } from "./analysis";
-import { DebugView } from "./debugger";
-import { MonitorView } from "./monitor";
 import { showSpace } from "./space";
 import { enableTabDrag } from "./tabdrag";
 import { cellCondition, listCondition, listText, placeCondition, type CondOp, type ListCond, type ListText } from "./cond";
-import { SqlEditor, changeCase } from "./editor";
-import { DEFAULT_PREFS, STYLE_PRESETS, autoFormat, detectPrefs, formatSql, loadPrefs, savePrefs, setAutoFormat, startsWithDml, type AutoFormat, type FormatPrefs } from "./format";
+import { changeCase } from "./editor";
+import { autoFormat, formatSql, startsWithDml } from "./format";
 import type { GitPanel } from "./git";
-import { ResultGrid } from "./grid";
-import { guessTable, toCsv as toCsvText, toInserts as toInsertsText, unsupported as unsupportedCols } from "./export-text";
 import { condOf, placeAtCursor, placeInClause, TARGET_LABEL, type Placed, type Target } from "./colinsert";
 import { aliasMap, showColumns } from "./colpopup";
 import { showMenu, type MenuItem } from "./ctxmenu";
-import { SchemaCompareView } from "./schemacmp";
 import { showUsage } from "./usage";
 import { showColumnSource } from "./colsource";
 import { showDiff, type Snapshot } from "./resultdiff";
@@ -35,407 +26,26 @@ import { openCopyData } from "./copydata";
 import { openHistory } from "./history";
 import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
-import { openPalette, type Command } from "./palette";
 import { fromLineStart } from "./autofmt";
-import { DEFAULT_SNIPPETS, loadSnippets, parse as parseSnippets, saveSnippets, snippets, type Snip } from "./snippets";
-import { alertBox, applyTheme, bindBox, confirmBox, editorColorNow, field, h, modal, passwordBox, setEditorColor, themePref, toast, type EditorColorKey, type ThemePref } from "./ui";
+import { initSession, loadSession, restoreEnabled, saveSession } from "./tabsession";
+import { loadSnippets } from "./snippets";
+import { alertBox, applyTheme, bindBox, confirmBox, h, modal, passwordBox, toast } from "./ui";
+import { Tab } from "./tab";
+import { SideLayout } from "./layout";
+import { connMenu, fileMenu, palette, runMenu, toolsMenu } from "./menus";
+import { settings } from "./settings";
 
-type Conn = Connected & { profile: string; /** 접속한 때 (ms) */ at?: number };
-type Pane = "result" | "output" | "plan" | "desc";
-
-let tabSeq = 1;
-
-class Tab {
-  readonly id = tabSeq++;
-  readonly root: HTMLElement;
-  readonly editor: SqlEditor;
-  readonly grid: ResultGrid;
-  readonly output = h("pre", { class: "pane output" });
-  readonly plan = h("pre", { class: "pane plan" });
-  readonly desc = h("div", { class: "pane desc" });
-  readonly gridStatus = h("span", { class: "grid-status" });
-  readonly tabEl: HTMLElement;
-  private paneBtns = new Map<Pane, HTMLElement>();
-  private panes = new Map<Pane, HTMLElement>();
-  conn: Conn | null = null;
-  filePath: string | null = null;
-  encoding = "utf-8";
-  /** 읽은 파일의 줄 끝 — 저장할 때 되돌린다 (편집기 안은 \n). CRLF 파일을 LF 로 바꿔 Git 에서 모든 줄이 바뀐 것처럼 보이지 않게 */
-  eol: "\n" | "\r\n" = "\n";
-  dirty = false;
-  txnPending = false;
-  /** 끊긴 접속을 다시 여는 중 */
-  recovering = false;
-  running = false;
-  runStarted = 0;
-  /** 실행 중 표시를 갱신하는 타이머 (탭마다 — 두 탭이 동시에 돌아도 각자 센다) */
-  runTimer = 0;
-  /** 결과 영역 위에 뜨는 '실행 중' 표시 — 1초 넘게 걸릴 때만 */
-  readonly runBox = h("div", { class: "run-overlay", hidden: true });
-  private runText = h("span", { class: "run-text" });
-  lastError: string | undefined;
-  private editorParts: HTMLElement[] = [];
-  /** 마지막으로 결과를 띄운 조회 (편집할 때 ROWID 를 붙여 다시 돈다) */
-  lastQuery: { sql: string; binds: [string, string | null][] } | null = null;
-  editTable: string | null = null;
-  readonly notesBtn = h("button", { class: "small", title: "결과 머리를 컬럼 설명(COMMENT)으로 — 다시 누르면 이름으로" }, "설명");
-  readonly filterIn = h("input", { class: "grid-filter", placeholder: "거르기: 값 · 열=값 · 열~포함 · 열>값 (AND 로 여럿)" });
-  readonly editBtn = h("button", { class: "small", title: "단일 테이블 조회 결과를 고친다 (ROWID 로 다시 조회)" }, "편집");
-  readonly applyBtn = h("button", { class: "small primary", hidden: true }, "적용");
-  readonly discardBtn = h("button", { class: "small", hidden: true, title: "고친 것을 버린다" }, "되돌리기");
-  readonly delRowBtn = h("button", { class: "small", hidden: true, title: "선택한 행을 지울 행으로 표시 (다시 누르면 풀림, Delete 키)" }, "행 삭제");
-  private dbg: DebugView | null = null;
-  /** 글을 새 탭으로 (INSERT 문 내보내기) */
-  private openText: (text: string) => void = () => {};
-  private an: AnalysisView | null = null;
-  private mon: MonitorView | null = null;
-  private cmp: SchemaCompareView | null = null;
-  private app: App;
-
-  /** 디버거 화면 (탭의 접속을 쓴다) */
-  debugger(): DebugView {
-    if (!this.dbg) {
-      this.dbg = new DebugView(() => this.conn?.id, () => this.showEditor());
-      this.root.append(this.dbg.el);
-    }
-    if (this.cmp) this.cmp.el.hidden = true;
-    for (const p of this.editorParts) p.hidden = true;
-    if (this.an) this.an.el.hidden = true;
-    if (this.mon) this.mon.el.hidden = true;
-    return this.dbg;
-  }
-
-  /** PL/SQL 분석 화면 (탭의 접속 프로필 기준) */
-  analysis(): AnalysisView {
-    if (!this.an) {
-      this.an = new AnalysisView(() => this.conn?.id, () => this.showEditor());
-      this.root.append(this.an.el);
-    }
-    if (this.cmp) this.cmp.el.hidden = true;
-    for (const p of this.editorParts) p.hidden = true;
-    if (this.dbg) this.dbg.el.hidden = true;
-    if (this.mon) this.mon.el.hidden = true;
-    return this.an;
-  }
-
-  /** 세션·락 모니터 */
-  monitor(): MonitorView {
-    if (!this.mon) {
-      this.mon = new MonitorView(() => this.conn?.id, () => this.showEditor());
-      this.root.append(this.mon.el);
-    }
-    if (this.cmp) this.cmp.el.hidden = true;
-    for (const p of this.editorParts) p.hidden = true;
-    if (this.dbg) this.dbg.el.hidden = true;
-    if (this.an) this.an.el.hidden = true;
-    return this.mon;
-  }
-
-  /** 스키마 비교 (탭의 접속이 원본) */
-  compare(): SchemaCompareView {
-    if (!this.cmp) {
-      this.cmp = new SchemaCompareView(() => this.conn?.id, () => this.conn?.profile, () => this.showEditor(), (text) => void this.app.newTab(false, text));
-      this.root.append(this.cmp.el);
-    }
-    for (const p of this.editorParts) p.hidden = true;
-    if (this.dbg) this.dbg.el.hidden = true;
-    if (this.an) this.an.el.hidden = true;
-    if (this.mon) this.mon.el.hidden = true;
-    return this.cmp;
-  }
-
-  showEditor() {
-    if (this.an) this.an.el.hidden = true;
-    if (this.mon) this.mon.el.hidden = true;
-    if (this.cmp) this.cmp.el.hidden = true;
-    for (const p of this.editorParts) p.hidden = false;
-    this.editor.focus();
-  }
-
-  constructor(app: App, text = "") {
-    this.app = app;
-    const editorHost = h("div", { class: "editor-host" });
-    this.grid = new ResultGrid({
-      onNeedMore: async () => (this.conn ? api.fetchMore(this.conn.id, 1000) : null),
-      // 한 줄로 — 길면 줄임표, 전체는 풍선으로 (여러 줄로 늘어나 탭 줄이 높아지던 것)
-      onStatus: (t) => { this.gridStatus.textContent = t; this.gridStatus.title = t; },
-      onContextMenu: (r, c, e) => app.gridMenu(this, e, r[c] ?? null, c),
-      onDirty: (n) => {
-        this.applyBtn.textContent = n ? `적용 (${n})` : "적용";
-        this.applyBtn.disabled = !n;
-        this.discardBtn.disabled = !n;
-      },
-    });
-    let ft = 0;
-    this.filterIn.addEventListener("input", () => {
-      clearTimeout(ft);
-      ft = window.setTimeout(() => this.grid.setFilter(this.filterIn.value), 150);
-    });
-    this.filterIn.addEventListener("keydown", (e) => { if (e.key === "Escape") { this.filterIn.value = ""; this.grid.setFilter(""); } });
-    this.editBtn.onclick = () => app.toggleGridEdit(this);
-    // 머리를 설명으로 — 이 PC 에 기억한다
-    let notesOn = false;
-    try { notesOn = localStorage.getItem("grid.notes") === "1"; } catch { /* 기본은 이름 */ }
-    this.grid.setShowNotes(notesOn);
-    this.notesBtn.classList.toggle("on", notesOn);
-    this.notesBtn.disabled = true;
-    this.notesBtn.onclick = () => {
-      notesOn = !notesOn;
-      this.grid.setShowNotes(notesOn);
-      this.notesBtn.classList.toggle("on", notesOn);
-      try { localStorage.setItem("grid.notes", notesOn ? "1" : "0"); } catch { /* 기억 못 해도 된다 */ }
-    };
-    this.applyBtn.onclick = () => app.applyGridEdit(this);
-    this.discardBtn.onclick = () => this.grid.discardChanges();
-    this.delRowBtn.onclick = () => this.grid.toggleDeleteSelected();
-    const gridPane = h("div", { class: "pane result" }, this.grid.el);
-    // 내보내기: 엑셀 · CSV · INSERT 문 (보이는 열·정렬·거르기 그대로)
-    const exportSel = h("select", { class: "small export-sel", title: "결과 내보내기 — 보이는 열·정렬·거르기 그대로" },
-      h("option", { value: "" }, "내보내기…"), h("option", { value: "xlsx" }, "엑셀 (.xlsx)"), h("option", { value: "csv" }, "CSV 파일"),
-      h("option", { value: "insert-tab" }, "INSERT 문 → 새 탭"), h("option", { value: "insert-file" }, "INSERT 문 → 파일 (.sql)"));
-    exportSel.onchange = () => { const v = exportSel.value as "xlsx" | "csv" | "insert-tab" | "insert-file"; exportSel.value = ""; if (v) this.exportResult(v); };
-    this.openText = (text) => void app.newTab(true, text);
-    this.panes.set("result", gridPane).set("output", this.output).set("plan", this.plan).set("desc", this.desc);
-    const btn = (p: Pane, label: string) => {
-      const b = h("button", { class: "pane-tab", onclick: () => this.show(p) }, label);
-      this.paneBtns.set(p, b);
-      return b;
-    };
-    const bottom = h("section", { class: "bottom" },
-      h("nav", { class: "pane-tabs" }, btn("result", "결과"), btn("output", "출력"), btn("plan", "실행계획"), btn("desc", "구조"),
-        this.filterIn, this.notesBtn, this.editBtn, this.delRowBtn, this.applyBtn, this.discardBtn,
-        h("span", { class: "spacer" }), this.gridStatus,
-        h("button", { class: "small", title: "가져온 행을 CSV 로 복사", onclick: () => this.copyCsv() }, "CSV 복사"),
-        exportSel,
-        h("button", { class: "small", title: "결과 비교 — 이 결과를 기준으로 담고, 고친 쿼리·다른 DB 의 결과와 행·열 단위로 비교", onclick: (e: Event) => app.compareMenu(this, e as MouseEvent) }, "비교"),
-        h("span", { class: "pane-size" },
-          h("button", { class: "small", title: "결과 영역 키우기 (에디터를 줄인다) — 경계선을 끌어도 된다", onclick: () => this.resizePane("grow") }, "▲"),
-          h("button", { class: "small", title: "결과 영역 줄이기", onclick: () => this.resizePane("shrink") }, "▼"),
-          h("button", { class: "small", title: "원래 비율로 (경계선을 더블클릭해도 된다)", onclick: () => this.resizePane("reset") }, "↕"))),
-      gridPane, this.output, this.plan, this.desc, this.runBox);
-    this.runBox.append(h("span", { class: "spinner" }), this.runText,
-      h("button", { class: "small danger", title: "실행 중인 쿼리를 취소 (Esc)", onclick: () => void app.cancel() }, "중지"));
-    const splitter = h("div", { class: "splitter" });
-    this.root = h("div", { class: "tab-body" }, editorHost, splitter, bottom);
-    this.editorParts = [editorHost, splitter, bottom];
-    this.editor = new SqlEditor(editorHost, {
-      runStatement: () => app.runStatement(),
-      runScript: () => app.runScript(),
-      explain: () => app.explain(),
-      save: () => app.save(),
-      saveAs: () => app.saveAs(),
-      format: () => app.formatSql(),
-      describe: () => app.describeAtCursor(),
-      history: () => app.showHistory(),
-    }, text, sqlCompletion(() => this.conn?.id));
-    this.editor.view.dom.addEventListener("input", () => this.setDirty(true));
-    this.editor.view.dom.addEventListener("contextmenu", (e) => void app.editorMenu(this, e));
-    dragSplit(splitter, editorHost);
-    this.editorHostEl = editorHost;
-    splitter.title = "끌어서 높이 조절 · 더블클릭: 원래 비율";
-    splitter.addEventListener("dblclick", () => this.resizePane("reset"));
-    try {
-      const saved = Number(localStorage.getItem("pane.editor"));
-      if (saved >= 15 && saved <= 85) editorHost.style.flexBasis = `${saved}%`;
-    } catch { /* 기본 비율 */ }
-    this.show("result");
-    this.grid.clear("Ctrl+Enter: 커서 위치 문장 실행 · F5: 스크립트 실행 · Ctrl+E: 실행계획");
-    this.tabEl = h("div", { class: "tab", onclick: () => { if (!app.tabJustDragged) app.activate(this); } },
-      h("span", { class: "tab-title" }),
-      h("span", { class: "tab-txn", hidden: true, title: "커밋하지 않은 변경이 있습니다 (INSERT·UPDATE·DELETE·MERGE 등) — 커밋 또는 롤백하세요" }, "커밋 전"),
-      h("button", { class: "tab-close", title: "닫기", onclick: (e: Event) => { e.stopPropagation(); app.closeTab(this); } }, "×"));
-    this.refreshTitle();
-  }
-
-  private editorHostEl!: HTMLElement;
-
-  /** 에디터와 결과 영역의 높이 — 키우기·줄이기는 15%씩, 원래는 45%. 비율로 두어 창을 줄여도 경계선이 화면 밖으로 나가지 않는다 */
-  resizePane(how: "grow" | "shrink" | "reset") {
-    const host = this.editorHostEl;
-    const total = this.root.getBoundingClientRect().height || 1;
-    const cur = (host.getBoundingClientRect().height / total) * 100;
-    const next = how === "reset" ? 45 : how === "grow" ? cur - 15 : cur + 15;
-    const pct = Math.round(Math.max(15, Math.min(85, next)));
-    host.style.flexBasis = `${pct}%`;
-    try { localStorage.setItem("pane.editor", String(pct)); } catch { /* 기억 못 해도 된다 */ }
-  }
-
-  /** 오래 걸리는 쿼리 표시 — 결과 영역 위 안내, 탭의 도는 표시. secs 가 null 이면 끝 */
-  showRunning(secs: number | null) {
-    this.tabEl.classList.toggle("running", secs != null);
-    if (secs == null || secs < 1) {
-      this.runBox.hidden = true;
-      return;
-    }
-    const whole = Math.floor(secs);
-    const t = whole >= 60 ? `${Math.floor(whole / 60)}분 ${whole % 60}초` : `${secs.toFixed(1)}초`;
-    this.runText.textContent = whole >= 10
-      ? `서버가 실행 중입니다 · ${t} — 응답을 기다리는 중 (오래 걸리는 쿼리입니다)`
-      : `서버가 실행 중입니다 · ${t}`;
-    this.runText.title = "응답이 올 때까지 정상적으로 기다리는 중입니다. 너무 오래 걸리면 중지(Esc)하고 실행계획(Ctrl+E)이나 세션 모니터(세션)에서 원인을 보세요.";
-    this.runBox.hidden = false;
-  }
-
-  show(p: Pane) {
-    for (const [k, el] of this.panes) el.hidden = k !== p;
-    for (const [k, b] of this.paneBtns) b.classList.toggle("active", k === p);
-  }
-
-  title() {
-    const file = this.filePath ? this.filePath.split(/[\\/]/).pop() : `새 문서 ${this.id}`;
-    return `${this.dirty ? "● " : ""}${file}${this.conn ? ` — ${this.conn.profile}` : ""}`;
-  }
-
-  refreshTitle() {
-    (this.tabEl.querySelector(".tab-title") as HTMLElement).textContent = this.title();
-    this.tabEl.style.borderTopColor = this.conn?.color ?? "transparent";
-    // 커밋하지 않은 변경 — 다른 탭을 보고 있어도 알 수 있게 탭과 에디터 위에
-    const txn = !!this.conn && this.txnPending;
-    this.tabEl.classList.toggle("txn", txn);
-    (this.tabEl.querySelector(".tab-txn") as HTMLElement).hidden = !txn;
-    this.root.classList.toggle("txn", txn);
-  }
-
-  setDirty(d: boolean) {
-    if (this.dirty !== d) {
-      this.dirty = d;
-      this.refreshTitle();
-    }
-  }
-
-  log(line: string, cls = "") {
-    const span = h("span", { class: cls }, line + "\n");
-    this.output.append(span);
-    this.output.scrollTop = this.output.scrollHeight;
-  }
-
-  /** 비교용으로 지금 결과를 담는다 (보이는 열·정렬·거르기 그대로). 서버에 행이 남았으면 끝까지 가져올지 묻는다 */
-  async snapshot(): Promise<Snapshot | null> {
-    if (!this.grid.columnAt(0)) {
-      toast("비교할 결과가 없습니다 — 먼저 조회하세요", "info");
-      return null;
-    }
-    const LIMIT = 500_000;
-    if (this.grid.hasMoreRows()) {
-      const choice = await modal<"all" | "loaded">("결과 비교",
-        h("pre", { class: "modal-text" },
-          `지금 ${this.grid.rowCount().toLocaleString()}행을 가져왔고, 서버에 행이 더 남아 있습니다.\n\n` +
-          `전체를 비교하려면 남은 행을 모두 가져옵니다 (${LIMIT.toLocaleString()}행까지, 행이 많으면 시간이 걸립니다).`),
-        [{ label: "가져온 행만", value: "loaded" }, { label: "전체 가져와서", value: "all", kind: "primary" }]);
-      if (!choice) return null;
-      if (choice === "all") {
-        let stop = false;
-        const cancel = h("button", { class: "small", onclick: () => { stop = true; } }, "중지");
-        this.gridStatus.after(cancel);
-        try {
-          const r = await this.grid.loadAll(LIMIT, (n) => { this.gridStatus.textContent = `${n.toLocaleString()}행 가져오는 중…`; }, () => stop);
-          if (r === "cancelled") { toast("멈췄습니다 (가져온 행은 그리드에 남아 있습니다)", "info"); return null; }
-        } catch (e) {
-          toast(errOf(e).message, "error");
-          return null;
-        } finally {
-          cancel.remove();
-        }
-      }
-    }
-    const d = this.grid.exportData();
-    return { label: `${this.title()} ${new Date().toTimeString().slice(0, 8)}`, columns: d.columns, rows: d.rows, partial: this.grid.hasMoreRows() };
-  }
-
-  /** 결과 내보내기: 엑셀 · CSV 파일 · INSERT 문(새 탭 / 파일). 보이는 열·정렬·거르기 그대로 */
-  async exportResult(kind: "xlsx" | "csv" | "insert-tab" | "insert-file") {
-    if (!this.grid.rowCount()) return toast("내보낼 결과가 없습니다", "info");
-    const LIMIT = kind === "xlsx" ? 1_048_575 : kind === "insert-tab" ? 50_000 : 5_000_000;
-    const what = { xlsx: "엑셀", csv: "CSV", "insert-tab": "INSERT 문", "insert-file": "INSERT 문" }[kind];
-    if (this.grid.hasMoreRows()) {
-      const choice = await modal<"all" | "loaded">(`${what}로 내보내기`,
-        h("pre", { class: "modal-text" },
-          `지금 ${this.grid.rowCount().toLocaleString()}행을 가져왔고, 서버에 행이 더 남아 있습니다.\n\n` +
-          `전체를 내보내려면 남은 행을 모두 가져옵니다 (행이 많으면 시간이 걸립니다).\n${what}는 ${LIMIT.toLocaleString()}행까지 내보냅니다.`),
-        [{ label: "가져온 행만", value: "loaded" }, { label: "전체 가져와서 내보내기", value: "all", kind: "primary" }]);
-      if (!choice) return;
-      if (choice === "all") {
-        let stop = false;
-        const cancel = h("button", { class: "small", onclick: () => { stop = true; } }, "중지");
-        this.gridStatus.after(cancel);
-        try {
-          const r = await this.grid.loadAll(LIMIT, (n) => { this.gridStatus.textContent = `${n.toLocaleString()}행 가져오는 중…`; }, () => stop);
-          if (r === "cancelled") return toast("내보내기를 멈췄습니다 (가져온 행은 그리드에 남아 있습니다)", "info");
-          if (r === "limit") toast(`${LIMIT.toLocaleString()}행까지만 내보냅니다`, "info", 6000);
-        } catch (e) {
-          return toast(errOf(e).message, "error");
-        } finally {
-          cancel.remove();
-        }
-      }
-    }
-    const data = this.grid.exportData();
-    if (!data.rows.length) return toast("필터에 맞는 행이 없습니다", "info");
-    const rows = data.rows.length > LIMIT ? data.rows.slice(0, LIMIT) : data.rows;
-    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "_");
-    const base = this.filePath ? this.filePath.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "") : "result";
-    try {
-      if (kind === "xlsx") {
-        const path = await saveDialog({ filters: [{ name: "Excel", extensions: ["xlsx"] }], defaultPath: `${base}_${stamp}.xlsx` });
-        if (!path) return;
-        this.gridStatus.textContent = `${rows.length.toLocaleString()}행을 엑셀로 쓰는 중…`;
-        const n = await api.exportXlsx(path, data.columns, rows, this.lastQuery?.sql ?? null);
-        return void toast(`${n.toLocaleString()}행을 엑셀로 저장했습니다`, "ok");
-      }
-      if (kind === "csv") {
-        const delim = h("select", {}, h("option", { value: "," }, "쉼표 ,"), h("option", { value: "\t" }, "탭"), h("option", { value: ";" }, "세미콜론 ;"));
-        const enc = h("select", {}, h("option", { value: "utf-8-bom" }, "UTF-8 (BOM — 엑셀에서 한글이 안 깨짐)"), h("option", { value: "utf-8" }, "UTF-8"), h("option", { value: "cp949" }, "CP949 (EUC-KR)"));
-        const head = h("input", { type: "checkbox", checked: true });
-        const ok = await modal("CSV 로 내보내기", h("div", { class: "form" },
-          field("구분자", delim), field("인코딩", enc), h("label", { class: "check" }, head, "첫 줄에 컬럼 이름"),
-          h("small", {}, `${rows.length.toLocaleString()}행 × ${data.columns.length}열 · 날짜는 화면에 보이는 형식(YYYY-MM-DD HH24:MI:SS) 그대로`)),
-          [{ label: "취소", value: false }, { label: "저장", value: true, kind: "primary" }]);
-        if (!ok) return;
-        const ext = delim.value === "\t" ? "tsv" : "csv";
-        const path = await saveDialog({ filters: [{ name: "CSV", extensions: [ext, "txt"] }], defaultPath: `${base}_${stamp}.${ext}` });
-        if (!path) return;
-        await api.writeFile(path, toCsvText(data.columns, rows, { delimiter: delim.value, header: head.checked }), enc.value);
-        return void toast(`${rows.length.toLocaleString()}행을 CSV 로 저장했습니다`, "ok");
-      }
-      // INSERT 문
-      const table = h("input", { value: this.editTable ?? guessTable(this.lastQuery?.sql), placeholder: "스키마.테이블", style: "width:100%" });
-      const bad = unsupportedCols(data.columns);
-      const ok = await modal("INSERT 문으로 내보내기", h("div", { class: "form" },
-        field("넣을 테이블", table, "다른 DB·스키마로 옮길 때 바꿔 쓰세요"),
-        h("small", {}, `${rows.length.toLocaleString()}행 · 날짜는 TO_DATE/TO_TIMESTAMP, 4000바이트가 넘는 글자는 TO_CLOB 로`),
-        bad.length ? h("small", { class: "warn" }, `바이너리 열은 NULL 로 넣습니다: ${bad.join(", ")}`) : ""),
-        [{ label: "취소", value: false }, { label: kind === "insert-tab" ? "새 탭에 넣기" : "저장", value: true, kind: "primary" }]);
-      if (!ok || !table.value.trim()) return;
-      const text = toInsertsText(table.value.trim(), data.columns, rows);
-      if (kind === "insert-tab") return void this.openText(`-- ${rows.length.toLocaleString()}행 · ${new Date().toLocaleString()}\n${text}`);
-      const path = await saveDialog({ filters: [{ name: "SQL", extensions: ["sql"] }], defaultPath: `${table.value.trim().replace(/[\\/:*?"<>|]/g, "_")}_${stamp}.sql` });
-      if (!path) return;
-      await api.writeFile(path, text, "utf-8");
-      toast(`${rows.length.toLocaleString()}행을 INSERT 문으로 저장했습니다`, "ok");
-    } catch (e) {
-      toast(errOf(e).message, "error");
-    } finally {
-      this.grid.setFilter(this.filterIn.value);
-    }
-  }
-
-  copyCsv() {
-    if (!this.grid.rowCount()) return;
-    navigator.clipboard.writeText(this.grid.toCsv()).then(() => toast(`${this.grid.rowCount()}행을 CSV 로 복사했습니다`, "ok"));
-  }
-}
-
-class App {
+export class App {
   private tabs: Tab[] = [];
-  private active: Tab | null = null;
-  private profiles: Profile[] = [];
+  active: Tab | null = null;
+  profiles: Profile[] = [];
   private tabStrip = h("div", { class: "tabs" });
   /** 탭 옆의 "+" — 새 탭 (지금 탭과 같은 접속으로) */
   private plusBtn = h("button", { class: "tab-plus", title: "새 탭 (같은 접속으로)", onclick: () => this.newTab(true) }, "+");
   /** 탭을 끌어 옮긴 직후의 클릭은 탭을 고르는 것이 아니다 */
   tabJustDragged = false;
   private tabBodies = h("div", { class: "tab-bodies" });
-  private profileSel = h("select", { title: "접속 프로필" });
+  profileSel = h("select", { title: "접속 프로필" });
   /** 접속 단추 — 프로필·상태를 보이고, 누르면 프로필 고르기·끊기 메뉴 */
   private connName = h("span", { class: "conn-name" });
   private connSub = h("span", { class: "conn-sub" });
@@ -447,7 +57,7 @@ class App {
   private statusLeft = h("span", {});
   private statusRight = h("span", {});
   private compBadge = h("span", { class: "comp-badge", title: "자동완성 캐시 — Ctrl+Space 로 직접 띄운다" });
-  private btn: Record<string, HTMLButtonElement> = {};
+  btn: Record<string, HTMLButtonElement> = {};
   private browserList = h("div", { class: "obj-list" });
   private browserOwner = h("select", { title: "스키마" });
   private browserType = h("select", { title: "종류" },
@@ -456,13 +66,13 @@ class App {
   private browserFilter = h("input", { placeholder: "이름 필터 (예: ORD%)" });
   private browserObjs: ObjectEntry[] = [];
   private pickedTables = new Set<string>();
-  private ai: AiPanel;
+  ai: AiPanel;
   /** 프로젝트(Git) 패널 — 처음 필요할 때 불러온다 (시작을 늦추지 않게) */
   private git: GitPanel | null = null;
   private gitPane = h("div", { class: "git" });
   private gitLoading: Promise<GitPanel> | null = null;
   private gitBadge = h("span", { class: "git-badge" });
-  private layout!: SideLayout;
+  layout!: SideLayout;
 
   constructor(root: HTMLElement) {
     const b = (key: string, label: string, title: string, onclick: () => void, cls = "") =>
@@ -501,7 +111,7 @@ class App {
       return el;
     };
     this.runGroup = h("span", { class: "run-split" }, this.btn.run,
-      drop("▾", "실행 방법 고르기 — 스크립트 전체·실행계획·디버그", () => this.runMenu(), "primary split-more"));
+      drop("▾", "실행 방법 고르기 — 스크립트 전체·실행계획·디버그", () => runMenu(this), "primary split-more"));
     this.btn.cancel.hidden = true;
     const toolbar = h("header", { class: "toolbar" },
       this.connPill,
@@ -509,8 +119,8 @@ class App {
       this.runGroup, this.btn.cancel, this.btn.explain,
       this.txnGroup,
       h("span", { class: "sep" }),
-      drop("파일 ▾", "새 탭·열기·저장·인코딩·실행 이력·포맷", () => this.fileMenu()),
-      drop("도구 ▾", "분석·흐름도·디버그·스키마 비교·데이터 복사·용량·세션", () => this.toolsMenu()),
+      drop("파일 ▾", "새 탭·열기·저장·인코딩·실행 이력·포맷", () => fileMenu(this)),
+      drop("도구 ▾", "분석·흐름도·디버그·스키마 비교·데이터 복사·용량·세션", () => toolsMenu(this)),
       h("span", { class: "spacer" }),
       h("button", { class: "pal-open", title: "모든 명령을 이름으로 찾아 실행 (Ctrl+Shift+P)", onclick: () => this.palette() },
         h("span", {}, "🔍 명령 검색"), h("kbd", {}, "Ctrl+Shift+P")),
@@ -519,7 +129,7 @@ class App {
     );
     this.connPill.addEventListener("click", () => {
       const r = this.connPill.getBoundingClientRect();
-      showMenu(r.left, r.bottom + 2, this.connMenu());
+      showMenu(r.left, r.bottom + 2, connMenu(this));
     });
     this.txnGroup.append(this.btn.commit, this.btn.rollback);
     const tablePane = h("div", { class: "side-pane" },
@@ -600,6 +210,67 @@ class App {
     });
   }
 
+  /** 마지막으로 저장한 탭 상태 — 문서 객체(고치면 새 객체)·파일·탭 순서가 같으면 다시 쓰지 않는다 */
+  private savedTabsSig: unknown[] = [];
+  private savingTabs = false;
+
+  /** 탭을 데이터 폴더의 tabs.json 에 (바뀐 것이 있을 때만, force 면 늘) */
+  private async saveTabs(force = false) {
+    if (this.savingTabs || !restoreEnabled() || !this.tabs.length) return;
+    const active = Math.max(0, this.active ? this.tabs.indexOf(this.active) : 0);
+    const sig = [active, ...this.tabs.flatMap((t) => [t.editor.view.state.doc, t.filePath, t.dirty, t.encoding, t.conn?.profile ?? null])];
+    if (!force && sig.length === this.savedTabsSig.length && sig.every((x, i) => x === this.savedTabsSig[i])) return;
+    this.savingTabs = true;
+    try {
+      await saveSession(active, this.tabs.map((t) => ({
+        text: t.editor.text(), filePath: t.filePath, encoding: t.encoding, eol: t.eol, dirty: t.dirty,
+        cursor: t.editor.cursor(), profile: t.conn?.profile ?? null,
+      })));
+      this.savedTabsSig = sig;
+    } catch { /* 다음 차례에 다시 */ } finally {
+      this.savingTabs = false;
+    }
+  }
+
+  /** 지난번 탭을 되살린다 — 없으면 빈 탭 하나 */
+  private async restoreTabs() {
+    const s = await loadSession();
+    if (!s) {
+      this.newTab(false);
+      return;
+    }
+    let unsaved = 0;
+    for (const st of s.tabs) {
+      let { text, encoding, eol, dirty } = st;
+      // 파일로 저장해 둔 탭은 디스크에서 다시 (밖에서 고쳤을 수 있다). 파일이 없어졌으면 남긴 내용을 저장 안 함으로
+      if (st.filePath && !st.dirty) {
+        try {
+          const f = await api.readFile(st.filePath);
+          text = f.text;
+          encoding = f.encoding;
+          eol = f.text.includes("\r\n") ? "\r\n" : "\n";
+        } catch { dirty = true; }
+      }
+      const t = this.newTab(false, text);
+      t.filePath = st.filePath;
+      t.encoding = encoding;
+      t.eol = eol;
+      t.setDirty(dirty);
+      t.refreshTitle();
+      t.editor.view.dispatch({ selection: { anchor: Math.min(st.cursor, t.editor.view.state.doc.length) }, scrollIntoView: true });
+      if (dirty) unsaved++;
+    }
+    const act = this.tabs[s.active];
+    if (act) this.activate(act);
+    // 접속은 되살리지 않는다 (운영 DB 일 수 있다) — 그 탭의 프로필만 골라 둔다
+    const prof = s.tabs[s.active]?.profile;
+    if (prof && this.profiles.some((p) => p.name === prof)) {
+      this.profileSel.value = prof;
+      this.refresh();
+    }
+    if (unsaved) toast(`지난번 저장하지 않은 탭 ${unsaved}개를 되살렸습니다 (접속은 다시 하세요)`, "info", 6000);
+  }
+
   /** 선택 영역, 없으면 커서 위치 문장을 정리한다. 실행 취소 한 번으로 되돌린다. */
   async formatSql() {
     const t = this.active;
@@ -653,19 +324,24 @@ class App {
     });
     const info = await api.appInfo();
     void loadSnippets(info.config_path);
+    initSession(info.config_path);
     this.statusLeft.textContent = `SQLStudio ${info.version} · 설정: ${info.config_path}`;
     if (info.config_error) await alertBox("설정 파일 오류", `${info.config_error}\n\n기본 설정으로 시작합니다. 설정 화면에서 저장하면 파일을 다시 씁니다.`);
     await this.reloadProfiles();
     await this.ai.load();
-    this.newTab(false);
+    await this.restoreTabs();
+    // 몇 초마다 바뀐 탭이 있으면 저장 (프로그램이 죽어도 쓰던 SQL 이 남게)
+    window.setInterval(() => void this.saveTabs(), 3000);
     if (localStorage.getItem("git.last")) {
       const later = (f: () => void) => ("requestIdleCallback" in window ? requestIdleCallback(f, { timeout: 4000 }) : setTimeout(f, 2000));
       later(() => void this.loadGit());
     }
     this.refresh();
     getCurrentWindow().onCloseRequested(async (e) => {
+      await this.saveTabs(true).catch(() => {});
       const pending = this.tabs.filter((t) => t.txnPending);
-      const dirty = this.tabs.filter((t) => t.dirty);
+      // 탭을 되살리는 중이면 저장하지 않은 편집은 다음에 켤 때 그대로 나오므로 묻지 않는다
+      const dirty = restoreEnabled() ? [] : this.tabs.filter((t) => t.dirty);
       if (!pending.length && !dirty.length) return;
       const lines = [
         ...pending.map((t) => `· ${t.title()}: 커밋하지 않은 변경 (닫으면 롤백)`),
@@ -751,7 +427,7 @@ class App {
 
   /** 접속 단추 — 이미 접속한 탭에서 다른 접속을 고르면 그 탭은 그대로 두고 새 탭에 접속한다 (Toad 처럼).
    *  접속하지 않은 탭이거나 같은 접속을 다시 고르면 지금 탭에 (다시) 접속한다 */
-  private async connectActive() {
+  async connectActive() {
     const t = this.active;
     if (!t) return;
     const name = this.profileSel.value;
@@ -854,7 +530,7 @@ class App {
     }
   }
 
-  private async disconnectActive() {
+  async disconnectActive() {
     if (this.active) await this.disconnect(this.active);
   }
 
@@ -1206,7 +882,7 @@ class App {
     }, 5000);
   }
 
-  private async debugActive() {
+  async debugActive() {
     const t = this.need();
     if (!t) return;
     const cur = await this.currentStatement(t);
@@ -1215,34 +891,34 @@ class App {
     t.debugger().openBlock(text);
   }
 
-  private compareActive() {
+  compareActive() {
     const t = this.need();
     if (!t) return;
     void t.compare().open();
   }
 
-  private spaceActive() {
+  spaceActive() {
     const t = this.need();
     if (!t) return;
     if (!t.conn) return toast("먼저 접속하세요", "error");
     void showSpace(t.conn.id, t.conn.user);
   }
 
-  private monitorActive() {
+  monitorActive() {
     const t = this.need();
     if (!t) return;
     if (!t.conn) return toast("먼저 접속하세요", "error");
     t.monitor().open();
   }
 
-  private analyzeActive(owner?: string, name?: string) {
+  analyzeActive(owner?: string, name?: string) {
     const t = this.active;
     if (!t) return;
     // 접속 없이도 연다 — 다른 곳에서 내보낸 결과(.sqla)를 가져와 본다
     t.analysis().open(owner, name);
   }
 
-  private async txn(kind: "commit" | "rollback") {
+  async txn(kind: "commit" | "rollback") {
     const t = this.need();
     if (!t || !t.conn) return;
     try {
@@ -1454,7 +1130,7 @@ class App {
   }
 
   /** 데이터 흐름도 별도 창 */
-  private openDfd(center?: string, dir?: string) {
+  openDfd(center?: string, dir?: string) {
     const t = this.active;
     if (!t?.conn) return toast("먼저 접속하세요 — 그 접속의 분석 결과로 그립니다", "error");
     invoke("open_dfd_window", { id: t.conn.id, center: center ?? null, dir: dir ?? null }).catch((e) => toast(errOf(e).message, "error"));
@@ -1837,7 +1513,7 @@ class App {
   }
 
   /** 접속 간 데이터 복사 — 접속한 탭들이 원본·대상 후보 (같은 접속을 연 탭이 여럿이면 하나만) */
-  private copyDataFrom(t: Tab | null, table?: string) {
+  copyDataFrom(t: Tab | null, table?: string) {
     if (!t?.conn) return toast("먼저 원본에 접속하세요", "error");
     const seen = new Set<number>();
     const conns = this.tabs.filter((x) => x.conn && !seen.has(x.conn.id) && seen.add(x.conn.id)).map((x) => ({
@@ -2097,7 +1773,7 @@ class App {
 
   /** 저장 단추 우클릭 — 다른 이름, 인코딩 바꿔 저장 */
   /** 인코딩 바꿔 저장 — 파일 메뉴의 하위 메뉴 */
-  private encodingItems(): MenuItem[] {
+  encodingItems(): MenuItem[] {
     const t = this.active;
     if (!t) return [];
     const enc = (v: string, label: string): MenuItem => ({
@@ -2174,726 +1850,14 @@ class App {
     for (const x of this.tabs) x.refreshTitle();
   }
 
-  /** 접속 메뉴 — 프로필을 고르면 접속 (이미 접속한 탭에서 다른 프로필이면 새 탭), 다시 접속, 끊기, 접속 관리 */
-  private connMenu(): MenuItem[] {
-    const c = this.active?.conn;
-    const pick = (name: string) => { this.profileSel.value = name; void this.connectActive(); };
-    return [
-      { title: c ? "다른 접속은 새 탭에서 엽니다" : "접속할 프로필" },
-      ...(this.profiles.length ? this.profiles.map((p): MenuItem => ({
-        label: `${c?.profile === p.name ? "● " : ""}${p.name}`, hint: p.read_only ? "읽기 전용" : "",
-        disabled: this.btn.connect.disabled, run: () => pick(p.name),
-      })) : [{ label: "프로필 없음 — 설정에서 추가", disabled: true } as MenuItem]),
-      { sep: true },
-      { label: "다시 접속", disabled: !c || this.btn.connect.disabled, run: () => { if (c) pick(c.profile); } },
-      { label: "끊기", disabled: this.btn.disconnect.disabled, run: () => this.disconnectActive() },
-      { sep: true },
-      { label: "접속 관리…", run: () => void this.settings() },
-    ];
-  }
-
-  private runMenu(): MenuItem[] {
-    const off = (k: string) => this.btn[k].disabled;
-    return [
-      { label: "문장 실행", hint: "Ctrl+Enter", disabled: off("run"), run: () => this.runStatement() },
-      { label: "스크립트 전체 실행", hint: "F5", disabled: off("script"), run: () => this.runScript() },
-      { label: "실행계획", hint: "Ctrl+E", disabled: off("explain"), run: () => this.explain() },
-      { sep: true },
-      { label: "디버그", disabled: off("debug"), run: () => this.debugActive() },
-    ];
-  }
-
-  private fileMenu(): MenuItem[] {
-    const t = this.active;
-    return [
-      { label: "새 탭", run: () => this.newTab(true) },
-      { label: "열기…", run: () => void this.openFile() },
-      { sep: true },
-      { label: "저장", hint: "Ctrl+S", run: () => void this.save() },
-      { label: "다른 이름으로 저장…", hint: "Ctrl+Shift+S", run: () => void this.saveAs() },
-      { label: `인코딩 바꿔 저장${t ? ` (지금: ${t.encoding})` : ""}`, disabled: !t, sub: this.encodingItems() },
-      { sep: true },
-      { label: "실행 이력", hint: "F8", run: () => this.showHistory() },
-      { label: "SQL 포맷", hint: "Ctrl+Shift+F", run: () => void this.formatSql() },
-      { label: `자동 포맷${Object.values(autoFormat()).some(Boolean) ? " (켜짐)" : ""}`, sub: this.autoFormatItems() },
-    ];
-  }
-
-  /** 자동 포맷 켜기/끄기 — 파일 메뉴의 하위 메뉴와 명령 검색이 같이 쓴다 */
-  private autoFormatItems(): MenuItem[] {
-    const a = autoFormat();
-    const item = (k: keyof AutoFormat, label: string): MenuItem =>
-      ({ label: `${a[k] ? "✓ " : "　 "}${label}`, run: () => { setAutoFormat({ [k]: !a[k] }); toast(`${label}: ${a[k] ? "끔" : "켬"}`, "info", 1500); } });
-    return [
-      item("caseOnType", "키워드 대소문자 바로 맞추기"),
-      item("onSemicolon", "; 를 치면 그 문장 정리"),
-      item("onPaste", "SQL 을 붙여 넣으면 정리"),
-      item("onRun", "실행할 때 그 문장 정리"),
-      { sep: true },
-      { label: "포맷 스타일…", run: () => void this.settings("편집기") },
-    ];
-  }
-
-  private toolsMenu(): MenuItem[] {
-    const off = (k: string) => this.btn[k].disabled;
-    return [
-      { title: "코드" },
-      { label: "PL/SQL 분석", disabled: off("analyze"), run: () => this.analyzeActive() },
-      { label: "데이터 흐름도", run: () => this.openDfd() },
-      { label: "PL/SQL 디버그", disabled: off("debug"), run: () => this.debugActive() },
-      { title: "DB 사이" },
-      { label: "스키마 비교", disabled: off("compare"), run: () => this.compareActive() },
-      { label: "데이터 복사", disabled: off("copy"), run: () => this.copyDataFrom(this.active) },
-      { title: "운영" },
-      { label: "용량 (테이블·테이블스페이스)", disabled: off("space"), run: () => this.spaceActive() },
-      { label: "세션·락 모니터", disabled: off("monitor"), run: () => this.monitorActive() },
-    ];
-  }
-
-  /** 명령 검색 (Ctrl+Shift+P) — 메뉴와 같은 명령, 접속 프로필도 */
+  /** 명령 검색 (Ctrl+Shift+P) — menus.ts */
   palette() {
-    const off = (k: string) => this.btn[k].disabled;
-    const c = this.active?.conn;
-    const connectTo = (name: string) => { this.profileSel.value = name; void this.connectActive(); };
-    const cmds: Command[] = [
-      ...(c ? [{ group: "접속", label: `${c.profile} 다시 접속`, alias: "reconnect", disabled: off("connect"), run: () => connectTo(c.profile) }] : []),
-      ...this.profiles.map((p): Command => ({ group: "접속", label: `${p.name} 에 접속`, alias: "connect", disabled: off("connect"), run: () => connectTo(p.name) })),
-      { group: "접속", label: "접속 끊기", alias: "disconnect", disabled: off("disconnect"), run: () => this.disconnectActive() },
-      { group: "접속", label: "접속 관리", alias: "profile 프로필 설정", run: () => void this.settings() },
-      { group: "실행", label: "문장 실행", keys: "Ctrl+Enter", alias: "run", disabled: off("run"), run: () => this.runStatement() },
-      { group: "실행", label: "스크립트 전체 실행", keys: "F5", alias: "script", disabled: off("script"), run: () => this.runScript() },
-      { group: "실행", label: "실행계획", keys: "Ctrl+E", alias: "explain plan", disabled: off("explain"), run: () => this.explain() },
-      { group: "실행", label: "실행 중지", keys: "Esc", alias: "cancel", disabled: off("cancel"), run: () => this.cancel() },
-      { group: "트랜잭션", label: "커밋", alias: "commit", disabled: off("commit"), run: () => this.txn("commit") },
-      { group: "트랜잭션", label: "롤백", alias: "rollback", disabled: off("rollback"), run: () => this.txn("rollback") },
-      { group: "파일", label: "새 탭", alias: "new tab", run: () => this.newTab(true) },
-      { group: "파일", label: "파일 열기", alias: "open", run: () => void this.openFile() },
-      { group: "파일", label: "저장", keys: "Ctrl+S", alias: "save", run: () => void this.save() },
-      { group: "파일", label: "다른 이름으로 저장", keys: "Ctrl+Shift+S", alias: "save as", run: () => void this.saveAs() },
-      { group: "편집", label: "SQL 포맷", keys: "Ctrl+Shift+F", alias: "format 정리", run: () => void this.formatSql() },
-      ...this.autoFormatItems().flatMap((it): Command[] => ("run" in it && it.run && !it.label.endsWith("…")
-        ? [{ group: "자동 포맷", label: `${it.label.slice(2)} ${it.label.startsWith("✓") ? "끄기" : "켜기"}`, alias: "auto format 자동 정리", run: it.run }] : [])),
-      { group: "편집", label: "포맷 스타일 설정", alias: "format style 정렬 쉼표", run: () => void this.settings("편집기") },
-      { group: "편집", label: "실행 이력", keys: "F8", alias: "history", run: () => this.showHistory() },
-      { group: "도구", label: "PL/SQL 분석", alias: "analyze", disabled: off("analyze"), run: () => this.analyzeActive() },
-      { group: "도구", label: "데이터 흐름도", alias: "dfd flow", run: () => this.openDfd() },
-      { group: "도구", label: "PL/SQL 디버그", alias: "debug", disabled: off("debug"), run: () => this.debugActive() },
-      { group: "도구", label: "스키마 비교", alias: "compare diff", disabled: off("compare"), run: () => this.compareActive() },
-      { group: "도구", label: "데이터 복사", alias: "copy", disabled: off("copy"), run: () => this.copyDataFrom(this.active) },
-      { group: "도구", label: "용량", alias: "space tablespace 테이블스페이스", disabled: off("space"), run: () => this.spaceActive() },
-      { group: "도구", label: "세션·락 모니터", alias: "session lock monitor kill", disabled: off("monitor"), run: () => this.monitorActive() },
-      { group: "보기", label: "왼쪽 영역 접기/펼치기", keys: "Ctrl+Shift+1", alias: "테이블 프로젝트", run: () => this.layout.toggle("left") },
-      { group: "보기", label: "AI 영역 접기/펼치기", keys: "Ctrl+Shift+3", run: () => this.layout.toggle("right") },
-      { group: "보기", label: "AI 입력칸으로", keys: "Ctrl+K", run: () => { this.layout.toggle("right", true); this.ai.focus(); } },
-      { group: "도움말", label: "단축키 목록", keys: "F1", alias: "shortcut", run: () => showShortcuts() },
-      { group: "설정", label: "설정 열기", alias: "settings", run: () => void this.settings() },
-    ];
-    openPalette(cmds);
+    palette(this);
   }
 
-  // ── 설정 ─────────────────────────────────────────
-
+  /** 설정 — settings.ts */
   async settings(page = "접속") {
-    const body = h("div", { class: "settings" });
-    const nav = h("nav", { class: "settings-nav" });
-    const pages: Record<string, () => Promise<HTMLElement>> = {
-      "접속": () => this.profilesPage(),
-      "AI": () => this.providersPage(),
-      "MCP": () => this.mcpPage(),
-      "편집기": async () => this.editorPage(),
-      "정보": async () => this.aboutPage(),
-    };
-    const content = h("div", { class: "settings-content" });
-    const showPage = async (name: string) => {
-      for (const b of nav.children) b.classList.toggle("active", b.textContent === name);
-      content.replaceChildren(await pages[name]());
-    };
-    for (const name of Object.keys(pages)) nav.append(h("button", { onclick: (e: Event) => { e.preventDefault(); showPage(name); } }, name));
-    body.append(nav, content);
-    showPage(pages[page] ? page : "접속");
-    await modal("설정", body, [{ label: "닫기", value: true, kind: "primary" }], { wide: true });
-    await this.reloadProfiles();
-    await this.ai.load();
-  }
-
-  /** 접속 진단 — 기록을 요약해 보여 주고 복사한다 (로그를 보내지 않고 말로 전할 수 있게) */
-  private async connReport() {
-    const days = h("select", {}, ...[[1, "오늘"], [7, "최근 7일"], [30, "최근 30일"]].map(([v, l]) => h("option", { value: String(v), selected: v === 7 }, String(l))));
-    const mask = h("input", { type: "checkbox", checked: true }) as HTMLInputElement;
-    const pre = h("pre", { class: "modal-text conn-report" });
-    const tbody = h("tbody", {});
-    const KIND: Record<string, string> = {
-      connect_ok: "접속", connect_fail: "접속 실패", lost: "끊김", recover_ok: "다시 접속", recover_fail: "다시 접속 실패", meta_ok: "사전 조회 다시 접속", meta_fail: "사전 조회 다시 접속 실패",
-    };
-    const fill = async () => {
-      const r = await invoke<{ summary: string; events: { t: number; kind: string; who?: string; target?: string; sid?: number; via?: string; idle?: number; ms?: number; code?: string; msg?: string }[]; path: string }>(
-        "conn_report", { days: Number(days.value), mask: mask.checked });
-      pre.textContent = r.summary;
-      tbody.replaceChildren(...r.events.slice(0, 200).map((e) => h("tr", { class: e.kind.includes("fail") || e.kind === "lost" ? "warn" : "" },
-        h("td", {}, new Date(e.t * 1000).toLocaleString()),
-        h("td", {}, KIND[e.kind] ?? e.kind),
-        h("td", {}, e.who ?? ""), h("td", {}, e.target ?? ""),
-        h("td", {}, e.kind === "lost" ? `${e.via === "keepalive" ? "쉬는 동안" : "쓰다가"}${e.idle != null ? ` · ${e.idle >= 60 ? `${Math.round(e.idle / 60)}분` : `${e.idle}초`} 쉼` : ""}` : e.ms != null ? `${(e.ms / 1000).toFixed(1)}초` : ""),
-        h("td", { title: e.msg ?? "" }, e.code ?? ""))));
-    };
-    days.onchange = () => void fill();
-    mask.onchange = () => void fill();
-    await fill().catch((e) => { pre.textContent = errOf(e).message; });
-    const body = h("div", { class: "conn-report-box" },
-      h("div", { class: "row" }, days, h("label", { class: "check", title: "주소·계정을 '접속1' 처럼 가리고, 오류 원문을 뺀다" }, mask, "주소·계정 가리기"),
-        h("span", { class: "spacer" }),
-        h("button", { class: "primary", onclick: () => navigator.clipboard.writeText(pre.textContent ?? "").then(() => toast("요약을 복사했습니다", "info", 1500)) }, "요약 복사")),
-      pre,
-      h("details", {}, h("summary", {}, "기록 (최근 것부터)"),
-        h("div", { class: "conn-events" }, h("table", { class: "desc-table" },
-          h("thead", {}, h("tr", {}, ...["때", "무엇", "세션", "접속", "상황", "오류"].map((x) => h("th", {}, x)))), tbody))));
-    await modal("접속 진단", body, [{ label: "닫기", value: true }], { wide: true });
-  }
-
-  /** 데이터 폴더 지정 — 포터블을 버전마다 다른 폴더에 풀거나 설치판을 다시 깔아도 설정·이력을 같이 쓰게 (portable.txt / location.txt 의 data_dir=) */
-  private async dataDirRow() {
-    const d = await invoke<{ portable: boolean; fixed: boolean; dir: string }>("data_dir_info").catch(() => null);
-    if (!d || d.fixed) return "";
-    const apply = async (dir: string | null) => {
-      try {
-        const now = await invoke<string>("set_data_dir", { dir });
-        if (await confirmBox("데이터 폴더", `${now}\n\n이 폴더를 씁니다. 고른 폴더에 설정이 없으면 지금 쓰던 설정·이력을 복사해 두었습니다.\n다음에 시작할 때부터 적용됩니다. 지금 다시 시작할까요?`, "다시 시작", false)) await invoke("restart_app");
-      } catch (e) { toast(errOf(e).message, "error"); }
-    };
-    const def = d.portable ? "실행 파일 옆 data 폴더" : "%APPDATA%\\sqlstudio";
-    return h("p", { class: "hint" }, `데이터 폴더${d.portable ? " (포터블)" : ""}: ${d.dir} `,
-      h("button", { class: "small", title: `설정·실행 이력·분석 결과를 둘 폴더. 바깥 폴더(예: D:\\SQLStudio-data)를 정해 두면 새 버전을 다른 폴더에 풀거나 다시 설치해도 같은 폴더만 다시 고르면 됩니다. 이전 SQLStudio 포터블 폴더를 고르면 그 안의 data 를 씁니다`, onclick: async () => {
-        const p = await openDialog({ directory: true, multiple: false, title: "데이터 폴더 (설정·이력을 둘 곳, 또는 이전 SQLStudio 폴더)", defaultPath: d.dir });
-        if (p && !Array.isArray(p)) await apply(p);
-      } }, "폴더 지정…"), " ",
-      h("button", { class: "small", title: `기본 위치(${def})로 되돌린다`, onclick: () => void apply(null) }, "기본으로"));
-  }
-
-  private async aboutPage() {
-    const info = await api.appInfo();
-    return h("div", { class: "about" },
-      h("p", {}, h("strong", {}, `SQLStudio ${info.version}`)),
-      h("p", { class: "hint" }, `설정 파일: ${info.config_path}`),
-      await this.dataDirRow(),
-      h("p", {}, h("button", { title: "접속·끊김·다시 접속 기록을 몇 줄로 요약 — 원인(쉬는 동안·실행 중·서버·한도)을 가른다", onclick: () => void this.connReport() }, "접속 진단")),
-      info.log_dir ? h("p", { class: "hint" }, `로그: ${info.log_dir} `,
-        h("button", { class: "small", title: "접속·끊김·다시 접속 기록 — 문제가 생기면 이 폴더의 sqlstudio.log 를 보내 주세요", onclick: () => invoke("open_log_dir").catch((e) => toast(errOf(e).message, "error")) }, "로그 폴더 열기")) : "",
-      h("h4", {}, "오픈소스 라이선스"),
-      h("p", { class: "hint" }, "이 프로그램에 포함된 오픈소스 구성 요소와 라이선스입니다. 설치 폴더의 THIRD_PARTY_NOTICES.html 과 같은 내용입니다."),
-      h("iframe", { class: "about-notices", src: "/third-party-notices.html", title: "오픈소스 라이선스 고지" }));
-  }
-
-  private editorPage() {
-    const p = loadPrefs();
-    const sel = (cur: string, opts: [string, string][]) =>
-      h("select", {}, ...opts.map(([v, l]) => h("option", { value: v, selected: v === cur }, l))) as HTMLSelectElement;
-    const style = sel(p.style, Object.entries(STYLE_PRESETS).map(([k, v]) => [k, v.label]));
-    const kw = sel(p.keywordCase, [["upper", "대문자 (SELECT)"], ["lower", "소문자 (select)"], ["preserve", "그대로"]]);
-    const ident = sel(p.identCase, [["preserve", "그대로"], ["upper", "대문자 (EMP)"], ["lower", "소문자 (emp)"]]);
-    const comma = sel(p.commaBefore ? "before" : "after", [["before", "줄 앞 (, SAL)"], ["after", "줄 끝 (SAL,)"]]);
-    const ind = sel(String(p.indent), [["2", "2칸"], ["4", "4칸"]]);
-    const logic = sel(p.logicalBefore ? "before" : "after", [["before", "줄 앞 (AND x = 1)"], ["after", "줄 끝 (x = 1 AND)"]]);
-    const width = h("input", { type: "number", min: "20", max: "200", value: String(p.expressionWidth) }) as HTMLInputElement;
-    const preview = h("pre", { class: "format-preview" });
-    const sample = "select o.order_id, c.cust_nm, sum(i.qty * i.price) total, case when o.status = 'C' then '취소' else '정상' end st " +
-      "from orders o join customers c on c.cust_id = o.cust_id left join order_items i on i.order_id = o.order_id and i.use_yn = 'Y' " +
-      "where o.order_dt >= trunc(sysdate) - 7 and c.grade in ('A', 'B') and exists (select 1 from payments p where p.order_id = o.order_id) " +
-      "group by o.order_id, c.cust_nm, o.status order by total desc";
-    // 스타일마다 쓰는 항목만 보인다
-    const fComma = field("쉼표 위치", comma);
-    const fInd = field("들여쓰기", ind);
-    const fWidth = field("한 줄 너비", width, " ");
-    const read = (): FormatPrefs => ({
-      style: style.value as FormatPrefs["style"],
-      keywordCase: kw.value as FormatPrefs["keywordCase"],
-      identCase: ident.value as FormatPrefs["identCase"],
-      commaBefore: comma.value === "before",
-      indent: ind.value === "4" ? 4 : 2,
-      expressionWidth: Math.max(20, Math.min(200, Number(width.value) || DEFAULT_PREFS.expressionWidth)),
-      logicalBefore: logic.value === "before",
-    });
-    const set = (q: Partial<FormatPrefs>) => {
-      if (q.style) style.value = q.style;
-      if (q.keywordCase) kw.value = q.keywordCase;
-      if (q.identCase) ident.value = q.identCase;
-      if (q.commaBefore !== undefined) comma.value = q.commaBefore ? "before" : "after";
-      if (q.logicalBefore !== undefined) logic.value = q.logicalBefore ? "before" : "after";
-      if (q.indent) ind.value = String(q.indent);
-      if (q.expressionWidth) width.value = String(q.expressionWidth);
-    };
-    const update = () => {
-      const prefs = read();
-      savePrefs(prefs);
-      fComma.hidden = prefs.style === "left";
-      fInd.hidden = prefs.style !== "left";
-      fWidth.hidden = prefs.style === "river";
-      const hint = fWidth.querySelector("small");
-      if (hint) hint.textContent = prefs.style === "left" ? "괄호 식이 이보다 길면 여러 줄로 나눕니다" : "목록을 이 너비까지 한 줄에 채웁니다";
-      const r = formatSql(sample, prefs);
-      preview.textContent = r.ok ? r.text : r.reason;
-    };
-    // 스타일을 고르면 그 스타일의 기본 모양으로 (대소문자는 그대로)
-    style.addEventListener("change", () => { set(STYLE_PRESETS[style.value as FormatPrefs["style"]].prefs); update(); });
-    for (const el of [kw, ident, comma, ind, logic, width]) el.addEventListener("change", update);
-    const fromSample = h("button", { class: "small", title: "마음에 드는 모양으로 정리한 SQL 을 붙여 넣으면 쉼표·AND 위치, 키워드 정렬, 대소문자를 읽어 맞춘다", onclick: async (e: Event) => {
-      e.preventDefault();
-      const ta = h("textarea", { rows: 12, class: "snip-body", placeholder: "SELECT JOB\n     , MGR\n  FROM emp\n WHERE 1 = 1" }) as HTMLTextAreaElement;
-      const ok = await modal("예시로 맞추기", h("div", { class: "form" },
-        h("small", {}, "원하는 모양으로 정리한 SQL 을 붙여 넣으세요. 쉼표·AND 위치, 키워드 정렬, 키워드·이름 대소문자를 읽어 설정을 맞춥니다."), ta),
-        [{ label: "취소", value: false }, { label: "맞추기", value: true, kind: "primary" }], { wide: true });
-      if (!ok || !ta.value.trim()) return;
-      const d = detectPrefs(ta.value);
-      if (!d.found.length) return toast("읽을 수 있는 모양이 없습니다 — SELECT·FROM·쉼표가 든 SQL 을 넣어 보세요", "info");
-      set(d.prefs);
-      update();
-      toast(`맞췄습니다: ${d.found.join(" · ")}`, "ok", 5000);
-    } }, "예시로 맞추기…");
-    update();
-    const autoBox = h("div", { class: "auto-format" }, ...([
-      ["caseOnType", "키워드 대소문자 바로 맞추기 (낱말을 다 치면)"],
-      ["onSemicolon", "줄 끝에서 ; 를 치면 그 문장 정리"],
-      ["onPaste", "SQL 문장을 붙여 넣으면 정리"],
-      ["onRun", "실행(Ctrl+Enter)할 때 그 문장 정리"],
-    ] as [keyof AutoFormat, string][]).map(([k, label]) => {
-      const cb = h("input", { type: "checkbox", checked: autoFormat()[k] }) as HTMLInputElement;
-      cb.onchange = () => setAutoFormat({ [k]: cb.checked });
-      return h("label", { class: "check" }, cb, label);
-    }));
-    // 실행 이력 켜기/끄기·지우기
-    const histOn = h("input", { type: "checkbox" });
-    const histDir = h("small", {});
-    const histBox = h("div", {},
-      h("label", { class: "check" }, histOn, "실행한 SQL 을 이 PC 에 남기기 (바인드 값은 남기지 않음)"), histDir,
-      h("div", { class: "row" }, h("button", { onclick: async (e: Event) => {
-        e.preventDefault();
-        if (!(await confirmBox("실행 이력 지우기", "남겨 둔 실행 이력을 모두 지웁니다. 되돌릴 수 없습니다.", "지우기"))) return;
-        await invoke("history_clear").then(() => toast("지웠습니다", "ok")).catch((err) => toast(errOf(err).message, "error"));
-      } }, "이력 모두 지우기")));
-    invoke<{ enabled: boolean; keep_months: number; dir: string }>("history_settings").then((s) => {
-      histOn.checked = s.enabled;
-      histDir.textContent = `위치: ${s.dir} · 최근 ${s.keep_months}달만 남김`;
-    }).catch(() => {});
-    histOn.onchange = () => invoke("set_history_enabled", { enabled: histOn.checked }).catch((err) => toast(errOf(err).message, "error"));
-    const theme = sel(themePref(), [["system", "시스템 따름 (Windows 설정)"], ["light", "밝게"], ["dark", "어둡게"]]);
-    // 편집기 선택 색 — 밝게·어둡게마다 따로 기억한다 (테마를 바꾸면 그 테마의 색으로)
-    const colorInputs: [EditorColorKey, HTMLInputElement][] = [];
-    const colorRow = (key: EditorColorKey, label: string, hint: string) => {
-      const input = h("input", { type: "color", style: "width:56px;height:28px;padding:0" }) as HTMLInputElement;
-      input.value = editorColorNow(key);
-      input.oninput = () => setEditorColor(key, input.value);
-      colorInputs.push([key, input]);
-      const reset = h("button", { class: "small", title: "이 테마의 기본 색으로", onclick: (e: Event) => { e.preventDefault(); setEditorColor(key, null); input.value = editorColorNow(key); } }, "기본값");
-      return field(label, h("div", { class: "row", style: "display:flex;gap:8px;align-items:center" }, input, reset), hint);
-    };
-    theme.onchange = () => { applyTheme(theme.value as ThemePref); setTimeout(() => { for (const [k, i] of colorInputs) i.value = editorColorNow(k); }, 0); };
-    return h("div", { class: "form" },
-      h("h3", {}, "화면"),
-      field("화면 테마", theme, "바꾸면 바로 적용되고 이 PC 에 기억합니다. 흐름도 창도 따라갑니다"),
-      colorRow("sel", "편집기 선택 영역 색", "글을 드래그하거나 낱말을 더블클릭해 고른 곳의 배경색 — 밝은 화면·어두운 화면이 따로 기억됩니다"),
-      colorRow("match", "같은 낱말 강조 색", "낱말을 고르면 같은 낱말이 나오는 다른 곳에 칠하는 배경색"),
-      h("h3", {}, "SQL 포맷 (Ctrl+Shift+F)"),
-      field("스타일", h("div", { class: "row", style: "display:flex;gap:8px;align-items:center" }, style, fromSample)),
-      field("쓰는 동안 자동 포맷", autoBox, "파일 메뉴 > 자동 포맷 에서도 켜고 끕니다"),
-      field("키워드", kw), field("테이블·컬럼 이름", ident), fComma, field("AND / OR 위치", logic), fInd, fWidth,
-      h("small", {}, "바꾸면 바로 저장됩니다. 포맷 결과가 공백·대소문자 말고 원본과 달라지면 적용하지 않습니다. PL/SQL 블록은 아직 포맷하지 않습니다. " +
-        "오른쪽 맞춤·간결은 SELECT·WITH·INSERT·UPDATE·DELETE 를 다루고, 그 밖(MERGE·DDL)은 왼쪽 정렬로 정리합니다."),
-      field("미리 보기", preview),
-      h("h3", {}, "여러 곳 편집 (열 편집)"),
-      h("pre", { class: "format-preview" },
-        "Alt + 드래그          사각형(열) 선택\n" +
-        "Alt + Shift + 방향키   키보드로 사각형 선택\n" +
-        "Ctrl + 클릭           커서 추가\n" +
-        "Ctrl + D              같은 단어 하나 더 선택\n" +
-        "Esc                   커서 하나로"),
-      h("h3", {}, "SQL 실행 이력 (F8)"),
-      histBox,
-      h("h3", {}, "코드 조각"),
-      this.snippetEditor(),
-    );
-  }
-
-  /** 코드 조각 목록·편집·가져오기/내보내기 */
-  private snippetEditor() {
-    let items: Snip[] = snippets().map((s) => ({ ...s }));
-    let cur = -1;
-    const listEl = h("div", { class: "snip-list" });
-    const key = h("input", { placeholder: "줄임말 (예: sel)", style: "width:120px" });
-    const desc = h("input", { placeholder: "설명", style: "flex:1" });
-    const body = h("textarea", { rows: 7, class: "snip-body", placeholder: "SELECT ${*}\n  FROM ${table}" });
-    const persist = async (next: Snip[], msg = "저장했습니다") => {
-      try { await saveSnippets(next); items = next.map((s) => ({ ...s })); render(); toast(msg, "ok"); }
-      catch (err) { toast(errOf(err).message, "error"); }
-    };
-    const render = () => {
-      listEl.replaceChildren(...items.map((s, i) => {
-        const b = h("button", { class: `list-item${i === cur ? " active" : ""}`, onclick: (e: Event) => { e.preventDefault(); pick(i); } },
-          h("code", {}, s.key), h("small", {}, ` ${s.desc}`));
-        return b;
-      }));
-    };
-    const pick = (i: number) => {
-      cur = i;
-      const s = items[i];
-      key.value = s?.key ?? ""; desc.value = s?.desc ?? ""; body.value = s?.body ?? "";
-      render();
-    };
-    const btn = (label: string, f: () => void, cls = "") => h("button", { class: cls, onclick: (e: Event) => { e.preventDefault(); f(); } }, label);
-    const box = h("div", { class: "snip" },
-      h("small", {}, "편집기에서 줄임말을 치면 자동완성에 뜹니다. 고르면 틀이 들어가고 ${이름} 칸을 Tab 으로 옮겨 다니며 채웁니다 (이름이 같은 칸은 함께 바뀜)."),
-      h("div", { class: "snip-main" }, listEl,
-        h("div", { class: "snip-form" },
-          h("div", { class: "row" }, key, desc), body,
-          h("div", { class: "row" },
-            btn("저장", () => {
-              const k = key.value.trim();
-              if (!k || !body.value.trim()) return toast("줄임말과 내용을 채우세요", "error");
-              const next = items.slice();
-              const dup = next.findIndex((s, i) => i !== cur && s.key.toLowerCase() === k.toLowerCase());
-              if (dup >= 0) return toast(`'${k}' 는 이미 있습니다`, "error");
-              const s = { key: k, desc: desc.value.trim(), body: body.value };
-              if (cur >= 0) next[cur] = s; else { next.push(s); cur = next.length - 1; }
-              persist(next);
-            }, "primary"),
-            btn("새 조각", () => pick(-1)),
-            btn("삭제", async () => {
-              if (cur < 0) return;
-              if (!(await confirmBox("조각 삭제", `'${items[cur].key}' 를 지울까요?`, "삭제"))) return;
-              const next = items.filter((_, i) => i !== cur); cur = -1; key.value = desc.value = body.value = "";
-              persist(next, "지웠습니다");
-            }, "danger")))),
-      h("div", { class: "row" },
-        btn("내보내기", async () => {
-          const path = await saveDialog({ filters: [{ name: "JSON", extensions: ["json"] }], defaultPath: "sqlstudio-snippets.json" });
-          if (!path) return;
-          await api.writeFile(path, JSON.stringify({ snippets: items }, null, 2), "utf-8").then(() => toast("내보냈습니다 — 팀원은 '가져오기'로 씁니다", "ok")).catch((err) => toast(errOf(err).message, "error"));
-        }),
-        btn("가져오기", async () => {
-          const path = await openDialog({ multiple: false, filters: [{ name: "JSON", extensions: ["json"] }] });
-          if (!path || Array.isArray(path)) return;
-          try {
-            const got = parseSnippets((await api.readFile(path)).text);
-            // 같은 줄임말은 가져온 것으로 바꾸고 나머지는 더한다
-            const next = items.filter((s) => !got.some((g) => g.key.toLowerCase() === s.key.toLowerCase())).concat(got);
-            persist(next, `${got.length}개 가져왔습니다`);
-          } catch (err) { toast(`가져오지 못했습니다: ${errOf(err).message}`, "error"); }
-        }),
-        btn("기본 조각으로", async () => {
-          if (!(await confirmBox("기본 조각으로", "지금 조각을 지우고 기본 조각으로 되돌립니다.", "되돌리기"))) return;
-          cur = -1; persist(DEFAULT_SNIPPETS.map((s) => ({ ...s })), "기본 조각으로 되돌렸습니다");
-        })));
-    render();
-    return box;
-  }
-
-  private async profilesPage() {
-    const list = h("div", { class: "list" });
-    const form = h("div", { class: "form" });
-    // tnsnames.ora 별칭 — 접속 문자열 칸에서 고른다
-    const tns = await api.tnsList().catch(() => ({ entries: [] } as TnsView));
-    const tnsList = h("datalist", { id: "tns-aliases" }, ...tns.entries.map((e) => h("option", { value: e.alias }, [e.host, e.port].filter(Boolean).join(":") + (e.service ? `/${e.service}` : ""))));
-    const where = (e: TnsEntry) => `${e.host ?? "?"}${e.port ? `:${e.port}` : ""}${e.service ? `/${e.service}` : ""}`;
-    const edit = (p?: Profile) => {
-      const name = h("input", { value: p?.name ?? "" });
-      const user = h("input", { value: p?.user ?? "" });
-      const cs = h("input", { value: p?.connect_string ?? "", placeholder: tns.entries.length ? `TNS 별칭 (${tns.entries.length}개에서 고르기) 또는 host:1521/SERVICE` : "host:1521/SERVICE 또는 TNS 별칭" });
-      cs.setAttribute("list", "tns-aliases");
-      const csHint = h("small", { class: "tns-hint" });
-      const showHint = () => {
-        const e = tns.entries.find((x) => x.alias === cs.value.trim().toUpperCase());
-        csHint.textContent = e ? `TNS ${e.alias} → ${where(e)}` : "";
-      };
-      cs.addEventListener("input", () => {
-        showHint();
-        // 새 접속에서 별칭을 고르면 이름도 채운다
-        const e = tns.entries.find((x) => x.alias === cs.value.trim().toUpperCase());
-        if (e && !p && !name.value.trim()) name.value = e.alias;
-      });
-      showHint();
-      const ro = h("input", { type: "checkbox", checked: !!p?.read_only });
-      const prod = h("input", { type: "checkbox", checked: !!p?.production });
-      const color = h("input", { type: "color", value: p?.color ?? "#3a7bd5" });
-      const useColor = h("input", { type: "checkbox", checked: !!p?.color });
-      const timeout = h("input", { type: "number", min: "0", value: p?.call_timeout_secs ?? "" , placeholder: "없음" });
-      form.replaceChildren(
-        field("이름", name), field("사용자", user), field("접속 문자열", cs, "11g 는 Instant Client 가 필요합니다 (19c 권장)"), csHint,
-        h("label", { class: "check" }, ro, "읽기 전용 (SELECT 만, 서버에서도 막음)"),
-        h("label", { class: "check", title: "INSERT·UPDATE·DELETE·DDL·PL/SQL 블록·COMMIT 을 실행 전에 항상 확인합니다" }, prod, "운영 DB (바꾸는 문장·커밋 전에 항상 확인)"),
-        h("label", { class: "check" }, useColor, "탭 색 표시 (운영 DB 는 빨강 권장)", color),
-        field("호출 시간 상한(초)", timeout, "Oracle Client 18 이상에서만 동작"),
-        h("small", {}, "비밀번호는 설정 파일에 쓰지 않습니다. 접속할 때 묻거나(‘비밀번호 저장’ 을 고르면 OS 자격 증명 관리자에), 환경변수 SQLSTUDIO_PW_<이름> 을 씁니다."),
-        p?.has_saved_password ? h("div", { class: "row" }, h("span", {}, "저장된 비밀번호가 있습니다"),
-          h("button", { class: "small", onclick: async (e: Event) => {
-            e.preventDefault();
-            await api.forgetPassword(p.name).catch((err) => toast(errOf(err).message, "error"));
-            toast("저장된 비밀번호를 지웠습니다", "ok");
-            await refreshList();
-            (e.target as HTMLElement).parentElement?.remove();
-          } }, "지우기")) : "",
-        h("div", { class: "row" },
-          h("button", { class: "primary", onclick: async (e: Event) => {
-            e.preventDefault();
-            try {
-              await api.saveProfile({
-                name: name.value.trim(), user: user.value.trim(), connect_string: cs.value.trim(),
-                read_only: ro.checked, production: prod.checked, color: useColor.checked ? color.value : null,
-                call_timeout_secs: timeout.value ? Number(timeout.value) : null,
-              }, p?.name);
-              toast("저장했습니다", "ok");
-              await refreshList();
-            } catch (err) { toast(errOf(err).message, "error"); }
-          } }, "저장"),
-          p ? h("button", { class: "danger", onclick: async (e: Event) => {
-            e.preventDefault();
-            if (!(await confirmBox("삭제", `${p.name} 프로필을 지울까요?`, "삭제"))) return;
-            await api.deleteProfile(p.name).catch((err) => toast(errOf(err).message, "error"));
-            form.replaceChildren();
-            await refreshList();
-          } }, "삭제") : null));
-    };
-    const refreshList = async () => {
-      const ps = await api.listProfiles();
-      list.replaceChildren(
-        ...ps.map((p) => h("button", { class: "list-item", onclick: (e: Event) => { e.preventDefault(); edit(p); } },
-          h("span", { class: "dot", style: `background:${p.color ?? "transparent"}` }), `${p.name}`, h("small", {}, ` ${p.user}@${p.connect_string}`))),
-        h("button", { class: "list-item add", onclick: (e: Event) => { e.preventDefault(); edit(); } }, "+ 새 접속"));
-    };
-    await refreshList();
-    if (!this.profiles.length) edit();
-    const pickTns = async (e: Event) => {
-      e.preventDefault();
-      const d = await openDialog({ directory: true, title: "tnsnames.ora 가 있는 폴더" });
-      if (!d || Array.isArray(d)) return;
-      try {
-        await api.setTnsAdmin(d);
-        toast("저장했습니다 — 프로그램을 다시 시작하면 이 폴더의 별칭으로 접속합니다", "ok", 6000);
-      } catch (err) { toast(errOf(err).message, "error"); }
-    };
-    const tnsBox = h("div", { class: "tns-box" },
-      h("strong", {}, "tnsnames.ora "),
-      tns.dir ? h("span", { title: tns.configured && tns.configured !== tns.dir ? `설정: ${tns.configured} (프로그램 폴더 기준 상대 경로)` : tns.dir },
-        `${tns.dir} · 별칭 ${tns.entries.length}개${tns.configured ? (tns.configured !== tns.dir ? ` (설정: ${tns.configured})` : "") : " (자동으로 찾음)"}`)
-        : h("span", { class: "warn" }, "찾지 못했습니다 — TNS_ADMIN·ORACLE_HOME·Instant Client 폴더를 봤습니다"),
-      tns.error ? h("span", { class: "warn" }, ` · 읽기 실패: ${tns.error}`) : "",
-      h("button", { class: "small", onclick: pickTns }, "폴더 지정"),
-      tns.configured ? h("button", { class: "small", onclick: async (e: Event) => { e.preventDefault(); await api.setTnsAdmin(null); toast("지정을 지웠습니다 — 다시 시작하면 기본 위치를 씁니다", "ok"); } }, "지정 해제") : "");
-    return h("div", {}, tnsBox, tnsList, h("div", { class: "split" }, list, form));
-  }
-
-  /** 문법 안내 카드 보기 — 실제로 AI 에 보내는 내용. 기본 카드는 회사 규칙 파일로 옮겨 고친다 */
-  private async showGuides() {
-    type Card = { id: string; title: string; keys: string[]; version: string; body: string; source: "builtin" | "custom" | "override" };
-    const cards = await invoke<Card[]>("ai_guides_list").catch((e) => { toast(errOf(e).message, "error"); return null; });
-    if (!cards) return;
-    const SRC = { builtin: ["기본", ""], custom: ["회사 규칙", "ok"], override: ["회사 규칙이 바꿈", "warn"] } as const;
-    const q = h("input", { placeholder: "찾기 (제목·낱말·본문)", class: "sc-q" }) as HTMLInputElement;
-    const list = h("div", { class: "guide-list" });
-    const edit = async (id: string) => {
-      try {
-        const path = await invoke<string>("ai_guides_customize", { id });
-        list.closest("dialog")?.close();
-        await this.openPath(path);
-        toast(`'${id}' 카드를 회사 규칙 파일에 두었습니다 — 고치고 저장하면 다음 질문부터 씁니다`, "info", 6000);
-      } catch (e) { toast(errOf(e).message, "error"); }
-    };
-    const render = () => {
-      const w = q.value.trim().toLowerCase();
-      list.replaceChildren(...cards.filter((c) => !w || `${c.id} ${c.title} ${c.keys.join(" ")} ${c.body}`.toLowerCase().includes(w)).map((c) =>
-        h("details", { class: "guide" },
-          h("summary", {}, h("strong", {}, c.title), h("small", { class: "dim" }, ` ${c.id}`),
-            h("span", { class: `badge ${SRC[c.source][1]}` }, SRC[c.source][0]),
-            c.version ? h("span", { class: "badge" }, c.version.startsWith("-") ? `${c.version.slice(1)} 이하` : c.version.endsWith("-") ? `${c.version.slice(0, -1)} 이상` : c.version) : ""),
-          h("div", { class: "hint" }, c.keys.includes("*") ? "항상 넣는다 (SQL 만들기·고치기·대화)" : `이 낱말이 요청에 있으면: ${c.keys.join(", ")}`),
-          h("pre", { class: "guide-body" }, c.body),
-          h("button", { class: "small", onclick: () => void edit(c.id) }, c.source === "builtin" ? "회사 규칙으로 옮겨 고치기" : "회사 규칙 파일에서 고치기"))));
-    };
-    q.addEventListener("input", render);
-    render();
-    const n = (s: Card["source"]) => cards.filter((c) => c.source === s).length;
-    await modal("Oracle 문법 안내 카드", h("div", { class: "guides-view" },
-      h("p", { class: "hint" }, `요청에 맞는 카드를 몇 장 골라 AI 에 함께 보냅니다. 기본 ${n("builtin") + n("override")}장 (회사 규칙이 바꾼 것 ${n("override")}) · 회사 규칙만 ${n("custom")}장. ` +
-        "기본 카드를 고치면 회사 규칙 파일에 같은 아이디로 옮겨 두고 그것을 씁니다 — 지우면 기본으로 돌아갑니다."),
-      q, list), [{ label: "닫기", value: true, kind: "primary" }], { wide: true });
-  }
-
-  private async providersPage() {
-    const list = h("div", { class: "list" });
-    const form = h("div", { class: "form" });
-    const edit = (p?: Provider) => {
-      const name = h("input", { value: p?.name ?? "" });
-      const kind = h("select", {},
-        h("option", { value: "ollama", selected: p?.kind === "ollama" }, "Ollama (로컬)"),
-        h("option", { value: "openai_compatible", selected: p?.kind === "openai_compatible" }, "OpenAI 호환 (LM Studio, vLLM, OpenAI…)"),
-        h("option", { value: "anthropic", selected: p?.kind === "anthropic" }, "Anthropic (Claude)"));
-      const base = h("input", { value: p?.base_url ?? "", placeholder: "비우면 기본값" });
-      const model = h("input", { value: p?.model ?? "", style: "flex:1" });
-      // 서버에서 받아 온 모델 목록 — 골라서 모델 칸에 넣는다 (직접 쳐도 된다)
-      const modelPick = h("select", { title: "서버에서 받아 온 모델 — 고르면 모델 칸에 들어갑니다", hidden: true, style: "max-width:100%" }) as HTMLSelectElement;
-      const modelNote = h("span", { class: "hint" });
-      const keyEnv = h("input", { value: p?.api_key_env ?? "", placeholder: "예: ANTHROPIC_API_KEY" });
-      const key = h("input", { type: "password", placeholder: p?.has_key ? "(설정됨)" : "API 키" });
-      const keyRemember = h("input", { type: "checkbox" });
-      const numCtx = h("input", { type: "number", value: p?.num_ctx ?? "", placeholder: "16384" });
-      const effort = h("select", {}, ...["", "low", "medium", "high", "xhigh", "max"].map((x) => h("option", { value: x, selected: (p?.effort ?? "") === x }, x || "(기본)")));
-      // 생각(thinking) — Ollama 는 끄기·켜기·수준, OpenAI 호환은 끄기·수준(reasoning_effort)
-      const thinkOpts: [string, string][] = [["", "(모델 기본)"], ["off", "끄기 — 생각 없이 바로 답 (빠름)"], ["on", "켜기"], ["low", "낮음 (low)"], ["medium", "중간 (medium)"], ["high", "높음 (high)"]];
-      const think = h("select", {}, ...thinkOpts.map(([v, l]) => h("option", { value: v, selected: (p?.think ?? "") === v }, l))) as HTMLSelectElement;
-      const fallbacks = h("input", { type: "checkbox", checked: p?.fallbacks ?? true });
-      const maxTokens = h("input", { type: "number", value: p?.max_tokens ?? 8192 });
-      // 사내 PC 는 시스템 프록시가 잡혀 있어 사내 LLM 서버로 가는 요청까지 프록시로 나가 막히곤 한다 (브라우저는 PAC 로 직접 연결)
-      const proxy = h("select", {},
-        h("option", { value: "", selected: !p?.proxy || p.proxy === "auto" }, "자동 — 사내 주소(사설 IP·점 없는 이름·.local/.corp 등)는 직접, 그 밖은 시스템 프록시"),
-        h("option", { value: "none", selected: p?.proxy === "none" }, "사용 안 함 — 항상 직접 연결"),
-        h("option", { value: "system", selected: p?.proxy === "system" }, "시스템 프록시 사용"));
-      const result = h("pre", { class: "modal-text" });
-      const collect = (): Provider => ({
-        name: name.value.trim(), kind: kind.value as Provider["kind"], base_url: base.value.trim() || null,
-        model: model.value.trim(), api_key_env: keyEnv.value.trim() || null, num_ctx: numCtx.value ? Number(numCtx.value) : null,
-        effort: effort.value || null, fallbacks: fallbacks.checked, max_tokens: Number(maxTokens.value) || 8192,
-        proxy: proxy.value || null, think: kind.value === "anthropic" ? null : think.value || null,
-      });
-      // 모델 목록 받아 오기 — 저장하지 않은 주소로도 된다. 종류가 Ollama 면 /api/tags
-      let listRun = 0;
-      const loadModels = async (quiet: boolean) => {
-        const run = ++listRun;
-        modelNote.textContent = "모델 목록을 받는 중…";
-        try {
-          const names = await api.listModels({ ...collect(), name: name.value.trim() || p?.name || "새 공급자", model: model.value.trim() || "x" });
-          if (run !== listRun) return;
-          modelPick.replaceChildren(h("option", { value: "" }, `— 서버의 모델 ${names.length}개 중 고르기 —`),
-            ...names.map((n) => h("option", { value: n, selected: n === model.value.trim() }, n)));
-          modelPick.hidden = !names.length;
-          const has = !model.value.trim() || names.some((n) => n === model.value.trim() || n.replace(/:latest$/, "") === model.value.trim());
-          modelNote.textContent = names.length ? `${names.length}개${has ? "" : ` — 설정한 '${model.value.trim()}' 은 이 서버에 없습니다`}` : "모델이 없습니다 (서버에서 ollama pull 로 받으세요)";
-        } catch (err) {
-          if (run !== listRun) return;
-          modelPick.hidden = true;
-          modelNote.textContent = quiet ? "" : `목록을 받지 못했습니다: ${errOf(err).message}`;
-        }
-      };
-      modelPick.onchange = () => { if (modelPick.value) model.value = modelPick.value; };
-      const modelBtn = h("button", { class: "small", title: "서버에서 모델 목록을 받아 옵니다 (Ollama: /api/tags)", onclick: (e: Event) => { e.preventDefault(); void loadModels(false); } }, "목록 받기");
-      // 종류에 맞는 칸만
-      const thinkField = field("Thinking (생각)", think, "Ollama: 끄기 = think:false, low/medium/high 는 gpt-oss 같은 모델만. OpenAI 호환: reasoning_effort (끄기 = none). 모델이 지원하지 않으면 서버가 오류를 냅니다");
-      const effortField = field("effort (Claude)", effort);
-      const ctxField = field("num_ctx (Ollama)", numCtx, "기본 컨텍스트(2~4K)는 스키마 문맥을 조용히 잘라 버립니다");
-      const syncKind = () => {
-        const k = kind.value;
-        thinkField.hidden = k === "anthropic";
-        effortField.hidden = k !== "anthropic";
-        ctxField.hidden = k !== "ollama";
-      };
-      kind.onchange = () => { syncKind(); modelPick.hidden = true; modelNote.textContent = ""; if (kind.value === "ollama") void loadModels(true); };
-      let urlT = 0;
-      base.addEventListener("input", () => { clearTimeout(urlT); urlT = window.setTimeout(() => { if (kind.value === "ollama") void loadModels(true); }, 600); });
-      const persist = async () => {
-        const np = collect();
-        await api.saveProvider(np, p?.name);
-        if (key.value) await api.setApiKey(np.name, key.value, keyRemember.checked);
-        return np;
-      };
-      form.replaceChildren(
-        field("이름", name), field("종류", kind), field("주소", base, "Ollama: http://127.0.0.1:11434 · 사내 GPU 서버 주소도 됩니다 (http:// 를 빼도 됩니다)"),
-        field("프록시", proxy, "브라우저에서는 되는데 여기서 안 되면 '사용 안 함'으로"),
-        field("모델", h("div", { style: "display:flex;flex-direction:column;gap:4px" },
-          h("div", { style: "display:flex;gap:6px" }, model, modelBtn), modelPick, modelNote), "직접 쳐도 되고, '목록 받기'로 서버의 모델을 골라도 됩니다 (예: qwen2.5-coder:14b, gemma3:12b)"),
-        field("API 키 환경변수", keyEnv), field("API 키", key, "설정 파일에는 쓰지 않습니다"),
-        h("label", { class: "check" }, keyRemember, "OS 자격 증명 관리자에 저장 (끄면 이 실행 동안만)"),
-        ctxField, thinkField, effortField,
-        h("label", { class: "check" }, fallbacks, "거절 시 대체 모델로 이어서 답하기 (Claude API 직통일 때만)"),
-        field("max_tokens", maxTokens),
-        h("div", { class: "row" },
-          h("button", { class: "primary", onclick: async (e: Event) => {
-            e.preventDefault();
-            try { await persist(); toast("저장했습니다", "ok"); await refreshList(); } catch (err) { toast(errOf(err).message, "error"); }
-          } }, "저장"),
-          h("button", { onclick: async (e: Event) => {
-            e.preventDefault();
-            try {
-              const np = await persist();
-              result.textContent = "연결 확인 중…";
-              const models = await api.testProvider(np.name);
-              // 서버에는 붙었어도 설정한 모델이 없으면 질문이 "모델 없음"으로 실패한다
-              const has = !np.model || models.some((m) => m === np.model || m.replace(/:latest$/, "") === np.model);
-              result.textContent = (has ? `연결됨 · 모델 ${models.length}개`
-                : `연결됨 — 그런데 설정한 모델 '${np.model}' 이 이 서버에 없습니다. 아래 이름 중 하나로 바꾸세요 (또는 서버에서 ollama pull ${np.model}).`) +
-                `\n${models.slice(0, 30).join("\n")}`;
-              result.classList.toggle("warn", !has);
-            } catch (err) { result.textContent = errOf(err).message; }
-          } }, "연결 테스트"),
-          p ? h("button", { class: "danger", onclick: async (e: Event) => {
-            e.preventDefault();
-            if (!(await confirmBox("AI 연결 삭제", `'${p.name}' 연결을 지울까요?\n저장해 둔 API 키(OS 자격 증명 관리자)도 함께 지웁니다.`, "삭제"))) return;
-            try {
-              await api.deleteProvider(p.name);
-              form.replaceChildren();
-              toast("지웠습니다", "ok");
-              await refreshList();
-            } catch (err) { toast(errOf(err).message, "error"); }
-          } }, "삭제") : null),
-        result);
-      syncKind();
-      if (kind.value === "ollama") void loadModels(true);
-    };
-    const refreshList = async () => {
-      const ps = await api.listProviders();
-      list.replaceChildren(
-        ...ps.map((p) => h("button", { class: "list-item", onclick: (e: Event) => { e.preventDefault(); edit(p); } },
-          `${p.name}`, h("small", {}, ` ${p.model}${p.remote ? " · 외부" : " · 로컬"}`))),
-        h("button", { class: "list-item add", onclick: (e: Event) => { e.preventDefault(); edit(); } }, "+ 새 공급자"));
-    };
-    await refreshList();
-    // Oracle 문법 안내 — 요청에 맞는 카드를 골라 넣는다. 회사 규칙은 사용자 파일에
-    const gi = await invoke<{ path: string; exists: boolean; builtin: number; custom: number }>("ai_guides_info").catch(() => null);
-    const guideSel = h("select", {},
-      h("option", { value: "auto" }, "자동 (낱말로 약할 때만)"),
-      h("option", { value: "always" }, "항상"),
-      h("option", { value: "off" }, "끔 (낱말로만)")) as HTMLSelectElement;
-    const guides = h("div", { class: "guides-box" },
-      h("strong", {}, "Oracle 문법 안내 "),
-      h("span", { class: "hint" }, `질문·SQL·오류에 맞는 안내 카드를 몇 장 골라 AI 에 함께 보냅니다 (기본 ${gi?.builtin ?? "?"}장${gi?.custom ? ` + 회사 규칙 ${gi.custom}장` : ""}). AI 답 위에 '참고 문법'으로 표시됩니다.`),
-      h("button", { class: "small", title: gi?.path ?? "", onclick: async (e: Event) => {
-        e.preventDefault();
-        try {
-          const path = await invoke<string>("ai_guides_edit");
-          await this.openPath(path);
-          toast("편집하고 저장하면 다음 질문부터 씁니다", "info", 5000);
-        } catch (err) { toast(errOf(err).message, "error"); }
-      } }, gi?.exists ? "회사 규칙 편집" : "회사 규칙 추가"),
-      h("button", { class: "small", title: "AI 에 보내는 문법 안내 카드를 모두 보고, 기본 카드를 회사 규칙으로 옮겨 고친다", onclick: (e: Event) => { e.preventDefault(); void this.showGuides(); } }, "카드 보기"),
-      h("label", { class: "check", title: "카드 주제 목록을 AI 에 먼저 보내 고르게 한 뒤, 고른 카드만 질문과 함께 보낸다 (질의가 한 번 더 — 많아야 10초, 실패하면 낱말로 고른 것만)" },
-        "AI 로도 고르기 ", guideSel));
-    void invoke<string>("ai_guide_select").then((v) => { guideSel.value = v; }).catch(() => {});
-    guideSel.addEventListener("change", () => {
-      invoke("set_ai_guide_select", { mode: guideSel.value }).then(() => toast("저장했습니다", "ok", 1200)).catch((e) => toast(errOf(e).message, "error"));
-    });
-    return h("div", {}, guides, h("div", { class: "split" }, list, form));
-  }
-
-  private async mcpPage() {
-    const [s, profiles] = await Promise.all([api.getMcp(), api.listProfiles()]);
-    const checks = profiles.map((p) => ({ p, c: h("input", { type: "checkbox", checked: s.allowed_connections.some((a) => a.toUpperCase() === p.name.toUpperCase()) }) }));
-    const explain = h("input", { type: "checkbox", checked: s.allow_explain });
-    const timeout = h("input", { type: "number", value: s.call_timeout_secs });
-    const snippet = h("textarea", { class: "snippet", rows: 12, readOnly: true });
-    const refreshSnippet = async () => { snippet.value = await api.mcpSnippet(); };
-    await refreshSnippet();
-    return h("div", { class: "form" },
-      h("p", {}, "AI 에이전트(Claude Desktop, Claude Code, Cursor 등)가 sqlstudio-mcp 로 체크한 접속의 ",
-        h("strong", {}, "스키마 정보(객체 목록·테이블 구조·DDL)만"), " 읽습니다. ",
-        h("strong", {}, "AI 는 SQL 을 실행할 수 없고 테이블 데이터도 받지 못합니다."), " AI 가 만든 SQL 은 사람이 에디터에서 확인하고 실행합니다."),
-      ...checks.map(({ p, c }) => h("label", { class: "check" }, c, `${p.name} (${p.user}@${p.connect_string})`) as Node),
-      field("사전 조회 시간 상한(초)", timeout),
-      h("label", { class: "check" }, explain, "explain_plan 허용 — AI 가 쓴 SQL 을 파서에 넘겨 실행계획만 봅니다 (실행·데이터 반환 없음)"),
-      h("div", { class: "row" }, h("button", { class: "primary", onclick: async (e: Event) => {
-        e.preventDefault();
-        try {
-          await api.setMcp({ allowed_connections: checks.filter((x) => x.c.checked).map((x) => x.p.name), call_timeout_secs: Number(timeout.value), allow_explain: explain.checked });
-          await refreshSnippet();
-          toast("저장했습니다", "ok");
-        } catch (err) { toast(errOf(err).message, "error"); }
-      } }, "저장"),
-      h("button", { onclick: (e: Event) => { e.preventDefault(); navigator.clipboard.writeText(snippet.value).then(() => toast("복사했습니다", "ok")); } }, "설정 복사")),
-      field("MCP 호스트 설정 (claude_desktop_config.json 등에 붙여 넣기)", snippet, "<비밀번호> 를 실제 값으로 바꾸세요"));
+    await settings(this, page);
   }
 }
 
@@ -2933,99 +1897,6 @@ function sqlTemplate(kind: "select" | "insert" | "update" | "delete", table: str
 /** 경로 비교용: 구분자·대소문자 무시 (Windows) */
 function normPath(p: string) {
   return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-}
-
-class SideLayout {
-  private w = { left: 240, right: 360 };
-  private open = { left: true, right: true };
-
-  constructor(private root: HTMLElement, left: HTMLElement, center: HTMLElement, right: HTMLElement,
-    private onChange: (side: "left" | "right", open: boolean) => void) {
-    try {
-      const s = JSON.parse(localStorage.getItem("layout.sides") ?? "{}");
-      if (s.w) this.w = { ...this.w, ...s.w };
-      if (s.open) this.open = { ...this.open, ...s.open };
-    } catch { /* 기본값 */ }
-    root.append(left, this.splitter("left"), center, this.splitter("right"), right);
-    this.apply();
-  }
-
-  toggle(side: "left" | "right", open = !this.open[side]) {
-    this.open[side] = open;
-    this.apply();
-  }
-
-  private splitter(side: "left" | "right") {
-    const btn = h("button", { class: "vsplit-btn", title: "접기/펼치기 (경계선 더블클릭도 됨)", onclick: (e: Event) => { e.stopPropagation(); this.toggle(side); } });
-    const el = h("div", { class: `vsplit ${side}`, title: "끌어서 너비 조절 · 더블클릭: 접기/펼치기" }, btn);
-    el.addEventListener("dblclick", () => this.toggle(side));
-    el.addEventListener("mousedown", (e) => {
-      if (e.target === btn) return;
-      e.preventDefault();
-      const x0 = e.clientX;
-      const w0 = this.open[side] ? this.w[side] : 0;
-      document.body.classList.add("col-resizing");
-      const move = (ev: MouseEvent) => {
-        const dx = side === "left" ? ev.clientX - x0 : x0 - ev.clientX;
-        const max = Math.max(200, Math.min(800, window.innerWidth * 0.5));
-        const nw = w0 + dx;
-        if (nw < 80) {
-          this.open[side] = false;
-        } else {
-          this.open[side] = true;
-          this.w[side] = Math.round(Math.min(max, Math.max(160, nw)));
-        }
-        this.apply(false);
-      };
-      const up = () => {
-        document.body.classList.remove("col-resizing");
-        window.removeEventListener("mousemove", move);
-        window.removeEventListener("mouseup", up);
-        this.apply();
-      };
-      window.addEventListener("mousemove", move);
-      window.addEventListener("mouseup", up);
-    });
-    return el;
-  }
-
-  private apply(save = true) {
-    const l = this.open.left ? `${this.w.left}px` : "0px";
-    const r = this.open.right ? `${this.w.right}px` : "0px";
-    this.root.style.gridTemplateColumns = `${l} 6px minmax(0, 1fr) 6px ${r}`;
-    this.root.classList.toggle("left-closed", !this.open.left);
-    this.root.classList.toggle("right-closed", !this.open.right);
-    for (const s of ["left", "right"] as const) {
-      const b = this.root.querySelector(`.vsplit.${s} .vsplit-btn`);
-      // 펼쳐져 있으면 접는 방향, 접혀 있으면 펼치는 방향
-      if (b) b.textContent = (s === "left") === this.open[s] ? "‹" : "›";
-      this.onChange(s, this.open[s]);
-    }
-    if (save) localStorage.setItem("layout.sides", JSON.stringify({ w: this.w, open: this.open }));
-  }
-}
-
-function dragSplit(handle: HTMLElement, top: HTMLElement) {
-  handle.addEventListener("mousedown", (e) => {
-    e.preventDefault();
-    const y0 = e.clientY;
-    const h0 = top.getBoundingClientRect().height;
-    const total = (top.parentElement?.getBoundingClientRect().height ?? 600) - handle.getBoundingClientRect().height;
-    document.body.classList.add("row-resizing");
-    // 위 80px·아래 90px 은 남긴다 — 어느 쪽으로든 끌어서 다시 되돌릴 수 있게 (경계선이 화면 밖으로 나가지 않게)
-    const move = (ev: MouseEvent) => {
-      const px = Math.max(80, Math.min(total - 90, h0 + ev.clientY - y0));
-      top.style.flexBasis = `${(px / total) * 100}%`;
-    };
-    const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-      document.body.classList.remove("row-resizing");
-      try { localStorage.setItem("pane.editor", String(Math.round((top.getBoundingClientRect().height / total) * 100))); } catch { /* 기억 못 해도 된다 */ }
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  });
 }
 
 const app = new App(document.getElementById("app")!);

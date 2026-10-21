@@ -1,13 +1,16 @@
 # 릴리스와 배포
 
-## 1. 버전 올리기
+## 1. 버전 올리기와 릴리스 노트
 
-네 곳을 같은 버전으로 바꾼다.
+```bash
+node scripts/release.mjs patch      # 0.5.27 → 0.5.28 (minor · major · 0.6.0 처럼 직접도)
+```
 
-- `app/src-tauri/tauri.conf.json` — `version`
-- `app/src-tauri/Cargo.toml` — `version`
-- `app/package.json` — `version`
-- `app/package-lock.json` — 맨 위 두 곳의 `version`
+- 버전 다섯 곳을 함께 바꾼다: `app/src-tauri/tauri.conf.json`, `app/package.json`, `app/package-lock.json`(맨 위 두 곳), `app/src-tauri/Cargo.toml`, `Cargo.lock`.
+- `docs/release-notes/vX.Y.Z.md` 가 없으면 지난 태그 이후 커밋 제목으로 **초안**을 만든다. 기능별 `## 제목`, 굵은 요약, `~다` 문체로 다듬고 맨 위 `<!-- 초안 … -->` 줄을 지운다.
+- `node scripts/release.mjs --check` 로 버전·노트를 확인한 뒤 커밋한다.
+
+릴리스 노트를 비워 두지 않는다 — 노트 파일이 없거나 초안 그대로면 릴리스 CI 가 빌드 전에 멈춘다.
 
 ## 2. 태그를 올리면 설치 파일이 만들어진다
 
@@ -18,7 +21,7 @@ git push origin v0.2.0
 
 `.github/workflows/release.yml` 이 Windows 러너에서 다음을 한다.
 
-1. 태그와 `tauri.conf.json` 버전이 같은지 확인한다 (다르면 멈춘다).
+1. 태그와 버전 다섯 곳이 같은지, `docs/release-notes/<태그>.md` 가 있는지 확인한다 (아니면 멈춘다).
 2. 테스트를 돌린다 (DB 없이).
 3. `sqlstudio-mcp.exe`, `sqlstudio-analyze.exe` 를 만든다 (설치 파일에 함께 들어간다).
 4. `npx tauri build` 를 실행한다.

@@ -80,7 +80,8 @@ const GAP_KIND: Record<Gap["kind"], string> = { dict_only: "사전에만", sourc
 function colSplitter(grid: HTMLElement, key: string, min = 90): HTMLElement {
   try {
     const saved = Number(localStorage.getItem(key));
-    if (saved > 0) grid.style.setProperty("--c1", `${saved}px`);
+    // 끌어 둔 너비라도 창이 좁아지면 영역의 70% 까지만 (넘쳐서 옆 영역을 가리지 않게)
+    if (saved > 0) grid.style.setProperty("--c1", `min(${saved}px, 70%)`);
   } catch { /* 저장소를 못 쓰면 기본 너비 */ }
   const handle = h("div", { class: "an-gutter", title: "끌어서 너비 조절 · 더블클릭: 원래대로" });
   handle.addEventListener("mousedown", (e) => {
@@ -90,7 +91,7 @@ function colSplitter(grid: HTMLElement, key: string, min = 90): HTMLElement {
     const w0 = first.getBoundingClientRect().width;
     const max = grid.getBoundingClientRect().width - 160;
     document.body.classList.add("col-resizing");
-    const move = (ev: MouseEvent) => grid.style.setProperty("--c1", `${Math.round(Math.max(min, Math.min(max, w0 + ev.clientX - x0)))}px`);
+    const move = (ev: MouseEvent) => grid.style.setProperty("--c1", `min(${Math.round(Math.max(min, Math.min(max, w0 + ev.clientX - x0)))}px, 70%)`);
     const up = () => {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);

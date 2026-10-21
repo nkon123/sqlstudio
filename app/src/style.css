@@ -113,7 +113,8 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .obj.invalid span { color: var(--danger); text-decoration: line-through; }
 .obj input { margin: 0; }
 .empty, .hint { color: var(--dim); padding: 6px; }
-.center { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+/* 넘친 내용은 자른다 — 그리드 행처럼 위치를 지정한 요소가 넘치면 오른쪽 AI 영역 위에 그려진다 */
+.center { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 
 /* ── 탭 ── */
 .tabs { display: flex; overflow-x: auto; background: var(--bg); border-bottom: 1px solid var(--line); }
@@ -254,7 +255,7 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .cm-tooltip-autocomplete li:not([aria-selected]):has(.cm-completionIcon-join) .cm-completionLabel { color: var(--accent); }
 
 /* ── 디버거 ── */
-.debugger { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+.debugger { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--panel); }
 .dbg-toolbar { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: 1px solid var(--line); }
 .dbg-toolbar .check { margin: 0; font-size: 12px; }
 .dbg-status { color: var(--dim); font-size: 12px; margin-right: 8px; }
@@ -288,7 +289,8 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .an-toolbar .check { margin: 0; font-size: 12px; gap: 4px; }
 .an-progress { height: 3px; background: var(--line); }
 .an-bar-fill { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
-.an-main { flex: 1; display: grid; grid-template-columns: var(--c1, minmax(280px, 34%)) 5px 1fr; min-height: 0; }
+/* 좁은 창에서도 가운데 영역 안에서 줄어들게 (왼쪽 목록 최소 폭은 영역의 절반까지만, 오른쪽은 0 까지) */
+.an-main { flex: 1; display: grid; grid-template-columns: var(--c1, minmax(min(280px, 50%), 34%)) 5px minmax(0, 1fr); min-height: 0; }
 .an-left { display: flex; flex-direction: column; overflow: hidden; min-width: 0; min-height: 0; }
 .an-left > .grid { flex: 1; min-height: 0; }
 .an-listbar { display: flex; align-items: center; gap: 8px; padding: 3px 6px; font-size: 12px; border-bottom: 1px solid var(--line); }
@@ -328,7 +330,7 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .an-chunk { margin: 4px 0 4px 8px; font-size: 12px; }
 .an-chunk > summary { cursor: pointer; }
 .an-code { margin: 4px 0; padding: 6px 8px; max-height: 360px; overflow: auto; background: var(--bg); border-radius: 4px; font: 11px/1.4 var(--mono); white-space: pre; }
-.an-split { display: grid; grid-template-columns: var(--c1, minmax(180px, 32%)) 5px 1fr; height: 100%; min-height: 0; }
+.an-split { display: grid; grid-template-columns: var(--c1, minmax(min(180px, 50%), 32%)) 5px minmax(0, 1fr); height: 100%; min-height: 0; }
 /* 칸 사이 끌어서 너비 조절 */
 .an-gutter { cursor: col-resize; background: var(--line); opacity: .5; }
 .an-gutter:hover, body.col-resizing .an-gutter { background: var(--accent); opacity: .7; }
@@ -371,7 +373,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .grid-input { box-sizing: border-box; height: 20px; font: inherit; padding: 0 3px; border: 1px solid var(--accent); }
 
 /* ── 데이터 흐름도 ── */
-.an-main.an-wide { grid-template-columns: 0 0 1fr; }
+.an-main.an-wide { grid-template-columns: 0 0 minmax(0, 1fr); }
 .an-main.an-wide .an-gutter { visibility: hidden; }
 .an-main.an-wide .an-left { visibility: hidden; border: 0; }
 .dfd { display: flex; flex-direction: column; height: 100%; min-height: 0; }

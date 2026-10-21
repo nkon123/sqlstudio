@@ -45,17 +45,27 @@ pub struct AppState {
 
 impl AppState {
     pub fn load() -> Self {
+        // 시작이 느릴 때 어디서 걸리는지 로그로 (설정 · Oracle Client · 실행 이력)
+        let t0 = std::time::Instant::now();
         let (cfg, config_error) = match Config::load() {
             Ok(c) => (c, None),
             // 설정이 깨져도 앱은 뜬다 — 화면에 오류를 보여 주고 고치게 한다
             Err(e) => (Config::default(), Some(e.to_string())),
         };
+        let t_cfg = t0.elapsed();
         if let Err(e) = sqls_core::session::init_client(cfg.oracle.client_dir(), cfg.oracle.tns_dir()) {
             tracing::error!("Oracle Client 초기화 실패: {e}");
         }
+        let t_client = t0.elapsed();
         let providers = providers_from(&cfg);
         let hist_dir = sqls_core::config::config_path().parent().map(|p| p.join("history")).unwrap_or_else(|| "history".into());
         let history = crate::history::History::new(hist_dir, cfg.history.enabled, cfg.history.keep_months);
+        tracing::info!(
+            "시작(백엔드): 설정 {}ms · Oracle Client {}ms · 실행 이력 {}ms",
+            t_cfg.as_millis(),
+            (t_client - t_cfg).as_millis(),
+            (t0.elapsed() - t_client).as_millis()
+        );
         Self {
             history,
             cfg: RwLock::new(cfg),

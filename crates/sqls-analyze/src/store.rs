@@ -214,6 +214,71 @@ impl Store {
     pub fn read_integrated<T: DeserializeOwned>(&self, name: &str) -> Option<T> {
         read_json(&self.root.join("integrated").join(name))
     }
+
+    /// 단위 요약 목록 — 목록 화면용. unit.json 은 단위마다 수십~수백 KB 라 수천 개를 다 읽으면 몇 초 걸린다.
+    /// 요약 색인(integrated/units-index.json)이 최신이면 그것만 읽고, 아니면 다 읽어 색인을 다시 쓴다.
+    /// 최신 = 색인이 units 폴더(단위를 더하거나 바꿔 끼우면 바뀐다)와 모든 unit.json(고쳐 쓰면 바뀐다)보다 나중
+    pub fn briefs(&self) -> Vec<UnitBrief> {
+        let index = self.root.join("integrated").join("units-index.json");
+        if let Some(b) = self.fresh_index(&index) {
+            return b;
+        }
+        let briefs: Vec<UnitBrief> = self.units().iter().map(UnitBrief::of).collect();
+        let _ = write_json(&index, &briefs);
+        briefs
+    }
+
+    fn fresh_index(&self, index: &Path) -> Option<Vec<UnitBrief>> {
+        let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+        let at = mtime(index)?;
+        let units_dir = self.root.join("units");
+        if mtime(&units_dir).is_some_and(|t| t > at) {
+            return None;
+        }
+        let mut count = 0usize;
+        for e in fs::read_dir(&units_dir).ok()?.flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.')) {
+            let p = e.path().join("unit.json");
+            match mtime(&p) {
+                Some(t) if t <= at => count += 1,
+                Some(_) => return None,
+                None => {}
+            }
+        }
+        let b: Vec<UnitBrief> = read_json(index)?;
+        (b.len() == count).then_some(b)
+    }
+}
+
+/// 단위 요약 (목록 화면에 쓰는 것만)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnitBrief {
+    pub key: String,
+    pub owner: String,
+    pub name: String,
+    pub unit_type: String,
+    pub analyzed_at: u64,
+    pub chunks: u32,
+    pub failed: u32,
+    pub model: Option<String>,
+    pub summary: Option<String>,
+    pub warning: Option<String>,
+}
+
+impl UnitBrief {
+    pub fn of(u: &UnitResult) -> Self {
+        UnitBrief {
+            key: u.key.clone(),
+            owner: u.owner.clone(),
+            name: u.name.clone(),
+            unit_type: u.unit_type.clone(),
+            analyzed_at: u.analyzed_at,
+            chunks: u.stats.chunks,
+            failed: u.stats.failed,
+            model: u.model.clone(),
+            summary: u.summary.as_ref().map(|i| i.summary.clone()),
+            warning: u.warning.clone(),
+        }
+    }
 }
 
 fn read_json<T: DeserializeOwned>(p: &Path) -> Option<T> {

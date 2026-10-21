@@ -100,21 +100,33 @@ pub async fn analysis_list(st: State<'_, AppState>, id: u64, owner: Option<Strin
     let pat = name_like.filter(|p| !p.trim().is_empty()).map(|p| if p.contains('%') { p } else { format!("%{p}%") });
     let refs = source::list_units(&s, &owner, &[], pat.as_deref()).await?;
     let store = store_for(&st, id)?;
+    // 저장된 결과는 요약 색인으로 (단위마다 unit.json 을 다 읽으면 수천 개에서 몇 초)
+    let briefs = blocking(move || store.briefs()).await?;
+    let by_key: std::collections::HashMap<&str, &sqls_analyze::store::UnitBrief> = briefs.iter().map(|b| (b.key.as_str(), b)).collect();
     Ok(refs
         .into_iter()
         .map(|u| {
-            let saved = store.read_unit(&sqls_analyze::chunk::unit_key(&u.owner, &u.name, &u.unit_type));
-            UnitRow {
-                analyzed_at: saved.as_ref().map(|x| x.analyzed_at),
-                chunks: saved.as_ref().map(|x| x.stats.chunks),
-                failed: saved.as_ref().map(|x| x.stats.failed),
-                model: saved.as_ref().and_then(|x| x.model.clone()),
-                summary: saved.as_ref().and_then(|x| x.summary.as_ref().map(|i| i.summary.clone())),
-                warning: saved.as_ref().and_then(|x| x.warning.clone()),
-                unit: u,
-            }
+            let key = sqls_analyze::chunk::unit_key(&u.owner, &u.name, &u.unit_type);
+            row_of(by_key.get(key.as_str()).copied(), u)
         })
         .collect())
+}
+
+fn row_of(saved: Option<&sqls_analyze::store::UnitBrief>, unit: UnitRef) -> UnitRow {
+    UnitRow {
+        analyzed_at: saved.map(|x| x.analyzed_at),
+        chunks: saved.map(|x| x.chunks),
+        failed: saved.map(|x| x.failed),
+        model: saved.and_then(|x| x.model.clone()),
+        summary: saved.and_then(|x| x.summary.clone()),
+        warning: saved.and_then(|x| x.warning.clone()),
+        unit,
+    }
+}
+
+/// 디스크를 오래 읽는 일은 작업 스레드에서 (동기 명령은 앱의 메인 스레드에서 돌아 그동안 창이 멈춘다)
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> R<T> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| ErrView::msg("io", e.to_string()))
 }
 
 #[derive(Serialize, Clone)]
@@ -428,21 +440,24 @@ pub fn analysis_cancel(st: State<'_, AppState>, run: u64) {
 
 /// 통합 분석 결과 (없으면 None). `rebuild` 면 저장된 단위로 다시 만든다 (모델 없이).
 #[tauri::command]
-pub fn analysis_result(st: State<'_, AppState>, id: Option<u64>, set: Option<String>, rebuild: bool) -> R<Option<Integrated>> {
+pub async fn analysis_result(st: State<'_, AppState>, id: Option<u64>, set: Option<String>, rebuild: bool) -> R<Option<Integrated>> {
     let store = store_of(&st, id, set.as_deref())?;
-    if rebuild {
-        let overview = store.read_integrated::<Integrated>("integrated.json").and_then(|g| g.overview);
-        let (g, _) = integrate::write_all(&store, overview).map_err(|e| ErrView::msg("io", e.to_string()))?;
-        return Ok(Some(g));
-    }
-    Ok(store.read_integrated("integrated.json"))
+    blocking(move || -> R<Option<Integrated>> {
+        if rebuild {
+            let overview = store.read_integrated::<Integrated>("integrated.json").and_then(|g| g.overview);
+            let (g, _) = integrate::write_all(&store, overview).map_err(|e| ErrView::msg("io", e.to_string()))?;
+            return Ok(Some(integrate::for_screen(g)));
+        }
+        Ok(store.read_integrated("integrated.json").map(integrate::for_screen))
+    })
+    .await?
 }
 
 /// 프로필의 통합 분석 결과 — 흐름도 창용 (메인 창의 접속이 끊겨도 저장된 결과는 읽는다)
 #[tauri::command]
-pub fn analysis_result_for(profile: String) -> R<Option<Integrated>> {
+pub async fn analysis_result_for(profile: String) -> R<Option<Integrated>> {
     let store = Store::open(sqls_analyze::default_dir(&profile)).map_err(|e| ErrView::msg("io", e.to_string()))?;
-    Ok(store.read_integrated("integrated.json"))
+    blocking(move || store.read_integrated("integrated.json").map(integrate::for_screen)).await
 }
 
 static NEXT_DFD: AtomicU64 = AtomicU64::new(1);
@@ -603,26 +618,23 @@ pub fn analysis_eval(st: State<'_, AppState>, id: Option<u64>, set: Option<Strin
 
 /// 이 PC 의 분석 결과들 (접속 프로필의 것 + 가져온 것)
 #[tauri::command]
-pub fn analysis_sets() -> Vec<bundle::SetInfo> {
-    bundle::list_sets(&sqls_analyze::analysis_root())
+pub async fn analysis_sets() -> R<Vec<bundle::SetInfo>> {
+    blocking(|| {
+        let root = sqls_analyze::analysis_root();
+        bundle::purge_trash(&root);
+        bundle::list_sets(&root)
+    })
+    .await
 }
 
 /// 결과 하나의 단위 목록 — 접속 없이 볼 때 (DB 목록 대신)
 #[tauri::command]
-pub fn analysis_set_units(set: String) -> R<Vec<UnitRow>> {
+pub async fn analysis_set_units(set: String) -> R<Vec<UnitRow>> {
     let store = Store::open(set_dir(&set)?).map_err(|e| ErrView::msg("io", e.to_string()))?;
-    let mut rows: Vec<UnitRow> = store
-        .units()
-        .into_iter()
-        .map(|x| UnitRow {
-            analyzed_at: Some(x.analyzed_at),
-            chunks: Some(x.stats.chunks),
-            failed: Some(x.stats.failed),
-            model: x.model.clone(),
-            summary: x.summary.as_ref().map(|i| i.summary.clone()),
-            warning: x.warning.clone(),
-            unit: UnitRef { owner: x.owner, name: x.name, unit_type: x.unit_type },
-        })
+    let briefs = blocking(move || store.briefs()).await?;
+    let mut rows: Vec<UnitRow> = briefs
+        .iter()
+        .map(|b| row_of(Some(b), UnitRef { owner: b.owner.clone(), name: b.name.clone(), unit_type: b.unit_type.clone() }))
         .collect();
     rows.sort_by(|a, b| (&a.unit.owner, &a.unit.name).cmp(&(&b.unit.owner, &b.unit.name)));
     Ok(rows)
@@ -814,7 +826,8 @@ pub fn analysis_remove_set(name: String) -> R<()> {
     if !d.join("imported.json").is_file() {
         return Err(ErrView::msg("invalid", "가져온 결과만 여기서 지울 수 있습니다"));
     }
-    std::fs::remove_dir_all(&d).map_err(|e| ErrView::msg("io", e.to_string()))
+    // 파일이 수만 개라 몇 초 걸린다 — 이름만 바로 바꾸고 실제로 지우는 것은 뒤에서
+    bundle::remove_set_dir(&d).map_err(|e| ErrView::msg("io", e.to_string()))
 }
 
 // ── 흐름도 보고서 (결과 폴더의 integrated/reports/<id>.json) ─────────────

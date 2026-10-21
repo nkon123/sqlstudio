@@ -611,6 +611,42 @@ pub struct SetInfo {
     pub imports: Vec<ImportLog>,
 }
 
+/// 통합 결과를 만든 때 — 파일 맨 앞만 읽는다 (첫 필드다). 통합 결과는 수백 MB 일 수 있어 통째로 읽으면 목록이 느리다
+fn generated_at(p: &Path) -> Option<u64> {
+    let mut head = [0u8; 256];
+    let n = fs::File::open(p).ok()?.read(&mut head).ok()?;
+    let s = String::from_utf8_lossy(&head[..n]);
+    let rest = &s[s.find("\"generated_at\"")? + "\"generated_at\"".len()..];
+    let digits: String = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace()).chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// 결과 폴더를 지운다 — 이름만 바로 바꾸고(.trash-…) 실제로 지우는 것은 뒤에서 (파일 수만 개라 몇 초 걸린다).
+/// 지우다 만 것은 다음에 [`purge_trash`] 가 마저 지운다
+pub fn remove_set_dir(dir: &Path) -> io::Result<()> {
+    let parent = dir.parent().ok_or_else(|| err("폴더가 잘못되었습니다"))?;
+    let leaf = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let trash = parent.join(format!(".trash-{}-{leaf}", crate::store::now()));
+    fs::rename(dir, &trash)?;
+    std::thread::spawn(move || {
+        let _ = fs::remove_dir_all(&trash);
+    });
+    Ok(())
+}
+
+/// 지우다 만 결과 폴더(.trash-…)를 뒤에서 지운다
+pub fn purge_trash(root: &Path) {
+    let Ok(rd) = fs::read_dir(root) else { return };
+    let trash: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".trash-"))).collect();
+    if !trash.is_empty() {
+        std::thread::spawn(move || {
+            for t in trash {
+                let _ = fs::remove_dir_all(t);
+            }
+        });
+    }
+}
+
 /// 결과 폴더들 (`analysis/` 아래)
 pub fn list_sets(base: &Path) -> Vec<SetInfo> {
     let Ok(rd) = fs::read_dir(base) else { return Vec::new() };
@@ -620,10 +656,7 @@ pub fn list_sets(base: &Path) -> Vec<SetInfo> {
         .filter(|p| p.is_dir() && p.join("units").is_dir() && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
         .map(|p| {
             let units = fs::read_dir(p.join("units")).map(|r| r.flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.') && e.path().join("unit.json").is_file()).count()).unwrap_or(0);
-            let generated_at = fs::read_to_string(p.join("integrated").join("integrated.json"))
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| v["generated_at"].as_u64());
+            let generated_at = generated_at(&p.join("integrated").join("integrated.json"));
             let imported = fs::read_to_string(p.join("imported.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
             let imports = import_log(&p);
             SetInfo { name: p.file_name().unwrap().to_string_lossy().into_owned(), dir: p.display().to_string(), units, generated_at, imported, imports }
@@ -681,6 +714,55 @@ mod tests {
         u.analyzed_at = at;
         store.write_unit(&u).unwrap();
         crate::integrate::write_all(store, None).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unit_index_stays_fresh() {
+        let base = std::env::temp_dir().join(format!("sqls-bundle-index-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let s = Store::open(base.join("S")).unwrap();
+        analyze(&s, "P", 100).await;
+        let at = |s: &Store, n: &str| s.briefs().iter().find(|b| b.name == n).map(|b| b.analyzed_at);
+        assert_eq!(at(&s, "P"), Some(100));
+        assert!(base.join("S/integrated/units-index.json").is_file(), "색인을 남긴다");
+        // 파일 시각의 해상도를 넘기게 잠깐 쉰다
+        let tick = || std::thread::sleep(std::time::Duration::from_millis(1100));
+        tick();
+        analyze(&s, "Q", 100).await; // 새 단위
+        assert_eq!(at(&s, "Q"), Some(100));
+        tick();
+        analyze(&s, "P", 150).await; // 고쳐 쓴 단위
+        assert_eq!(at(&s, "P"), Some(150));
+        // 다른 결과를 합쳐 바꿔 끼운 단위
+        let o = Store::open(base.join("O")).unwrap();
+        analyze(&o, "P", 300).await;
+        tick();
+        merge_dir(&base.join("O"), &base.join("S")).unwrap();
+        assert_eq!(at(&s, "P"), Some(300));
+        assert_eq!(s.briefs().len(), 2);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn generated_at_from_head_and_trash() {
+        let base = std::env::temp_dir().join(format!("sqls-bundle-head-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("X/integrated")).unwrap();
+        fs::write(base.join("X/integrated/integrated.json"), format!("{{\n  \"generated_at\": 1761000000,\n  \"units\": 3,\n  \"x\": \"{}\"\n}}", "가".repeat(100_000))).unwrap();
+        assert_eq!(generated_at(&base.join("X/integrated/integrated.json")), Some(1761000000));
+        assert_eq!(generated_at(&base.join("없음.json")), None);
+        // 지우기: 바로 사라지고(이름 바꿈), 뒤에서 지운다
+        remove_set_dir(&base.join("X")).unwrap();
+        assert!(!base.join("X").exists());
+        purge_trash(&base);
+        for _ in 0..50 {
+            if !fs::read_dir(&base).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".trash-")) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(!fs::read_dir(&base).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".trash-")), "뒤에서 다 지운다");
+        fs::remove_dir_all(&base).unwrap();
     }
 
     #[tokio::test]

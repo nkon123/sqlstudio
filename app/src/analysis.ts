@@ -48,7 +48,8 @@ interface Chunk { id: string; part: number; parts: number; start_line: number; e
 interface ChunkResult { chunk: Chunk; insight?: Insight | null; error?: string | null; raw?: string | null; llm?: { model: string; elapsed_ms: number; attempts: number; repaired?: string[] } | null }
 interface Node { id: string; unit: string; path: string; kind: string; signature: string; start_line: number; end_line: number; public?: boolean | null; summary?: string | null; complexity: number; commits: boolean; trigger_on?: string | null; trigger_events?: string | null }
 interface Edge { from: string; to: string; resolved: boolean; external?: string | null; lines: number[] }
-interface TableRow { table: string; by: Record<string, string>; conf?: Record<string, string>; impacted_entries: string[]; fed_from?: string[]; feeds_into?: string[] }
+/** impacted_entries 는 앞의 몇 개만 올 수 있다 — 원래 개수는 impacted_total (백엔드 integrate::for_screen) */
+interface TableRow { table: string; by: Record<string, string>; conf?: Record<string, string>; impacted_entries: string[]; impacted_total?: number; fed_from?: string[]; feeds_into?: string[] }
 /** 사전(ALL_DEPENDENCIES)과 소스가 다른 곳 */
 interface Gap { unit: string; kind: "dict_only" | "source_only" | "dynamic" | "no_dict"; table?: string | null; node?: string | null; line?: number | null; ops?: string | null; note: string }
 interface DictStats { checked: number; unusable?: number; both: number; dict_only: number; source_only: number; dynamic: number; guessed: number }
@@ -1038,7 +1039,7 @@ export class AnalysisView {
         return h("tr", {}, h("td", {}, h("strong", {}, t.table)), h("td", { class: "num" }, String(ops("C") || "")), h("td", { class: "num" }, String(ops("R") || "")),
           h("td", { class: "num" }, String(ops("U") || "")), h("td", { class: "num" }, String(ops("D") || "")), users,
           h("td", { class: "an-flow" }, ...(t.fed_from ?? []).map((x) => h("div", { title: flowsTo(g, t.table, x) }, `← ${x}`)), ...(t.feeds_into ?? []).map((x) => h("div", { class: "dim" }, `→ ${x}`))),
-          h("td", { title: t.impacted_entries.join("\n") }, String(t.impacted_entries.length)));
+          h("td", { title: t.impacted_entries.join("\n") + (t.impacted_total ? `\n… 외 ${t.impacted_total - t.impacted_entries.length}개` : "") }, String(t.impacted_total ?? t.impacted_entries.length)));
       }));
     };
     input.oninput = fill;

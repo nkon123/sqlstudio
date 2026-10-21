@@ -322,14 +322,24 @@ export class App {
       const t = this.tabs.find((x) => x.conn?.id === e.payload.id);
       if (t && !t.running) void this.recover(t, "쉬는 동안 DB 접속이 끊겼습니다");
     });
+    // 시작이 느릴 때 어디서 걸리는지 로그로 (로그 폴더의 sqlstudio.log — "시작(화면)")
+    const t0 = performance.now();
+    let tPrev = t0;
+    const lap: string[] = [];
+    const mark = (what: string) => { const now = performance.now(); lap.push(`${what} ${Math.round(now - tPrev)}ms`); tPrev = now; };
     const info = await api.appInfo();
+    mark("정보");
     void loadSnippets(info.config_path);
     initSession(info.config_path);
     this.statusLeft.textContent = `SQLStudio ${info.version} · 설정: ${info.config_path}`;
     if (info.config_error) await alertBox("설정 파일 오류", `${info.config_error}\n\n기본 설정으로 시작합니다. 설정 화면에서 저장하면 파일을 다시 씁니다.`);
     await this.reloadProfiles();
+    mark("접속 프로필");
     await this.ai.load();
+    mark("AI 공급자");
     await this.restoreTabs();
+    mark(`탭 ${this.tabs.length}개`);
+    void invoke("client_log", { level: "info", message: `시작(화면): ${lap.join(" · ")} · 합계 ${Math.round(performance.now() - t0)}ms (화면을 불러온 지 ${Math.round(t0)}ms 뒤 시작)` }).catch(() => {});
     // 몇 초마다 바뀐 탭이 있으면 저장 (프로그램이 죽어도 쓰던 SQL 이 남게)
     window.setInterval(() => void this.saveTabs(), 3000);
     if (localStorage.getItem("git.last")) {

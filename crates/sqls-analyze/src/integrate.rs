@@ -60,8 +60,11 @@ pub struct TableRow {
     pub table: String,
     /// 노드 id → "CRUD" 중 쓰는 것
     pub by: BTreeMap<String, String>,
-    /// 이 테이블을 바꾸는(C/U/D) 노드에 닿는 시작점
+    /// 이 테이블을 바꾸는(C/U/D) 노드에 닿는 시작점 (화면으로 보낼 때는 앞의 몇 개만 — [`for_screen`])
     pub impacted_entries: Vec<String>,
+    /// 화면으로 보낼 때 줄였으면 원래 개수
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impacted_total: Option<usize>,
     /// 커서 흐름으로 이 테이블에 데이터를 대는 테이블
     #[serde(default)]
     pub fed_from: Vec<String>,
@@ -181,6 +184,20 @@ pub struct Integrated {
     /// 사전을 하나도 못 봤고 동적 SQL 도 없으면 None
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dict: Option<DictStats>,
+}
+
+/// 화면으로 보낼 통합 결과 — 테이블마다의 '영향 받는 시작점' 은 개수와 앞의 몇 개만.
+/// 큰 결과에서 이 목록이 전체의 절반 넘게 차지하는데(테이블마다 수천 개), 화면은 개수와 툴팁에만 쓴다.
+/// 디스크의 integrated.json 은 그대로 둔다 (MCP·CLI 는 전체를 쓴다)
+pub fn for_screen(mut g: Integrated) -> Integrated {
+    const KEEP: usize = 50;
+    for t in &mut g.tables {
+        if t.impacted_entries.len() > KEEP {
+            t.impacted_total = Some(t.impacted_entries.len());
+            t.impacted_entries.truncate(KEEP);
+        }
+    }
+    g
 }
 
 fn is_system(name: &str) -> bool {

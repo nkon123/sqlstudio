@@ -676,6 +676,20 @@ async fn every_column_type_shows_without_crash() {
         p.rows[row][i].clone()
     };
 
+    // 열마다 새 세션으로 따로 — 멈춘 세션은 뒤 명령도 막으므로. 값·오류·멈춤을 모아 한 번에 보인다
+    let mut bad = Vec::new();
+    for col in ["N", "BF", "BD", "C", "NC", "NV", "V", "D", "TS", "TSTZ", "TSLTZ", "IYM", "IDS", "R", "CL", "NCL", "BL", "FX", "X", "PT", "ARR", "TB", "UR", "LG"] {
+        let one = Session::connect(spec(false)).await.unwrap();
+        let sql = format!("SELECT {col} FROM sqls_t_types ORDER BY n DESC");
+        match tokio::time::timeout(Duration::from_secs(30), one.execute(&sql, ExecOptions::default())).await {
+            Ok(Ok(r)) => eprintln!("열 {col}: {:?}", rows(&r.outcome).rows),
+            Ok(Err(e)) => { eprintln!("열 {col}: 오류 {e}"); bad.push(format!("{col} 오류")); }
+            Err(_) => { eprintln!("열 {col}: 30초 넘게 멈춤"); bad.push(format!("{col} 멈춤")); }
+        }
+        one.close();
+    }
+    assert!(bad.is_empty(), "형식별 조회 실패: {bad:?}");
+
     let r = step(&s, "SELECT * FROM sqls_t_types ORDER BY n DESC").await;
     let p = rows(&r.outcome);
     println!("{:?}\n{:?}", p.columns.iter().map(|c| &c.name).collect::<Vec<_>>(), p.rows);

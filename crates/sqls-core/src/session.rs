@@ -841,7 +841,7 @@ impl Worker {
     ///
     /// ROWID 형식 열(`a.ROWID` 등)을 드라이버가 그대로 받아 문자열로 바꾸면 테이블에 따라
     /// (IOT 의 논리 ROWID 등) 클라이언트 안에서 프로세스가 죽는다. 그래서 행을 하나도 가져오기 전에
-    /// 열 형식을 보고, ROWID 열이 있으면 그 열만 ROWIDTOCHAR 로 감싼 문장으로 다시 연다.
+    /// 열 형식을 보고, ROWID 열이 있으면 그 열만 문자로 바꾼 문장으로 다시 연다 (XMLTYPE·객체·BFILE 도 — text_expr).
     fn open_rows(
         &self,
         stmt: oracle::Statement,
@@ -859,7 +859,7 @@ impl Worker {
             return Ok(rs);
         }
         drop(rs);
-        let hint = "ROWID·XMLTYPE·객체 형식 열은 ROWIDTOCHAR(a.ROWID)·XMLSERIALIZE(CONTENT x AS CLOB) 처럼 문자로 바꿔 조회해 주세요";
+        let hint = "ROWID·XMLTYPE·객체 형식 열은 CAST(a.ROWID AS VARCHAR2(4000))·XMLSERIALIZE(CONTENT x AS CLOB) 처럼 문자로 바꿔 조회해 주세요";
         let wrapped = wrap_columns(sql_text, &cols)
             .ok_or_else(|| Error::Invalid(format!("열 이름이 겹치거나 따옴표가 있어 ROWID·객체 열을 자동으로 바꾸지 못했습니다 — {hint}")))?;
         let mut stmt = self.conn.statement(&wrapped).fetch_array_size(arr).prefetch_rows(arr).build()?;
@@ -1075,7 +1075,8 @@ fn text_expr(name: &str, t: &OracleType) -> Option<String> {
     let q = format!("\"{name}\"");
     let xml = || format!("XMLSERIALIZE(CONTENT {q} AS CLOB)");
     match t {
-        OracleType::Rowid => Some(format!("ROWIDTOCHAR({q})")),
+        // ROWIDTOCHAR 는 IOT 의 논리 ROWID(UROWID) 에서 ORA-01410 — CAST 는 둘 다 된다
+        OracleType::Rowid => Some(format!("CAST({q} AS VARCHAR2(4000))")),
         // BFILE: 드라이버가 글자로 바꾸려고 서버의 파일을 열다 멈춘다 (디렉터리·파일이 없으면) — 표시만
         OracleType::BFILE => Some(format!("CASE WHEN {q} IS NULL THEN NULL ELSE '(BFILE)' END")),
         OracleType::Xml => Some(xml()),
@@ -1086,7 +1087,7 @@ fn text_expr(name: &str, t: &OracleType) -> Option<String> {
     }
 }
 
-/// `SELECT ROWIDTOCHAR("RID") AS "RID", "A" FROM (원문)` — 바꿀 열만 식으로. 열 이름이 겹치거나
+/// `SELECT CAST("RID" AS VARCHAR2(4000)) AS "RID", "A" FROM (원문)` — 바꿀 열만 식으로. 열 이름이 겹치거나
 /// 따옴표가 들어 있으면 바깥에서 가리킬 수 없으므로 None.
 fn wrap_columns(sql_text: &str, cols: &[(String, Option<String>)]) -> Option<String> {
     let mut seen = std::collections::HashSet::new();
@@ -1136,11 +1137,11 @@ mod tests {
         let cols = vec![("RID".to_string(), text_expr("RID", &OracleType::Rowid)), ("ENAME".to_string(), text_expr("ENAME", &OracleType::Varchar2(10)))];
         assert_eq!(
             wrap_columns("select a.rowid rid, a.ename from emp a -- x", &cols).unwrap(),
-            "SELECT ROWIDTOCHAR(\"RID\") AS \"RID\", \"ENAME\" FROM (
+            "SELECT CAST(\"RID\" AS VARCHAR2(4000)) AS \"RID\", \"ENAME\" FROM (
 select a.rowid rid, a.ename from emp a -- x
 )"
         );
-        let dup = vec![("ID".to_string(), None), ("ID".to_string(), None), ("ROWID".to_string(), Some("ROWIDTOCHAR(\"ROWID\")".into()))];
+        let dup = vec![("ID".to_string(), None), ("ID".to_string(), None), ("ROWID".to_string(), Some("CAST(\"ROWID\" AS VARCHAR2(4000))".into()))];
         assert!(wrap_columns("select a.id, b.id, a.rowid from a, b", &dup).is_none());
         assert_eq!(text_expr("X", &OracleType::Xml).unwrap(), "XMLSERIALIZE(CONTENT \"X\" AS CLOB)");
         assert!(text_expr("N", &OracleType::Number(10, 0)).is_none());

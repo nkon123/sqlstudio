@@ -344,7 +344,7 @@ export class App {
     const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
     const js = (performance.getEntriesByType("resource") as PerformanceResourceTiming[]).find((r) => /\/assets\/main-[^/]*\.js/.test(r.name));
     const ms = (x?: number) => (x == null ? "?" : `${Math.round(x)}ms`);
-    void invoke("client_log", { level: "info", message: `시작(화면 앞): 문서 받음 ${ms(nav?.responseEnd)} · main.js 받기 ${ms(js?.startTime)}~${ms(js?.responseEnd)} · 모듈 실행 끝 ${ms(tModules)} · 첫 화면 구성 ${ms(tBuilt - tModules)} · 시작 작업 시작 ${ms(t0)}` }).catch(() => {});
+    void invoke("client_log", { level: "info", message: `시작(화면 앞): 문서 요청 시각 ${new Date(performance.timeOrigin).toISOString()} · 문서 요청 ${ms(nav?.requestStart)} · 응답 시작 ${ms(nav?.responseStart)} · 문서 받음 ${ms(nav?.responseEnd)} · main.js 받기 ${ms(js?.startTime)}~${ms(js?.responseEnd)} · 모듈 실행 끝 ${ms(tModules)} · 첫 화면 구성 ${ms(tBuilt - tModules)} · 시작 작업 시작 ${ms(t0)}` }).catch(() => {});
     // 몇 초마다 바뀐 탭이 있으면 저장 (프로그램이 죽어도 쓰던 SQL 이 남게)
     window.setInterval(() => void this.saveTabs(), 3000);
     if (localStorage.getItem("git.last")) {

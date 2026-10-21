@@ -40,6 +40,11 @@ pub(crate) fn webview_dir() -> Option<std::path::PathBuf> {
     sqls_core::config::portable_data_dir().map(|d| d.join("webview"))
 }
 
+/// WebView2 실행 인자 — 모든 창이 같아야 한다 (같은 데이터 폴더의 WebView 는 인자가 다르면 못 만든다).
+/// 앞 부분은 Tauri 기본값. 화면은 바깥 네트워크를 쓰지 않으므로(CSP 가 self·ipc 만) 프록시를 끈다 —
+/// 회사 PC 처럼 프록시 자동 검색(WPAD)이 켜진 곳에서 첫 화면 문서(http://tauri.localhost)를 받기까지 몇 초씩 걸리던 것
+pub(crate) const WEBVIEW_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --no-proxy-server";
+
 /// 로그 폴더 (설정 파일 옆 logs)
 pub(crate) fn log_dir() -> std::path::PathBuf {
     sqls_core::config::config_path().parent().map(|p| p.join("logs")).unwrap_or_else(|| "logs".into())
@@ -256,11 +261,13 @@ pub fn run() {
         // 메인 창은 여기서 만든다 — 포터블이면 WebView 데이터(화면 설정·바인드 이력)도 실행 파일 옆 data 에 두도록
         .setup(|app| {
             let cfg = app.config().app.windows.iter().find(|w| w.label == "main").cloned().ok_or("main 창 설정이 없습니다")?;
-            let mut b = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?;
+            let mut b = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?.additional_browser_args(WEBVIEW_ARGS);
             if let Some(dir) = webview_dir() {
                 b = b.data_directory(dir);
             }
             b.build()?;
+            // 화면 쪽 '시작(화면 앞)' 의 문서 요청 시각과 비교해 창(WebView) 만들기에 걸린 시간을 본다
+            tracing::info!("메인 창 만듦");
             Ok(())
         })
         .run(tauri::generate_context!())

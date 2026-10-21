@@ -502,7 +502,8 @@ pub async fn open_dfd_window(
     let mut b = tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))
         .title(format!("데이터 흐름도 — {profile}"))
         .inner_size(1360.0, 860.0)
-        .min_inner_size(700.0, 450.0);
+        .min_inner_size(700.0, 450.0)
+        .additional_browser_args(crate::WEBVIEW_ARGS);
     if let Some(dir) = crate::webview_dir() {
         b = b.data_directory(dir);
     }

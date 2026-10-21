@@ -67,12 +67,14 @@ export function showMenu(x: number, y: number, items: MenuItem[]) {
     const rows = [...layer.querySelectorAll<HTMLElement>(".ctx-item:not(.disabled)")];
     const at = rows.findIndex((r) => r.classList.contains("on"));
     const focus = (i: number) => { rows.forEach((r) => r.classList.remove("on")); rows[i]?.classList.add("on"); };
-    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); if (layers.length > 1) layers.pop()!.remove(); else close(); }
-    else if (e.key === "ArrowDown") { e.preventDefault(); focus((at + 1) % rows.length); }
-    else if (e.key === "ArrowUp") { e.preventDefault(); focus((at - 1 + rows.length) % rows.length); }
-    else if (e.key === "ArrowRight" && at >= 0 && rows[at].classList.contains("has-sub")) { e.preventDefault(); rows[at].dispatchEvent(new MouseEvent("mouseenter")); const sub = layers[layers.length - 1]; sub.querySelector(".ctx-item:not(.disabled)")?.classList.add("on"); }
-    else if (e.key === "ArrowLeft" && layers.length > 1) { e.preventDefault(); layers.pop()!.remove(); }
-    else if (e.key === "Enter" && at >= 0) { e.preventDefault(); rows[at].click(); }
+    // 한글 입력 상태에서는 key 가 "Process" 로 올 수 있다 — 물리 키(code)로
+    const key = e.key === "Process" || e.key === "Unidentified" ? e.code : e.key;
+    if (key === "Escape") { e.preventDefault(); e.stopPropagation(); if (layers.length > 1) layers.pop()!.remove(); else close(); }
+    else if (key === "ArrowDown") { e.preventDefault(); focus((at + 1) % rows.length); }
+    else if (key === "ArrowUp") { e.preventDefault(); focus((at - 1 + rows.length) % rows.length); }
+    else if (key === "ArrowRight" && at >= 0 && rows[at].classList.contains("has-sub")) { e.preventDefault(); rows[at].dispatchEvent(new MouseEvent("mouseenter")); const sub = layers[layers.length - 1]; sub.querySelector(".ctx-item:not(.disabled)")?.classList.add("on"); }
+    else if (key === "ArrowLeft" && layers.length > 1) { e.preventDefault(); layers.pop()!.remove(); }
+    else if (key === "Enter" && at >= 0) { e.preventDefault(); rows[at].click(); }
     else return;
   };
 

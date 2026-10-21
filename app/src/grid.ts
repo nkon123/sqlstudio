@@ -76,6 +76,15 @@ function compileFilter(text: string, cols: Column[]): ((r: (string | null)[]) =>
   return (r) => preds.every((f) => f(r));
 }
 
+const NAV_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End", " "]);
+
+/** 그리드가 쓰는 이동 키 이름. 한글 등 입력기가 켜져 있으면 key 가 "Process" 로 오기도 해 물리 키(code)로 대신한다 */
+export function navKeyName(e: Pick<KeyboardEvent, "key" | "code">): string {
+  if (NAV_KEYS.has(e.key)) return e.key;
+  if (e.code === "Space") return " ";
+  return NAV_KEYS.has(e.code) ? e.code : e.key;
+}
+
 export class ResultGrid {
   readonly el: HTMLElement;
   private header: HTMLElement;
@@ -778,11 +787,13 @@ export class ResultGrid {
    *  방향키: 그 셀 하나를 고른다 · Shift+: 넓힌다 · Ctrl+: 커서만 옮긴다 (고른 것은 그대로) · Space: 커서 셀을 더하거나 뺀다 (Ctrl+클릭) */
   private navKey(e: KeyboardEvent): boolean {
     if (e.altKey || !this.view.length || !this.columns.length) return false;
+    // 한글 입력 상태에서는 key 가 "Process" 로 올 수 있다 — 물리 키(code)로 알아본다
+    const key = navKeyName(e);
     const cols = this.columns.map((_, i) => i).filter((i) => !this.hiddenCol(i));
     if (!cols.length) return false;
     const last = this.view.length - 1;
     const page = Math.max(1, Math.floor(this.viewport.clientHeight / ROW_H) - 1);
-    if (e.key === " " && !e.ctrlKey && !e.shiftKey) {
+    if (key === " " && !e.ctrlKey && !e.shiftKey) {
       if (!this.cur) return false;
       e.preventDefault();
       // 사각형은 낱낱의 셀로 바꿔 두고 커서 셀을 뒤집는다
@@ -798,7 +809,7 @@ export class ResultGrid {
     const from = this.cur ?? (this.sel ? { r: this.sel.r1, c: this.sel.c1 } : null);
     let r = Math.min(from?.r ?? 0, last);
     let ci = Math.max(0, cols.indexOf(from?.c ?? cols[0]));
-    switch (e.key) {
+    switch (key) {
       case "ArrowUp": r = Math.max(0, r - 1); break;
       case "ArrowDown": r = Math.min(last, r + 1); break;
       case "ArrowLeft": ci = Math.max(0, ci - 1); break;
@@ -814,7 +825,7 @@ export class ResultGrid {
     if (!from) { r = 0; ci = 0; }
     const c = cols[ci];
     this.cur = { r, c };
-    const moveOnly = e.ctrlKey && e.key !== "Home" && e.key !== "End";
+    const moveOnly = e.ctrlKey && key !== "Home" && key !== "End";
     if (e.shiftKey) {
       if (!this.sel) this.sel = { r0: from?.r ?? r, c0: from?.c ?? c, r1: r, c1: c };
       this.sel.r1 = r;

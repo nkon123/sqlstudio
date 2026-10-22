@@ -261,6 +261,10 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .quick-menu ul { list-style: none; margin: 0; padding: 0; max-height: 16em; overflow-y: auto; }
 .quick-menu li { padding: 2px 10px 2px 8px; white-space: pre; cursor: pointer; }
 .quick-menu li[aria-selected] { background: var(--sel); }
+.quick-menu-head { padding: 3px 8px; border-bottom: 1px solid var(--line); color: var(--dim); max-width: 46em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick-menu-key { float: right; margin-left: 16px; color: var(--dim); font: 11px system-ui, sans-serif; }
+/* 괄호 메뉴가 다루는 구간 */
+.cm-editor .cm-parenPreview { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .quick-menu-hint { padding: 2px 8px; border-top: 1px solid var(--line); color: var(--dim); font: 11px system-ui, sans-serif; }
 .cm-tooltip-autocomplete li:not([aria-selected]):has(.cm-completionIcon-join) .cm-completionLabel { color: var(--accent); }
 

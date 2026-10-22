@@ -1,7 +1,7 @@
 // 괄호 — 커서를 감싼 ( … ) 의 짝을 강하게 보이고, 짝으로 바로 간다.
 //
 //   Ctrl+]        짝 괄호로 (괄호 옆이면 그 짝, 아니면 감싼 괄호의 끝 ")" 뒤로). 다시 누르면 "(" 앞으로
-//   Ctrl+Shift+]  감싼 ( … ) 의 안쪽을 고른다 (괄호·바로 안의 공백 빼고 — 서브쿼리 복사 등). 다시 누르면 바깥 괄호의 안쪽
+//   Ctrl+Shift+]  괄호 메뉴 (parenmenu.ts) — 안쪽 선택·복사 등
 //
 // 괄호는 SQL 문법 트리(Parens)로 찾는다 — 문자열·주석 안의 괄호는 세지 않는다.
 
@@ -67,23 +67,6 @@ export function innerRange(state: EditorState, p: Pair): { from: number; to: num
   const from = p.open + 1 + lead;
   return { from, to: Math.max(from, p.close - trail) };
 }
-
-/** Ctrl+Shift+] — 감싼 ( … ) 의 안쪽을 고른다. 이미 골라져 있으면 한 겹 바깥 괄호의 안쪽으로 */
-export const selectParen: Command = (view) => {
-  const { state } = view;
-  const sel = state.selection.main;
-  let p = enclosingPair(state, sel.head);
-  // 지금 고른 것이 이 괄호 안쪽 그대로(또는 더 넓게)면 바깥 괄호로 — 한 번 누를 때마다 넓어진다
-  while (p) {
-    const r = innerRange(state, p);
-    if (sel.from > r.from || sel.to < r.to) break;
-    p = outerPair(state, p);
-  }
-  if (!p) return false;
-  const r = innerRange(state, p);
-  view.dispatch({ selection: EditorSelection.range(r.from, r.to), scrollIntoView: true, userEvent: "select" });
-  return true;
-};
 
 const mark = Decoration.mark({ class: "cm-parenPair" });
 

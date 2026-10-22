@@ -24,6 +24,8 @@ export interface RiverOptions {
   /** 채울 때 한 줄 너비 */
   width: number;
   keywordCase: "upper" | "lower" | "preserve";
+  /** 조건(WHERE·ON·HAVING …)의 줄마다 비교 연산자(= · LIKE · IN …)를 같은 칸에 */
+  alignOps?: boolean;
   identCase: "upper" | "lower" | "preserve";
 }
 
@@ -736,8 +738,71 @@ class Fmt {
 /** 오른쪽 맞춤 스타일로 포맷. 다루지 않는 문장이거나 읽지 못하면 null */
 export function formatRiver(sql: string, o: RiverOptions): string | null {
   try {
-    return new Fmt(tokenize(sql), o).run();
+    const out = new Fmt(tokenize(sql), o).run();
+    return out !== null && o.alignOps ? alignOperators(out) : out;
   } catch {
     return null;
   }
+}
+
+/** 조건 줄의 머리 — `WHERE ` · `AND ` 처럼 키워드 다음부터가 조건 */
+const COND_LINE = /^(\s*)(WHERE|AND|OR|ON|HAVING|CONNECT\s+BY|START\s+WITH)(\s+)(\S.*)$/i;
+/** 맞출 연산자 — 기호, 또는 앞뒤가 띄어진 낱말 (NOT LIKE · IS NOT NULL …). 긴 것부터 */
+const OP_WORDS = /^(NOT\s+LIKE|LIKE|NOT\s+IN|IN|NOT\s+BETWEEN|BETWEEN|IS)(?=[\s(])/i;
+const OP_SYMS = [">=", "<=", "<>", "!=", "^=", "=", ">", "<"];
+
+/** 조건 글에서 맨 바깥(괄호·문자열 밖)의 첫 비교 연산자 자리. 없으면 -1 */
+export function opAt(cond: string): number {
+  let depth = 0;
+  for (let i = 0; i < cond.length; i++) {
+    const ch = cond[i];
+    if (ch === "'") {
+      const e = cond.indexOf("'", i + 1);
+      if (e < 0) return -1;
+      i = e;
+      continue;
+    }
+    if (ch === "-" && cond[i + 1] === "-") return -1;
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    if (depth) continue;
+    if (OP_SYMS.some((op) => cond.startsWith(op, i))) {
+      // => (이름 붙인 인자) · || 는 아니다
+      return cond.startsWith("=>", i) ? -1 : i;
+    }
+    if (i > 0 && cond[i - 1] === " " && OP_WORDS.test(cond.slice(i))) return i;
+  }
+  return -1;
+}
+
+/** 이어진 조건 줄들(같은 칸에서 시작)의 비교 연산자를 같은 칸에 — 연산자 앞을 공백으로 채운다.
+ *  조건이 다음 줄로 이어지면(서브쿼리 등) 그 줄은 맞추지 않는다 */
+export function alignOperators(text: string): string {
+  const lines = text.split("\n");
+  const start = (l: string) => { const m = COND_LINE.exec(l); return m ? vw(m[1] + m[2] + m[3]) : -1; };
+  let i = 0;
+  while (i < lines.length) {
+    const col = start(lines[i]);
+    if (col < 0) { i++; continue; }
+    // 같은 칸에서 시작해 AND·OR 로 이어지는 조건 줄들 (WHERE·ON 같은 새 절은 따로)
+    let j = i + 1;
+    while (j < lines.length && start(lines[j]) === col && /^\s*(AND|OR)\s/i.test(lines[j])) j++;
+    // 이어지는 줄이 있으면(더 들여 쓴 줄) 그 앞 조건은 여러 줄 — 빼고 맞춘다
+    const multi = (k: number) => k + 1 < lines.length && k + 1 >= j && /^\s/.test(lines[k + 1]) && vw(/^\s*/.exec(lines[k + 1])![0]) > col - 1 && start(lines[k + 1]) < 0;
+    const rows: { k: number; head: string; lhs: string; rest: string }[] = [];
+    for (let k = i; k < j; k++) {
+      if (multi(k)) continue;
+      const m = COND_LINE.exec(lines[k])!;
+      const cond = m[4];
+      const at = opAt(cond);
+      if (at <= 0) continue;
+      rows.push({ k, head: m[1] + m[2] + m[3], lhs: cond.slice(0, at).trimEnd(), rest: cond.slice(at) });
+    }
+    if (rows.length >= 2) {
+      const w = Math.max(...rows.map((r) => vw(r.lhs)));
+      for (const r of rows) lines[r.k] = `${r.head}${r.lhs}${" ".repeat(w - vw(r.lhs))} ${r.rest}`;
+    }
+    i = j;
+  }
+  return lines.join("\n");
 }

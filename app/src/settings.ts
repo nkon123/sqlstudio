@@ -159,6 +159,7 @@ function editorPage(app: App) {
   const comma = sel(p.commaBefore ? "before" : "after", [["before", "줄 앞 (, SAL)"], ["after", "줄 끝 (SAL,)"]]);
   const ind = sel(String(p.indent), [["2", "2칸"], ["4", "4칸"]]);
   const logic = sel(p.logicalBefore ? "before" : "after", [["before", "줄 앞 (AND x = 1)"], ["after", "줄 끝 (x = 1 AND)"]]);
+  const align = sel(p.alignOps ? "on" : "off", [["off", "맞추지 않음"], ["on", "맞춤 (a.x   = 1 · b.name LIKE …)"]]);
   const width = h("input", { type: "number", min: "20", max: "200", value: String(p.expressionWidth) }) as HTMLInputElement;
   const preview = h("pre", { class: "format-preview" });
   const sample = "select o.order_id, c.cust_nm, sum(i.qty * i.price) total, case when o.status = 'C' then '취소' else '정상' end st " +
@@ -169,6 +170,7 @@ function editorPage(app: App) {
   const fComma = field("쉼표 위치", comma);
   const fInd = field("들여쓰기", ind);
   const fWidth = field("한 줄 너비", width, " ");
+  const fAlign = field("조건의 연산자 맞추기", align, "WHERE·ON·HAVING 의 줄마다 = · <> · >= · LIKE · IN · BETWEEN · IS NULL 을 같은 칸에 둡니다");
   const read = (): FormatPrefs => ({
     style: style.value as FormatPrefs["style"],
     keywordCase: kw.value as FormatPrefs["keywordCase"],
@@ -177,6 +179,7 @@ function editorPage(app: App) {
     indent: ind.value === "4" ? 4 : 2,
     expressionWidth: Math.max(20, Math.min(200, Number(width.value) || DEFAULT_PREFS.expressionWidth)),
     logicalBefore: logic.value === "before",
+    alignOps: align.value === "on",
   });
   const set = (q: Partial<FormatPrefs>) => {
     if (q.style) style.value = q.style;
@@ -184,6 +187,7 @@ function editorPage(app: App) {
     if (q.identCase) ident.value = q.identCase;
     if (q.commaBefore !== undefined) comma.value = q.commaBefore ? "before" : "after";
     if (q.logicalBefore !== undefined) logic.value = q.logicalBefore ? "before" : "after";
+    if (q.alignOps !== undefined) align.value = q.alignOps ? "on" : "off";
     if (q.indent) ind.value = String(q.indent);
     if (q.expressionWidth) width.value = String(q.expressionWidth);
   };
@@ -193,6 +197,7 @@ function editorPage(app: App) {
     fComma.hidden = prefs.style === "left";
     fInd.hidden = prefs.style !== "left";
     fWidth.hidden = prefs.style === "river";
+    fAlign.hidden = prefs.style === "left";
     const hint = fWidth.querySelector("small");
     if (hint) hint.textContent = prefs.style === "left" ? "괄호 식이 이보다 길면 여러 줄로 나눕니다" : "목록을 이 너비까지 한 줄에 채웁니다";
     const r = formatSql(sample, prefs);
@@ -200,7 +205,7 @@ function editorPage(app: App) {
   };
   // 스타일을 고르면 그 스타일의 기본 모양으로 (대소문자는 그대로)
   style.addEventListener("change", () => { set(STYLE_PRESETS[style.value as FormatPrefs["style"]].prefs); update(); });
-  for (const el of [kw, ident, comma, ind, logic, width]) el.addEventListener("change", update);
+  for (const el of [kw, ident, comma, ind, logic, align, width]) el.addEventListener("change", update);
   const fromSample = h("button", { class: "small", title: "마음에 드는 모양으로 정리한 SQL 을 붙여 넣으면 쉼표·AND 위치, 키워드 정렬, 대소문자를 읽어 맞춘다", onclick: async (e: Event) => {
     e.preventDefault();
     const ta = h("textarea", { rows: 12, class: "snip-body", placeholder: "SELECT JOB\n     , MGR\n  FROM emp\n WHERE 1 = 1" }) as HTMLTextAreaElement;
@@ -260,7 +265,7 @@ function editorPage(app: App) {
     h("h3", {}, "SQL 포맷 (Ctrl+Shift+F)"),
     field("스타일", h("div", { class: "row", style: "display:flex;gap:8px;align-items:center" }, style, fromSample)),
     field("쓰는 동안 자동 포맷", autoBox, "파일 메뉴 > 자동 포맷 에서도 켜고 끕니다"),
-    field("키워드", kw), field("테이블·컬럼 이름", ident), fComma, field("AND / OR 위치", logic), fInd, fWidth,
+    field("키워드", kw), field("테이블·컬럼 이름", ident), fComma, field("AND / OR 위치", logic), fAlign, fInd, fWidth,
     h("small", {}, "바꾸면 바로 저장됩니다. 포맷 결과가 공백·대소문자 말고 원본과 달라지면 적용하지 않습니다. PL/SQL 블록은 아직 포맷하지 않습니다. " +
       "오른쪽 맞춤·간결은 SELECT·WITH·INSERT·UPDATE·DELETE 를 다루고, 그 밖(MERGE·DDL)은 왼쪽 정렬로 정리합니다."),
     field("미리 보기", preview),

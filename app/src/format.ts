@@ -28,6 +28,8 @@ export interface FormatPrefs {
   indent: 2 | 4;
   /** 왼쪽 정렬: 한 줄에 둘 괄호 식의 최대 길이 · 간결: 한 줄 너비 */
   expressionWidth: number;
+  /** 조건 줄마다 비교 연산자(= · LIKE · IN …)를 같은 칸에 (오른쪽 맞춤·간결) */
+  alignOps: boolean;
 }
 
 export const STYLE_PRESETS: Record<FormatStyle, { label: string; prefs: Partial<FormatPrefs> }> = {
@@ -37,7 +39,7 @@ export const STYLE_PRESETS: Record<FormatStyle, { label: string; prefs: Partial<
 };
 
 export const DEFAULT_PREFS: FormatPrefs = {
-  style: "river", keywordCase: "upper", identCase: "preserve", commaBefore: true, logicalBefore: true, indent: 2, expressionWidth: 60,
+  style: "river", keywordCase: "upper", identCase: "preserve", commaBefore: true, logicalBefore: true, indent: 2, expressionWidth: 60, alignOps: false,
 };
 
 const KEY = "format.prefs";
@@ -209,7 +211,7 @@ export function formatSql(sql: string, prefs: FormatPrefs = loadPrefs()): Format
   if (prefs.style !== "left") {
     out = formatRiver(sql, {
       commaBefore: prefs.commaBefore, logicalBefore: prefs.logicalBefore, fill: prefs.style === "compact",
-      width: prefs.expressionWidth, keywordCase: prefs.keywordCase, identCase: prefs.identCase,
+      width: prefs.expressionWidth, keywordCase: prefs.keywordCase, identCase: prefs.identCase, alignOps: prefs.alignOps,
     });
     if (out !== null && !sameSql(sql, out)) out = null;
   }
@@ -265,6 +267,13 @@ export function detectPrefs(sample: string): { prefs: Partial<FormatPrefs>; foun
   if (andBefore || andAfter) {
     p.logicalBefore = andBefore >= andAfter;
     found.push(p.logicalBefore ? "AND·OR 를 줄 앞에" : "AND·OR 를 줄 끝에");
+  }
+  // 조건 줄의 연산자 앞에 공백을 더 두어 맞췄는지 (a.x   = 1)
+  const padded = lines.filter((l) => /^\s*(WHERE|AND|OR|ON)\s+\S+ {2,}(=|<>|!=|>=|<=|(LIKE|IN|IS|BETWEEN)\b)/i.test(l)).length;
+  if (andBefore + andAfter >= 1) {
+    // 맞춘 묶음에서 가장 긴 줄은 공백 하나 — 공백을 더 둔 줄이 하나라도 있으면 맞춘 것
+    p.alignOps = padded >= 1;
+    if (p.alignOps) found.push("조건의 연산자 맞추기");
   }
   // 대소문자 — 문자열·주석·따옴표 이름을 빼고 본다
   const body = sample.replace(/'(?:[^']|'')*'|"[^"]*"|--[^\n]*|\/\*[\s\S]*?\*\//g, " ");

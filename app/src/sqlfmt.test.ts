@@ -163,6 +163,33 @@ SELECT *
 eq("select deptno, sum(sal) from emp group by grouping sets ((deptno), ())",
   "SELECT deptno\n     , SUM(sal)\n  FROM emp\n GROUP BY GROUPING SETS ((deptno), ())");
 
+// 조건의 연산자 맞추기 — 절(ON·WHERE)마다 따로, = · >= · IN · LIKE · BETWEEN · IS 를 같은 칸에. 여러 줄 조건(서브쿼리)은 빼고
+const aligned: FormatPrefs = { ...DEFAULT_PREFS, alignOps: true };
+eq("select * from orders o join customers c on c.cust_id = o.cust_id and c.use_yn = 'Y' where o.order_dt >= trunc(sysdate) - 7 and c.grade in ('A', 'B') and c.cust_nm like '%김%' and o.amt between 1 and 10 and o.memo is null and exists (select 1 from payments p where p.order_id = o.order_id and p.amount_total > 0)",
+`SELECT *
+  FROM orders o
+  JOIN customers c
+    ON c.cust_id = o.cust_id
+   AND c.use_yn  = 'Y'
+ WHERE o.order_dt >= TRUNC(SYSDATE) - 7
+   AND c.grade    IN ('A', 'B')
+   AND c.cust_nm  LIKE '%김%'
+   AND o.amt      BETWEEN 1 AND 10
+   AND o.memo     IS NULL
+   AND EXISTS (SELECT 1
+                 FROM payments p
+                WHERE p.order_id     = o.order_id
+                  AND p.amount_total > 0)`, aligned);
+// 한글 이름은 두 칸 · NOT LIKE · 문자열 안의 = 는 연산자가 아니다
+eq("select a from t where 고객명 = 'a=b' and x.long_name not like 'a%' and b <> 2",
+`SELECT a
+  FROM t
+ WHERE 고객명      = 'a=b'
+   AND x.long_name NOT LIKE 'a%'
+   AND b           <> 2`, aligned);
+// 예시에서 읽는다
+if (!detectPrefs("SELECT a\n  FROM t\n WHERE a.x   = 1\n   AND a.yyy = 2").prefs.alignOps) throw new Error("detectPrefs: 연산자 맞춤을 읽지 못함");
+
 // PIVOT 이라는 이름의 열은 PIVOT 절로 보지 않는다
 eq("select pivot from t", "SELECT PIVOT\n  FROM t");
 

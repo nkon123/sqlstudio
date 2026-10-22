@@ -10,7 +10,7 @@
 //
 // 절 키워드(SELECT·FROM·WHERE …)를 6칸(SELECT 길이)에 오른쪽으로 맞추고, 목록은 쉼표를 앞(또는 뒤)에,
 // 조건은 AND·OR 를 키워드처럼 맞춘다. 괄호 안의 서브쿼리는 여는 괄호 바로 뒤를 기준으로 같은 모양을 다시 짠다.
-// SELECT·WITH·INSERT·UPDATE·DELETE 만 다룬다 — 그 밖(MERGE, DDL, INSERT ALL …)은 null 을 돌려 부르는 쪽이 다른 포맷터를 쓴다.
+// SELECT·WITH·INSERT·UPDATE·DELETE·MERGE 만 다룬다 — 그 밖(DDL, INSERT ALL …)은 null 을 돌려 부르는 쪽이 다른 포맷터를 쓴다.
 // 결과가 같은 SQL 인지는 부르는 쪽(format.ts)이 토큰으로 다시 확인한다.
 
 export interface RiverOptions {
@@ -129,7 +129,7 @@ const SPACE_PAREN = new Set(("IN EXISTS AS VALUES OVER AND OR NOT ON USING THEN 
 /** 값으로 쓰이는 키워드 — 뒤의 -/+ 는 빼기·더하기 */
 const VALUE_WORDS = new Set("NULL LEVEL ROWNUM ROWID SYSDATE SYSTIMESTAMP CURRENT_DATE CURRENT_TIMESTAMP TRUE FALSE".split(" "));
 
-type Kind = "list" | "cond" | "join" | "flat" | "setop" | "with" | "insert" | "update" | "delete" | "pivot";
+type Kind = "list" | "cond" | "join" | "flat" | "setop" | "with" | "insert" | "update" | "delete" | "pivot" | "merge";
 interface Clause { kw: string; n: number; kind: Kind }
 interface Snap { l: number; cur: string; pos: number; prev: Tok | null; mb: boolean; un: boolean }
 
@@ -259,7 +259,7 @@ class Fmt {
       case "INSERT": if (w(1) === "INTO") return c(2, "insert"); throw new Error("INSERT ALL");
       case "UPDATE": return this.allowWith ? c(1, "update") : null;
       case "DELETE": return this.allowWith ? c(w(1) === "FROM" ? 2 : 1, "delete") : null;
-      case "MERGE": throw new Error("MERGE");
+      case "MERGE": return w(1) === "INTO" ? c(2, "merge") : null;
       // PIVOT ( … ) · PIVOT XML ( … ) · UNPIVOT INCLUDE NULLS ( … ) — 이름으로 쓴 PIVOT 은 아니다
       case "PIVOT": case "UNPIVOT":
         return this.at(1)?.t === "(" || ["XML", "INCLUDE", "EXCLUDE"].includes(w(1)) ? c(1, "pivot") : null;
@@ -270,7 +270,7 @@ class Fmt {
   /** 절 키워드를 놓을 칸: 6칸 안은 오른쪽 맞춤, 긴 것(GROUP BY …)은 한 칸 들여, 조인은 FROM 과 같은 칸 */
   private kwStart(c: Clause, base: number) {
     const R = base + 6;
-    if (["with", "insert", "update", "delete", "setop"].includes(c.kind)) return base;
+    if (["with", "insert", "update", "delete", "setop", "merge"].includes(c.kind)) return base;
     if (c.kind === "join") return R - 4;
     const len = vw(c.kw);
     return len <= 6 ? R - len : base + 1;
@@ -312,6 +312,7 @@ class Fmt {
         case "cond": this.cond(R); break;
         case "setop": break;
         case "pivot": this.pivot(); break;
+        case "merge": this.merge(base); break;
         default: this.cont = this.col() + 1; this.expr({ clauses: true }); break;
       }
       first = false;
@@ -345,6 +346,70 @@ class Fmt {
       this.prev = { t: ",", v: ",", nl: false, sp: false };
       this.cont = itemCol;
       this.expr({ clauses: true, list: true, stops });
+    }
+  }
+
+  /** 절 키워드(낱말 n 개)를 그 칸에 — 줄을 바꿔 col 에서 */
+  private kwAt(col: number, n = 1) {
+    this.brk(col);
+    this.emit(this.kwFrom(n), true);
+    this.pos += n;
+    this.prev = null;
+  }
+
+  /** MERGE INTO 대상 USING 원본 ON (조건) WHEN [NOT] MATCHED THEN … — 갈래 안의 UPDATE·INSERT 는 한 칸 들인 문장처럼:
+   *
+   *    MERGE INTO emp t
+   *     USING (SELECT …) s
+   *        ON (t.empno = s.empno)
+   *      WHEN MATCHED THEN
+   *           UPDATE
+   *              SET t.sal = s.sal
+   *            WHERE t.sal <> s.sal
+   *           DELETE
+   *            WHERE t.sal = 0
+   *      WHEN NOT MATCHED THEN
+   *           INSERT (empno, sal)
+   *           VALUES (s.empno, s.sal)
+   */
+  private merge(base: number) {
+    const R = base + 6;
+    const WHEN = new Set(["WHEN"]);
+    this.cont = this.col() + 1;
+    this.expr({ clauses: true });
+    if (this.up() !== "USING") throw new Error("MERGE 에 USING 이 없습니다");
+    this.kwAt(R - 5);
+    this.cont = this.col() + 1;
+    this.expr({ stops: new Set(["ON"]) });
+    if (this.up() !== "ON") throw new Error("MERGE 에 ON 이 없습니다");
+    this.kwAt(R - 2);
+    this.cond(R, WHEN);
+    // 갈래 안 문장의 SELECT 칸
+    const B = R + 1, BR = B + 6;
+    while (this.up() === "WHEN") {
+      const n = this.up(1) === "NOT" ? 4 : 3;
+      if (this.up(n - 2) !== "MATCHED" || this.up(n - 1) !== "THEN") throw new Error("WHEN [NOT] MATCHED THEN");
+      this.kwAt(R - 4, n);
+      const what = this.up();
+      if (what === "UPDATE") {
+        this.kwAt(B);
+        if (this.up() !== "SET") throw new Error("UPDATE 에 SET 이 없습니다");
+        this.kwAt(BR - 3);
+        this.list(this.col() + 1, new Set(["WHEN", "WHERE", "DELETE"]));
+        if (this.up() === "WHERE") { this.kwAt(BR - 5); this.cond(BR, new Set(["WHEN", "DELETE"])); }
+        if (this.up() === "DELETE") {
+          this.kwAt(B);
+          if (this.up() === "WHERE") { this.kwAt(BR - 5); this.cond(BR, WHEN); }
+        }
+      } else if (what === "INSERT") {
+        this.kwAt(B);
+        this.cont = this.col() + 1;
+        this.expr({ stops: new Set(["VALUES", "WHEN", "WHERE"]) });
+        if (this.up() === "VALUES") { this.kwAt(BR - 6); this.cont = this.col() + 1; this.expr({ stops: new Set(["WHEN", "WHERE"]) }); }
+        if (this.up() === "WHERE") { this.kwAt(BR - 5); this.cond(BR, WHEN); }
+      } else {
+        throw new Error("MERGE 갈래는 UPDATE·INSERT");
+      }
     }
   }
 
@@ -402,10 +467,10 @@ class Fmt {
     if ((a?.t === "word" || a?.t === "qid") && !this.clauseAt() && !KEYWORDS.has(this.up())) this.tok();
   }
 
-  private cond(R: number) {
+  private cond(R: number, stops?: Set<string>) {
     this.cont = R + 1;
     for (;;) {
-      this.expr({ clauses: true, cond: true });
+      this.expr({ clauses: true, cond: true, stops });
       const op = this.up();
       if (op !== "AND" && op !== "OR") break;
       const text = this.kw(this.at()!.v);
@@ -518,7 +583,7 @@ class Fmt {
     const first = this.toks.find((t) => !this.isComment(t));
     if (!first) return null;
     const u = first.t === "word" ? first.v.toUpperCase() : first.t;
-    if (!["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "("].includes(u)) return null;
+    if (!["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "("].includes(u)) return null;
     while (this.pos < this.toks.length) {
       this.query(0);
       const t = this.at();
@@ -532,7 +597,7 @@ class Fmt {
         this.lines.push("");
         const nu = this.toks.slice(this.pos).find((x) => !this.isComment(x));
         const nuu = nu?.t === "word" ? nu.v.toUpperCase() : nu?.t;
-        if (nu && !["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "("].includes(nuu ?? "")) return null;
+        if (nu && !["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "("].includes(nuu ?? "")) return null;
       }
     }
     this.nl(0);

@@ -83,6 +83,35 @@ eq("select * from emp pivot xml (sum(sal) for deptno in (any))",
   FROM emp
  PIVOT XML (SUM(sal)
             FOR deptno IN (ANY))`);
+// MERGE — USING·ON·WHEN 을 절처럼 맞추고, 갈래 안의 UPDATE·INSERT 는 한 칸 들인 문장처럼
+eq("merge into emp t using (select empno, sal from emp_new where deptno = 10) s on (t.empno = s.empno) when matched then update set t.sal = s.sal, t.upd_dt = sysdate where t.sal <> s.sal delete where t.sal = 0 when not matched then insert (empno, sal, ins_dt) values (s.empno, s.sal, sysdate) where s.sal > 0",
+`MERGE INTO emp t
+ USING (SELECT empno
+             , sal
+          FROM emp_new
+         WHERE deptno = 10) s
+    ON (t.empno = s.empno)
+  WHEN MATCHED THEN
+       UPDATE
+          SET t.sal = s.sal
+            , t.upd_dt = SYSDATE
+        WHERE t.sal <> s.sal
+       DELETE
+        WHERE t.sal = 0
+  WHEN NOT MATCHED THEN
+       INSERT (empno, sal, ins_dt)
+       VALUES (s.empno, s.sal, SYSDATE)
+        WHERE s.sal > 0`);
+// 괄호 없는 ON 은 조건처럼 AND 를 맞춘다
+eq("merge into emp t using emp_new s on t.empno = s.empno and t.deptno = 10 when not matched then insert values (s.empno, s.sal)",
+`MERGE INTO emp t
+ USING emp_new s
+    ON t.empno = s.empno
+   AND t.deptno = 10
+  WHEN NOT MATCHED THEN
+       INSERT
+       VALUES (s.empno, s.sal)`);
+
 // PIVOT 이라는 이름의 열은 PIVOT 절로 보지 않는다
 eq("select pivot from t", "SELECT PIVOT\n  FROM t");
 

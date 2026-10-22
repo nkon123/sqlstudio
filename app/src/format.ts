@@ -3,7 +3,7 @@
 //   오른쪽 맞춤 (기본) : 절 키워드를 SELECT 끝에 맞추고 쉼표를 앞에 — sqlfmt.ts
 //   간결              : 오른쪽 맞춤 + 목록을 한 줄에 채움 — sqlfmt.ts
 //   왼쪽 정렬          : 키워드 한 줄, 내용은 들여쓰기 — sql-formatter(PL/SQL 방언)
-// sqlfmt 가 다루지 않는 문장(MERGE·DDL 등)은 sql-formatter 로 한다.
+// sqlfmt 가 다루지 않는 문장(DDL·INSERT ALL 등)은 sql-formatter 로 한다.
 //
 // 포맷터가 힌트 주석·문자열·연산자를 잘못 건드리면 실행 결과가 달라진다. 그래서 포맷 전후를
 // 토큰으로 쪼개 공백·줄바꿈·키워드 대소문자 말고 달라진 게 있으면 적용하지 않는다.
@@ -203,7 +203,7 @@ export function formatSql(sql: string, prefs: FormatPrefs = loadPrefs()): Format
   if (isPlsql(sql)) {
     return { ok: false, reason: "PL/SQL 블록(BEGIN·DECLARE·CREATE PACKAGE 등)과 '/' 구분 스크립트는 아직 포맷하지 않습니다. SQL 문만 선택해서 포맷하세요." };
   }
-  // 오른쪽 맞춤·간결이 다루지 못하는 문장(MERGE·DDL …)이면 왼쪽 정렬로
+  // 오른쪽 맞춤·간결이 다루지 못하는 문장(DDL·INSERT ALL …)이면 왼쪽 정렬로
   let out: string | null = null;
   if (prefs.style !== "left") {
     out = formatRiver(sql, {

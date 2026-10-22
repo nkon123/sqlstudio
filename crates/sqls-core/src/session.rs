@@ -691,7 +691,9 @@ impl Worker {
                 let _ = reply.send(self.side_query(&sql, &binds, max_rows));
             }
             Cmd::Explain { sql, reply } => {
-                let _ = reply.send(self.explain(&sql));
+                let r = self.explain(&sql);
+                self.note_txn();
+                let _ = reply.send(r);
             }
             Cmd::SideOpen { sql, binds, reply } => {
                 let _ = reply.send(self.side_open(&sql, &binds));
@@ -960,9 +962,16 @@ impl Worker {
             std::process::id(),
             EXPLAIN_SEQ.fetch_add(1, Ordering::Relaxed)
         );
-        // PLAN_TABLE 은 11g 에서 전역 임시 테이블이다. 끝나면 롤백해 지운다.
-        // 읽기 전용 트랜잭션 안에서는 EXPLAIN PLAN 이 쓰기를 못 하므로 먼저 끝낸다.
-        self.conn.rollback()?;
+        // PLAN_TABLE 은 11g 에서 전역 임시 테이블이다. 끝나면 되돌려 지운다.
+        // 커밋하지 않은 변경이 있으면 그것까지 롤백하면 안 된다 — 세이브포인트까지만 되돌린다.
+        // 변경이 없으면 끝내고 시작한다 (읽기 전용 트랜잭션 안에서는 EXPLAIN PLAN 이 쓰지 못한다)
+        use oracle::oci_attr::TransactionInProgress;
+        let keep = matches!(self.conn.oci_attr::<TransactionInProgress>(), Ok(true));
+        if keep {
+            self.conn.execute("SAVEPOINT SQLS_EXPLAIN", &[])?;
+        } else {
+            self.conn.rollback()?;
+        }
         let r = (|| -> Result<Vec<String>> {
             self.conn
                 .execute(&format!("EXPLAIN PLAN SET STATEMENT_ID = '{id}' FOR {sql_text}"), &[])?;
@@ -976,7 +985,7 @@ impl Worker {
             }
             Ok(out)
         })();
-        let _ = self.conn.rollback();
+        let _ = if keep { self.conn.execute("ROLLBACK TO SAVEPOINT SQLS_EXPLAIN", &[]).map(|_| ()) } else { self.conn.rollback() };
         r
     }
 

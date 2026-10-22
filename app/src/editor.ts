@@ -6,6 +6,7 @@
 //   Ctrl+E           실행계획
 //   Ctrl+S           저장 · Ctrl+Shift+S 다른 이름으로 저장
 //   Ctrl+Shift+F     SQL 포맷 (선택 영역 또는 커서 문장)
+//   Ctrl+]           짝 괄호로 (감싼 괄호의 끝 ↔ 처음) · Ctrl+Shift+] 감싼 ( … ) 고르기
 //
 // 여러 곳 편집 (열 편집):
 //   Alt+드래그            사각형(열) 선택
@@ -18,6 +19,7 @@ import { sql } from "@codemirror/lang-sql";
 import { ORACLE, oracleHighlight } from "./oracle-dialect";
 import { snippetSource } from "./snippets";
 import { quickMenu } from "./quickmenu";
+import { gotoMatchingParen, parenHighlight, selectParen } from "./brackets";
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import type { Command } from "@codemirror/view";
@@ -167,6 +169,8 @@ export class SqlEditor {
           crosshairCursor({ key: "Alt" }),
           indentOnInput(),
           bracketMatching(),
+          // 커서를 감싼 ( … ) 쌍 — 괄호 옆이 아니어도
+          parenHighlight(),
           closeBrackets(),
           highlightActiveLine(),
           highlightSelectionMatches(),
@@ -207,6 +211,8 @@ export class SqlEditor {
             { key: "Alt-Shift-ArrowLeft", run: blockMove(0, -1), preventDefault: true },
             { key: "Alt-Shift-ArrowRight", run: blockMove(0, 1), preventDefault: true },
             { key: "Ctrl-Space", run: startCompletion },
+            { key: "Mod-]", run: gotoMatchingParen, preventDefault: true },
+            { key: "Mod-Shift-]", run: selectParen, preventDefault: true },
             ...closeBracketsKeymap,
             ...completionKeymap,
             ...searchKeymap,

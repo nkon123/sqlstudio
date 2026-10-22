@@ -162,7 +162,10 @@ body.row-resizing { cursor: row-resize; user-select: none; }
 :root[data-theme="dark"] .cm-activeLine, :root[data-theme="dark"] .cm-activeLineGutter { background: rgba(140, 165, 210, .08) !important; }
 :root[data-theme="dark"] .cm-cursor { border-left-color: var(--text) !important; }
 .cm-editor .cm-selectionBackground, .cm-editor.cm-focused .cm-selectionBackground, .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground { background: var(--editor-sel) !important; }
-:root[data-theme="dark"] .cm-matchingBracket { background: #2e4a3a !important; color: inherit !important; }
+/* 괄호 — 커서 옆의 짝(matchingBracket)은 굵게·테두리, 커서를 감싼 쌍(parenPair)은 굵게·색으로 (brackets.ts) */
+.cm-editor .cm-matchingBracket { background: color-mix(in srgb, var(--accent) 22%, transparent) !important; outline: 1px solid var(--accent); font-weight: 700; color: inherit !important; }
+.cm-editor .cm-nonmatchingBracket { background: color-mix(in srgb, var(--warn) 30%, transparent) !important; outline: 1px solid var(--warn); }
+.cm-editor .cm-parenPair { color: var(--accent); font-weight: 700; background: color-mix(in srgb, var(--accent) 12%, transparent); border-radius: 2px; }
 :root[data-theme="dark"] .cm-tooltip { background: var(--panel); color: var(--text); border-color: var(--line); }
 :root[data-theme="dark"] .cm-tooltip-autocomplete ul li[aria-selected] { background: var(--sel); color: var(--text); }
 :root[data-theme="dark"] .cm-searchMatch { background: #4a4020; }

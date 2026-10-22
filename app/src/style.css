@@ -253,6 +253,12 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .cm-tooltip-autocomplete .cm-completionDetail { color: var(--dim); font-style: normal; margin-left: 8px; }
 .cm-tooltip-autocomplete .cm-completionInfo { white-space: pre-wrap; }
 .cm-completionIcon-join::after { content: "⋈"; }
+/* 자동완성 퀵 액션 (컬럼 후보에서 →) — 에디터 밖(body)에 붙어 CodeMirror 테마가 닿지 않는다 */
+.quick-menu { position: fixed; z-index: 1000; background: var(--panel); color: var(--text); border: 1px solid var(--line); box-shadow: 0 2px 8px rgba(0, 0, 0, .18); font: 12px var(--mono); }
+.quick-menu ul { list-style: none; margin: 0; padding: 0; max-height: 16em; overflow-y: auto; }
+.quick-menu li { padding: 2px 10px 2px 8px; white-space: pre; cursor: pointer; }
+.quick-menu li[aria-selected] { background: var(--sel); }
+.quick-menu-hint { padding: 2px 8px; border-top: 1px solid var(--line); color: var(--dim); font: 11px system-ui, sans-serif; }
 .cm-tooltip-autocomplete li:not([aria-selected]):has(.cm-completionIcon-join) .cm-completionLabel { color: var(--accent); }
 
 /* ── 디버거 ── */

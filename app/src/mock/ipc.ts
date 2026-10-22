@@ -163,6 +163,19 @@ async function execute(a: { id: number; sql: string; page_size?: number }) {
 
 // ── 자동완성 ─────────────────────────────────────
 
+/** 자주 쓰는 내장 함수 (진짜 목록은 sqls-core::complete 의 FUNCTIONS) */
+const FUNCTIONS: [string, string][] = [
+  ["NVL", "NVL(expr, 대체값)"], ["NVL2", "NVL2(expr, NULL 아닐 때, NULL 일 때)"], ["DECODE", "DECODE(expr, 값1, 결과1, ..., 기본값)"],
+  ["COALESCE", "COALESCE(expr1, expr2, ...)"], ["NULLIF", "NULLIF(a, b) — 같으면 NULL"], ["GREATEST", "GREATEST(a, b, ...)"], ["LEAST", "LEAST(a, b, ...)"],
+  ["TO_CHAR", "TO_CHAR(값, 'YYYY-MM-DD HH24:MI:SS')"], ["TO_DATE", "TO_DATE('문자', 'YYYY-MM-DD')"], ["TO_NUMBER", "TO_NUMBER(문자 [, 형식])"],
+  ["SUBSTR", "SUBSTR(문자, 시작 [, 길이])"], ["INSTR", "INSTR(문자, 찾을 문자 [, 시작 [, n번째]])"], ["LENGTH", "LENGTH(문자)"],
+  ["UPPER", "UPPER(문자)"], ["LOWER", "LOWER(문자)"], ["TRIM", "TRIM(문자)"], ["LPAD", "LPAD(문자, 길이, 채울 문자)"], ["RPAD", "RPAD(문자, 길이, 채울 문자)"],
+  ["REPLACE", "REPLACE(문자, 찾을, 바꿀)"], ["ROUND", "ROUND(n [, 자리])"], ["TRUNC", "TRUNC(n|날짜 [, 자리|형식])"], ["MOD", "MOD(a, b)"],
+  ["ADD_MONTHS", "ADD_MONTHS(날짜, n)"], ["LAST_DAY", "LAST_DAY(날짜)"], ["MONTHS_BETWEEN", "MONTHS_BETWEEN(a, b)"],
+  ["COUNT", "COUNT(expr)"], ["SUM", "SUM(expr)"], ["AVG", "AVG(expr)"], ["MIN", "MIN(expr)"], ["MAX", "MAX(expr)"],
+  ["ROW_NUMBER", "ROW_NUMBER() OVER (ORDER BY ...)"], ["LISTAGG", "LISTAGG(expr, ',') WITHIN GROUP (ORDER BY ...)"],
+];
+
 function complete(a: { text: string; cursor: number }) {
   const text = a.text;
   const cur = byteToUtf16(text, a.cursor);
@@ -185,6 +198,7 @@ function complete(a: { text: string; cursor: number }) {
       if (!new RegExp(String.raw`\b${t.desc.name}\b`, "i").test(text)) continue;
       for (const x of t.desc.columns) if (like(x.name)) items.push({ label: x.name, kind: "column", detail: `${t.desc.name} · ${x.data_type}`, info: x.comment ?? null, boost: 0 });
     }
+    if (word) for (const [f, sig] of FUNCTIONS) if (like(f)) items.push({ label: f, kind: "function", detail: sig, info: null, apply: `${f}(`, boost: -1 });
   }
   return { from, items, context: "" };
 }

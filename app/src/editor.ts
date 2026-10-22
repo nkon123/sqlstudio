@@ -17,6 +17,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab, toggleComment } f
 import { sql } from "@codemirror/lang-sql";
 import { ORACLE, oracleHighlight } from "./oracle-dialect";
 import { snippetSource } from "./snippets";
+import { quickMenu } from "./quickmenu";
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import type { Command } from "@codemirror/view";
@@ -180,6 +181,8 @@ export class SqlEditor {
             maxRenderedOptions: 100,
             closeOnBlur: true,
           }),
+          // 컬럼 후보에서 → — 구절·타입에 맞는 꼴(= '' · IS NULL …)
+          quickMenu(),
           sql({ dialect: ORACLE, upperCaseKeywords: true }),
           marks,
           autoFormatExtension(),

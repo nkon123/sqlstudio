@@ -8,6 +8,7 @@
 
 import type { Completion, CompletionContext, CompletionResult, CompletionSource } from "@codemirror/autocomplete";
 import { api, byteToUtf16, utf16ToByte, type CompletionItem } from "./api";
+import { clauseOf, quickActions, typeClass, type Clause, type QuickAction } from "./quickact";
 
 const WINDOW = 20000;
 /** 이 키워드 뒤에 공백을 치면 바로 후보를 띄운다 */
@@ -24,11 +25,18 @@ const TYPE: Record<string, string> = {
   sequence: "constant", type: "type", keyword: "keyword", join: "join", snippet: "text",
 };
 
-function toCompletion(i: CompletionItem): Completion {
+/** 퀵 액션이 있는 후보 — → 로 연다 (quickmenu.ts) */
+export type QuickCompletion = Completion & { quick?: { from: number; actions: QuickAction[] } };
+
+function toCompletion(i: CompletionItem, clause: Clause | null, from: number): QuickCompletion {
+  const detail = i.detail ?? undefined;
+  const actions = i.kind === "column" ? quickActions(clause, typeClass(detail), i.apply ?? i.label) : [];
   return {
     label: i.label,
     type: TYPE[i.kind] ?? "text",
-    detail: i.detail ?? undefined,
+    // ▸ — → 로 퀵 액션을 열 수 있다는 표시
+    detail: actions.length ? `${detail ?? ""} ▸` : detail,
+    quick: actions.length ? { from, actions } : undefined,
     info: i.info ?? undefined,
     apply: i.apply ?? undefined,
     boost: i.boost,
@@ -69,13 +77,16 @@ export function sqlCompletion(sessionId: () => number | undefined): CompletionSo
       return null;
     }
     if (ctx.aborted || !r.items.length) return null;
+    const start = from + byteToUtf16(text, r.from);
+    const clause = clauseOf(r.context, text.slice(0, pos - from));
+    const options = r.items.map((i) => toCompletion(i, clause, start));
     // 설명(COMMENT)으로 맞은 후보가 있으면 이름(ORD_DT)이 친 글자(주문일)와 다르다 — 화면이 이름으로 거르지 않게, 칠 때마다 다시 묻는다
     if (r.items.some((i) => i.note)) {
-      return { from: from + byteToUtf16(text, r.from), options: r.items.map(toCompletion), filter: false };
+      return { from: start, options, filter: false };
     }
     return {
-      from: from + byteToUtf16(text, r.from),
-      options: r.items.map(toCompletion),
+      from: start,
+      options,
       // 빈 낱말로 물었으면(공백·쉼표·점 뒤) 백엔드는 점수 상위 몇백 개만 준다 — 큰 테이블이면 컬럼이 자리를 채워
       // 함수(DECODE …)가 빠진다. 첫 글자를 치면 다시 묻는다. 낱말이 있으면 그 안에서 화면이 거른다.
       validFor: word.length ? VALID : /^$/,

@@ -24,6 +24,8 @@ export interface ParenMenuActions {
 const GRID: (Dir | null)[] = ["NW", "N", "NE", "W", null, "E", "SW", "S", "SE"];
 const ARROW: Record<Dir, string> = { NW: "↖", N: "↑", NE: "↗", W: "←", E: "→", SW: "↙", S: "↓", SE: "↘" };
 const NUMPAD: Record<string, Dir> = { Numpad7: "NW", Numpad8: "N", Numpad9: "NE", Numpad4: "W", Numpad6: "E", Numpad1: "SW", Numpad2: "S", Numpad3: "SE" };
+/** 칸에 보일 키패드 숫자 */
+const PAD_KEY = Object.fromEntries(Object.entries(NUMPAD).map(([code, d]) => [d, code.slice(-1)])) as Record<Dir, string>;
 
 interface Item { label: string; run?: () => void; /** 원판을 닫지 않는다 (대상 괄호 바꾸기) */ stay?: boolean }
 
@@ -115,7 +117,11 @@ function render(view: EditorView, m: Menu, act: ParenMenuActions) {
     const arrow = document.createElement("span");
     arrow.className = "radial-arrow";
     arrow.textContent = ARROW[d];
-    cell.append(arrow, it.label);
+    const pad = document.createElement("kbd");
+    pad.className = "radial-pad";
+    pad.textContent = PAD_KEY[d];
+    pad.title = `숫자 키패드 ${PAD_KEY[d]}`;
+    cell.append(arrow, it.label, pad);
     // 누르는 동안 에디터가 포커스를 잃지 않게
     cell.addEventListener("mousedown", (e) => { e.preventDefault(); fire(view, d); });
     return cell;

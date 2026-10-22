@@ -268,6 +268,10 @@ dialog h3 { margin: 0 0 10px; font-size: 15px; }
 .radial-cell { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
 .radial-cell:hover, .radial-cell[aria-selected] { background: var(--sel); }
 .radial-cell[aria-disabled] { color: var(--dim); opacity: .45; cursor: default; background: none; }
+/* 숫자 키패드 단축키 — 칸 바깥쪽 끝에 작게 */
+.radial-pad { min-width: 1.3em; padding: 0 3px; border: 1px solid var(--line); border-radius: 3px; color: var(--dim); background: var(--bg); font: 10px var(--mono); text-align: center; }
+.radial-NW .radial-pad, .radial-W .radial-pad, .radial-SW .radial-pad, .radial-N .radial-pad, .radial-S .radial-pad { margin-left: auto; }
+.radial-NE .radial-pad, .radial-E .radial-pad, .radial-SE .radial-pad { margin-right: auto; }
 .radial-arrow { width: 1.1em; text-align: center; color: var(--accent); font-weight: 700; }
 .radial-NW, .radial-W, .radial-SW { justify-content: flex-start; }
 .radial-N, .radial-S { justify-content: center; }

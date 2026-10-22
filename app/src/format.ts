@@ -89,7 +89,8 @@ export function startsWithDml(sql: string): boolean {
 
 export type FormatResult ={ ok: true; text: string } | { ok: false; reason: string };
 
-const PLSQL_START = /^\s*(BEGIN|DECLARE|CREATE\s+(OR\s+REPLACE\s+)?(EDITIONABLE\s+|NONEDITIONABLE\s+)?(PACKAGE|PROCEDURE|FUNCTION|TRIGGER|TYPE)\b)/i;
+// WITH FUNCTION … (12c) 도 — 안에 PL/SQL 본문이 있다
+const PLSQL_START = /^\s*(BEGIN|DECLARE|WITH\s+(FUNCTION|PROCEDURE)\b|CREATE\s+(OR\s+REPLACE\s+)?(EDITIONABLE\s+|NONEDITIONABLE\s+)?(PACKAGE|PROCEDURE|FUNCTION|TRIGGER|TYPE)\b)/i;
 
 /** 주석·공백을 건너뛰고 본문이 PL/SQL 블록으로 시작하는지 */
 function isPlsql(sql: string) {

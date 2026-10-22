@@ -112,6 +112,57 @@ eq("merge into emp t using emp_new s on t.empno = s.empno and t.deptno = 10 when
        INSERT
        VALUES (s.empno, s.sal)`);
 
+// 키워드 사이의 힌트 — 그대로 두고 절은 알아본다
+eq("merge /*+ append */ into emp t using emp_new n on (t.empno = n.empno) when matched then update set t.sal = n.sal",
+`MERGE /*+ append */ INTO emp t
+ USING emp_new n
+    ON (t.empno = n.empno)
+  WHEN MATCHED THEN
+       UPDATE
+          SET t.sal = n.sal`);
+eq("insert /*+ append */ into t (a) select a from s", "INSERT /*+ append */ INTO t (a)\nSELECT a\n  FROM s");
+// INSERT ALL · FIRST — INTO 마다 한 줄, 조건 아래는 한 칸 들여
+eq("insert first when x > 10 then into t1 values (x) else into t3 values (x) select x from src",
+`INSERT FIRST
+  WHEN x > 10 THEN
+       INTO t1 VALUES (x)
+  ELSE
+       INTO t3 VALUES (x)
+SELECT x
+  FROM src`);
+eq("insert all into t1 (a, b) values (x, y) into t2 (a) values (z) select x, y, z from src",
+`INSERT ALL
+  INTO t1 (a, b) VALUES (x, y)
+  INTO t2 (a) VALUES (z)
+SELECT x
+     , y
+     , z
+  FROM src`);
+// LOG ERRORS — 끝까지 한 줄
+eq("insert into t (a) values (1) log errors into err$_t ('x') reject limit 10",
+  "INSERT INTO t (a)\nVALUES (1)\n LOG ERRORS INTO err$_t ('x') REJECT LIMIT 10");
+// CREATE TABLE·VIEW … AS — 머리 한 줄 + 쿼리
+eq("create or replace view v as select a, b from t where c = 1",
+`CREATE OR REPLACE VIEW v AS
+SELECT a
+     , b
+  FROM t
+ WHERE c = 1`);
+eq("create table t2 (a, b) nologging as select x, y from t1;", "CREATE TABLE t2 (a, b) NOLOGGING AS\nSELECT x\n     , y\n  FROM t1;");
+// 재귀 WITH 의 SEARCH … SET — SET 은 UPDATE 의 SET 이 아니다
+eq("with r (n) as (select 1 from dual union all select n + 1 from r where n < 3) search depth first by n set ord select * from r",
+`WITH r (n) AS (SELECT 1
+                 FROM dual
+               UNION ALL
+               SELECT n + 1
+                 FROM r
+                WHERE n < 3)
+     SEARCH DEPTH FIRST BY n SET ord
+SELECT *
+  FROM r`);
+eq("select deptno, sum(sal) from emp group by grouping sets ((deptno), ())",
+  "SELECT deptno\n     , SUM(sal)\n  FROM emp\n GROUP BY GROUPING SETS ((deptno), ())");
+
 // PIVOT 이라는 이름의 열은 PIVOT 절로 보지 않는다
 eq("select pivot from t", "SELECT PIVOT\n  FROM t");
 

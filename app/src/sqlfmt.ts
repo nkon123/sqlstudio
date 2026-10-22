@@ -10,7 +10,8 @@
 //
 // 절 키워드(SELECT·FROM·WHERE …)를 6칸(SELECT 길이)에 오른쪽으로 맞추고, 목록은 쉼표를 앞(또는 뒤)에,
 // 조건은 AND·OR 를 키워드처럼 맞춘다. 괄호 안의 서브쿼리는 여는 괄호 바로 뒤를 기준으로 같은 모양을 다시 짠다.
-// SELECT·WITH·INSERT·UPDATE·DELETE·MERGE 만 다룬다 — 그 밖(DDL, INSERT ALL …)은 null 을 돌려 부르는 쪽이 다른 포맷터를 쓴다.
+// SELECT·WITH·INSERT(ALL·FIRST 포함)·UPDATE·DELETE·MERGE 와 CREATE TABLE·VIEW … AS SELECT 만 다룬다 —
+// 그 밖(DDL 등)은 null 을 돌려 부르는 쪽이 다른 포맷터를 쓴다.
 // 결과가 같은 SQL 인지는 부르는 쪽(format.ts)이 토큰으로 다시 확인한다.
 
 export interface RiverOptions {
@@ -112,7 +113,7 @@ export const KEYWORDS = new Set(("SELECT FROM WHERE AND OR NOT IN IS NULL LIKE L
   "CONNECT START PRIOR LEVEL NOCYCLE SIBLINGS ASC DESC NULLS FIRST LAST FOR NOWAIT WAIT SKIP LOCKED OF ROWNUM ROWID SYSDATE SYSTIMESTAMP " +
   "CURRENT_DATE CURRENT_TIMESTAMP OVER PARTITION ROWS ROW RANGE UNBOUNDED PRECEDING FOLLOWING CURRENT FETCH NEXT ONLY OFFSET TIES PIVOT UNPIVOT " +
   "WITHIN KEEP ANY SOME ESCAPE DEFAULT RETURNING RETURN INTERVAL DATE TIMESTAMP DAY MONTH YEAR HOUR MINUTE SECOND TO LATERAL TRUE FALSE " +
-  "MATERIALIZE IGNORE RESPECT DENSE_RANK").split(" "));
+  "MATERIALIZE IGNORE RESPECT DENSE_RANK GROUPING SETS ERRORS REJECT LIMIT UNLIMITED").split(" "));
 
 export const FUNCS = new Set(("COUNT SUM AVG MIN MAX NVL NVL2 COALESCE DECODE TO_CHAR TO_DATE TO_NUMBER TO_TIMESTAMP TO_CLOB TO_NCHAR TO_SINGLE_BYTE TO_MULTI_BYTE " +
   "TRUNC ROUND SUBSTR SUBSTRB INSTR INSTRB LENGTH LENGTHB UPPER LOWER INITCAP TRIM LTRIM RTRIM LPAD RPAD REPLACE TRANSLATE CONCAT CHR ASCII " +
@@ -120,16 +121,22 @@ export const FUNCS = new Set(("COUNT SUM AVG MIN MAX NVL NVL2 COALESCE DECODE TO
   "DENSE_RANK LAG LEAD FIRST_VALUE LAST_VALUE NTH_VALUE NTILE CUME_DIST PERCENT_RANK RATIO_TO_REPORT LISTAGG XMLAGG XMLELEMENT REGEXP_LIKE " +
   "REGEXP_SUBSTR REGEXP_REPLACE REGEXP_INSTR REGEXP_COUNT NULLIF SYS_CONNECT_BY_PATH CONNECT_BY_ROOT MEDIAN STDDEV VARIANCE JSON_VALUE " +
   "JSON_QUERY JSON_TABLE JSON_OBJECT JSON_ARRAY JSON_ARRAYAGG JSON_OBJECTAGG NUMTODSINTERVAL NUMTOYMINTERVAL SYS_GUID USERENV SYS_CONTEXT " +
-  "FROM_TZ SYS_EXTRACT_UTC NLSSORT EMPTY_CLOB EMPTY_BLOB DUMP VSIZE BITAND WIDTH_BUCKET").split(" "));
+  "FROM_TZ SYS_EXTRACT_UTC NLSSORT EMPTY_CLOB EMPTY_BLOB DUMP VSIZE BITAND WIDTH_BUCKET ROLLUP CUBE GROUPING MULTISET XMLTABLE " +
+  "XMLQUERY XMLEXISTS").split(" "));
 
 /** 이 낱말 뒤의 여는 괄호는 띄운다 (함수 호출이 아니다) */
 const SPACE_PAREN = new Set(("IN EXISTS AS VALUES OVER AND OR NOT ON USING THEN ELSE WHEN FROM JOIN SELECT WHERE BY ALL ANY SOME INTO SET IS " +
   "HAVING CASE PIVOT UNPIVOT FOR GROUP KEEP WITHIN RETURN RETURNING LATERAL APPLY TABLE").split(" "));
 
+/** CREATE … TABLE·VIEW … AS 의 머리에서 키워드로 쓰는 낱말 (이름은 아니다) */
+const CREATE_WORDS = new Set(("CREATE OR REPLACE FORCE NOFORCE EDITIONABLE NONEDITIONABLE MATERIALIZED VIEW TABLE GLOBAL TEMPORARY PRIVATE " +
+  "BUILD IMMEDIATE DEFERRED REFRESH FAST COMPLETE ON DEMAND COMMIT NOLOGGING LOGGING PARALLEL NOPARALLEL COMPRESS NOCOMPRESS " +
+  "TABLESPACE ENABLE DISABLE QUERY REWRITE PRESERVE DELETE ROWS AS").split(" "));
+
 /** 값으로 쓰이는 키워드 — 뒤의 -/+ 는 빼기·더하기 */
 const VALUE_WORDS = new Set("NULL LEVEL ROWNUM ROWID SYSDATE SYSTIMESTAMP CURRENT_DATE CURRENT_TIMESTAMP TRUE FALSE".split(" "));
 
-type Kind = "list" | "cond" | "join" | "flat" | "setop" | "with" | "insert" | "update" | "delete" | "pivot" | "merge";
+type Kind = "list" | "cond" | "join" | "flat" | "setop" | "with" | "insert" | "update" | "delete" | "pivot" | "merge" | "multi" | "tail";
 interface Clause { kw: string; n: number; kind: Kind }
 interface Snap { l: number; cur: string; pos: number; prev: Tok | null; mb: boolean; un: boolean }
 
@@ -176,8 +183,7 @@ class Fmt {
   private kw(s: string) { return this.o.keywordCase === "lower" ? s.toLowerCase() : this.o.keywordCase === "upper" ? s.toUpperCase() : s; }
   /** 레이아웃이 쓰는 키워드 — 원래 글자를 이어서 대소문자만 맞춘다 */
   private kwFrom(n: number) {
-    const s = this.toks.slice(this.pos, this.pos + n).map((t) => t.v).join(" ");
-    return this.o.keywordCase === "preserve" ? s : this.kw(s);
+    return this.toks.slice(this.pos, this.pos + n).map((t) => (t.t === "word" ? this.kw(t.v) : t.v)).join(" ");
   }
 
   private text(i: number): string {
@@ -230,8 +236,14 @@ class Fmt {
 
   // ── 절 ───────────────────────────────────────────
   private clauseAt(): Clause | null {
-    const w = (k: number) => this.up(k);
-    const c = (kw: number, kind: Kind): Clause => ({ kw: this.kwFrom(kw), n: kw, kind });
+    // 낱말 사이의 /* 힌트 */ 는 건너 본다 (MERGE /*+ APPEND */ INTO …) — 키워드 글에는 그대로 남는다
+    const idx: number[] = [];
+    for (let k = 0; idx.length < 6 && this.at(k); k++) if (this.at(k)!.t !== "bc") idx.push(k);
+    const w = (k: number) => (idx[k] == null ? "" : this.up(idx[k]));
+    const c = (kw: number, kind: Kind): Clause => {
+      const n = idx[kw - 1] + 1;
+      return { kw: this.kwFrom(n), n, kind };
+    };
     switch (w(0)) {
       case "SELECT": return c(1, "list");
       case "FROM": return c(1, "list");
@@ -256,7 +268,11 @@ class Fmt {
       case "FETCH": return w(1) === "FIRST" || w(1) === "NEXT" ? c(1, "flat") : null;
       case "OFFSET": return ["num", "bind"].includes(this.at(1)?.t ?? "") ? c(1, "flat") : null;
       case "WITH": return this.allowWith ? c(1, "with") : null;
-      case "INSERT": if (w(1) === "INTO") return c(2, "insert"); throw new Error("INSERT ALL");
+      case "INSERT":
+        if (w(1) === "INTO") return c(2, "insert");
+        if (w(1) === "ALL" || w(1) === "FIRST") return c(2, "multi");
+        throw new Error("INSERT");
+      case "LOG": return w(1) === "ERRORS" ? c(2, "tail") : null;
       case "UPDATE": return this.allowWith ? c(1, "update") : null;
       case "DELETE": return this.allowWith ? c(w(1) === "FROM" ? 2 : 1, "delete") : null;
       case "MERGE": return w(1) === "INTO" ? c(2, "merge") : null;
@@ -270,7 +286,7 @@ class Fmt {
   /** 절 키워드를 놓을 칸: 6칸 안은 오른쪽 맞춤, 긴 것(GROUP BY …)은 한 칸 들여, 조인은 FROM 과 같은 칸 */
   private kwStart(c: Clause, base: number) {
     const R = base + 6;
-    if (["with", "insert", "update", "delete", "setop", "merge"].includes(c.kind)) return base;
+    if (["with", "insert", "update", "delete", "setop", "merge", "multi"].includes(c.kind)) return base;
     if (c.kind === "join") return R - 4;
     const len = vw(c.kw);
     return len <= 6 ? R - len : base + 1;
@@ -305,7 +321,7 @@ class Fmt {
       this.emit(c.kw, true);
       this.pos += c.n;
       this.prev = null;
-      this.allowWith = c.kind === "insert";
+      this.allowWith = c.kind === "insert" || c.kind === "multi";
       const R = base + 6;
       switch (c.kind) {
         case "list": case "with": this.list(this.col() + 1); break;
@@ -313,6 +329,9 @@ class Fmt {
         case "setop": break;
         case "pivot": this.pivot(); break;
         case "merge": this.merge(base); break;
+        case "multi": this.insertMulti(base); break;
+        // LOG ERRORS INTO … REJECT LIMIT … — 끝까지 한 줄
+        case "tail": this.cont = this.col() + 1; this.expr({}); break;
         default: this.cont = this.col() + 1; this.expr({ clauses: true }); break;
       }
       first = false;
@@ -409,6 +428,69 @@ class Fmt {
         if (this.up() === "WHERE") { this.kwAt(BR - 5); this.cond(BR, WHEN); }
       } else {
         throw new Error("MERGE 갈래는 UPDATE·INSERT");
+      }
+    }
+  }
+
+  /** WITH 의 재귀 쿼리 뒤 SEARCH DEPTH FIRST BY … SET … · CYCLE … SET … TO … DEFAULT … — 다음 줄에 한 줄로 */
+  private searchClause() {
+    this.brk(this.cont);
+    this.emit(this.kw(this.at()!.v), true);
+    this.prev = this.at()!;
+    this.pos++;
+    for (;;) {
+      const t = this.at();
+      const u = this.up();
+      if (!t || t.t === "," || t.t === ")" || t.t === ";" || u === "SELECT" || u === "WITH" || u === "CYCLE") return;
+      if (t.t === "(") { this.paren(); continue; }
+      if (["SEARCH", "DEPTH", "BREADTH", "FIRST", "BY", "SET", "TO", "DEFAULT", "CYCLE"].includes(u)) {
+        this.emit(this.kw(t.v), true);
+        this.prev = t;
+        this.pos++;
+        continue;
+      }
+      this.tok();
+    }
+  }
+
+  /** INSERT ALL · INSERT FIRST — INTO 마다 한 줄, 조건(WHEN … THEN · ELSE) 아래의 INTO 는 한 칸 들여:
+   *
+   *    INSERT FIRST
+   *      WHEN x > 10 THEN
+   *           INTO t1 (a) VALUES (x)
+   *      ELSE
+   *           INTO t3 (a) VALUES (x)
+   *    SELECT x
+   *      FROM src
+   */
+  private insertMulti(base: number) {
+    const R = base + 6;
+    const STOP = new Set(["INTO", "VALUES", "WHEN", "ELSE", "SELECT", "WITH"]);
+    let intoCol = R - 4;
+    for (;;) {
+      const u = this.up();
+      if (u === "WHEN") {
+        this.kwAt(R - 4);
+        this.cont = this.col() + 1;
+        this.expr({ stops: new Set(["THEN"]) });
+        if (this.up() !== "THEN") throw new Error("WHEN 에 THEN 이 없습니다");
+        this.tok();
+        intoCol = R + 1;
+      } else if (u === "ELSE") {
+        this.kwAt(R - 4);
+        intoCol = R + 1;
+      } else if (u === "INTO") {
+        this.kwAt(intoCol);
+        this.cont = this.col() + 1;
+        this.expr({ stops: STOP });
+        if (this.up() === "VALUES") {
+          this.emit(this.kw(this.at()!.v), true);
+          this.prev = this.at()!;
+          this.pos++;
+          this.expr({ stops: STOP });
+        }
+      } else {
+        return;
       }
     }
   }
@@ -511,6 +593,7 @@ class Fmt {
         if (u === "AND" && between) between = false;
         else return;
       }
+      if ((u === "SEARCH" || u === "CYCLE") && this.prev?.t === ")") { this.searchClause(); continue; }
       if (ctx.clauses && t.t === "word" && this.clauseAt()) return;
       if (u === "BETWEEN") between = true;
       if (t.t === "(") { this.paren(); continue; }
@@ -578,7 +661,52 @@ class Fmt {
     this.cont = saveCont;
   }
 
+  /** CREATE [OR REPLACE] … TABLE·VIEW … AS — AS 까지 한 줄로 쓰고 참. 아니면 아무것도 쓰지 않고 거짓 */
+  private createHead(): boolean {
+    let k = this.pos;
+    while (this.isComment(this.toks[k])) k++;
+    if (this.toks[k]?.t !== "word" || this.toks[k].v.toUpperCase() !== "CREATE") return false;
+    // 같은 깊이의 AS 뒤에 SELECT·WITH·( 가 오고, 그 앞에 TABLE 이나 VIEW 가 있어야
+    let depth = 0, kind = false;
+    for (let i = k; i < this.toks.length; i++) {
+      const t = this.toks[i];
+      if (t.t === "(") depth++;
+      else if (t.t === ")") depth--;
+      else if (t.t === ";") return false;
+      if (depth || t.t !== "word") continue;
+      const u = t.v.toUpperCase();
+      if (u === "TABLE" || u === "VIEW") kind = true;
+      if (u === "AS" && kind) {
+        const nx = this.toks[i + 1];
+        if (!(nx?.t === "(" || (nx?.t === "word" && ["SELECT", "WITH"].includes(nx.v.toUpperCase())))) return false;
+        while (this.pos <= i) {
+          const h = this.at()!;
+          if (h.t === "(") this.paren();
+          else if (h.t === "word" && CREATE_WORDS.has(h.v.toUpperCase()) && this.prev?.t !== ".") {
+            this.emit(this.kw(h.v), this.space(this.prev, h));
+            this.prev = h;
+            this.pos++;
+          } else this.tok();
+        }
+        this.nl(0);
+        return true;
+      }
+    }
+    return false;
+  }
+
   run(): string | null {
+    // CREATE TABLE·VIEW … AS SELECT 는 머리를 쓰고 쿼리로
+    if (this.createHead()) {
+      this.query(0);
+      const t = this.at();
+      if (t && t.t !== ";") return null;
+      if (t) { this.emit(";", false); this.pos++; }
+      if (this.pos < this.toks.length && this.toks.slice(this.pos).some((x) => !this.isComment(x))) return null;
+      while (this.at()) this.comment();
+      this.nl(0);
+      return this.lines.join("\n");
+    }
     // 다루는 문장인지
     const first = this.toks.find((t) => !this.isComment(t));
     if (!first) return null;

@@ -22,9 +22,9 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, props: Props = 
 export interface Button<T> { label: string; value: T; kind?: "primary" | "danger" }
 
 /** 모달. 버튼 값을 돌려준다 (Esc 는 null). */
-export function modal<T>(title: string, body: Node, buttons: Button<T>[], opts: { wide?: boolean } = {}): Promise<T | null> {
+export function modal<T>(title: string, body: Node, buttons: Button<T>[], opts: { wide?: boolean; cls?: string } = {}): Promise<T | null> {
   return new Promise((resolve) => {
-    const dlg = h("dialog", { class: opts.wide ? "modal wide" : "modal" });
+    const dlg = h("dialog", { class: ["modal", opts.wide ? "wide" : "", opts.cls ?? ""].filter(Boolean).join(" ") });
     let result: T | null = null;
     const bar = h("div", { class: "modal-buttons" },
       ...buttons.map((b) =>

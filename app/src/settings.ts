@@ -9,25 +9,75 @@ import { DEFAULT_SNIPPETS, parse as parseSnippets, saveSnippets, snippets, type 
 import { applyTheme, confirmBox, editorColorNow, field, h, modal, setEditorColor, themePref, toast, type EditorColorKey, type ThemePref } from "./ui";
 import type { App } from "./main";
 
+/** 설정 페이지 — 왼쪽 목록의 이름·아이콘, 위의 한 줄 설명 */
+const PAGES: { name: string; icon: string; desc: string; make: (app: App) => Promise<HTMLElement> }[] = [
+  { name: "접속", icon: "M7 6v4M17 6v4M5 10h14v3a7 7 0 0 1-14 0zM12 20v2", desc: "DB 접속 프로필과 tnsnames.ora", make: (app) => profilesPage(app) },
+  { name: "AI", icon: "M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z", desc: "AI 공급자·모델과 함께 보내는 Oracle 문법 안내", make: (app) => providersPage(app) },
+  { name: "MCP", icon: "M9 7H6a4 4 0 0 0 0 8h3M15 7h3a4 4 0 0 1 0 8h-3M8 11h8", desc: "Claude Desktop·Cursor 같은 AI 도구가 이 앱의 접속(스키마 정보)을 쓰게 하는 설정", make: (app) => mcpPage(app) },
+  { name: "편집기", icon: "M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16", desc: "화면 테마, SQL 포맷, 편집 동작, 실행 이력, 코드 조각", make: async (app) => editorPage(app) },
+  { name: "정보", icon: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-5M12 8h.01", desc: "버전, 데이터 폴더, 로그, 오픈소스 라이선스", make: async (app) => aboutPage(app) },
+];
+
+/** 목록에서 지금 고친 항목을 표시 (data-name 으로) */
+function markActive(list: HTMLElement, name: string | undefined) {
+  for (const b of list.children) (b as HTMLElement).classList.toggle("active", !!name && (b as HTMLElement).dataset.name === name);
+}
+
+/** 선 아이콘 (24×24, 선만) */
+function icon(d: string): SVGSVGElement {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(ns, "path");
+  path.setAttribute("d", d);
+  svg.append(path);
+  return svg;
+}
+
+/** 페이지를 카드로 — 소제목(h3·h4)마다 한 장, 소제목이 없으면 통째로 한 장 */
+function cards(page: HTMLElement): HTMLElement {
+  const out = h("div", { class: "set-cards" });
+  let card: HTMLElement | null = null;
+  for (const k of [...page.children] as HTMLElement[]) {
+    if (k.tagName === "H3" || k.tagName === "H4") {
+      card = h("section", { class: "set-card" }, h("h4", { class: "set-card-title" }, k.textContent ?? ""));
+      out.append(card);
+      continue;
+    }
+    if (!card) out.append((card = h("section", { class: "set-card" })));
+    card.append(k);
+  }
+  return out;
+}
+
 export async function settings(app: App, page = "접속") {
-  const body = h("div", { class: "settings" });
-  const nav = h("nav", { class: "settings-nav" });
-  const pages: Record<string, () => Promise<HTMLElement>> = {
-    "접속": () => profilesPage(app),
-    "AI": () => providersPage(app),
-    "MCP": () => mcpPage(app),
-    "편집기": async () => editorPage(app),
-    "정보": async () => aboutPage(app),
-  };
+  const nav = h("nav", { class: "settings-nav" }, h("div", { class: "settings-brand" }, "설정"));
+  const title = h("h2", {});
+  const desc = h("p", {});
   const content = h("div", { class: "settings-content" });
+  const items = new Map<string, HTMLElement>();
+  let showing = "";
   const showPage = async (name: string) => {
-    for (const b of nav.children) b.classList.toggle("active", b.textContent === name);
-    content.replaceChildren(await pages[name]());
+    const pg = PAGES.find((p) => p.name === name) ?? PAGES[0];
+    showing = pg.name;
+    for (const [n, b] of items) b.classList.toggle("active", n === pg.name);
+    title.textContent = pg.name;
+    desc.textContent = pg.desc;
+    const el = await pg.make(app);
+    // 빨리 다른 페이지를 눌렀으면 늦게 온 것은 버린다
+    if (showing !== pg.name) return;
+    content.replaceChildren(cards(el));
+    content.scrollTop = 0;
   };
-  for (const name of Object.keys(pages)) nav.append(h("button", { onclick: (e: Event) => { e.preventDefault(); showPage(name); } }, name));
-  body.append(nav, content);
-  showPage(pages[page] ? page : "접속");
-  await modal("설정", body, [{ label: "닫기", value: true, kind: "primary" }], { wide: true });
+  for (const pg of PAGES) {
+    const b = h("button", { type: "button", class: "settings-item", onclick: (e: Event) => { e.preventDefault(); void showPage(pg.name); } }, icon(pg.icon), h("span", {}, pg.name));
+    items.set(pg.name, b);
+    nav.append(b);
+  }
+  const body = h("div", { class: "settings" }, nav, h("section", { class: "settings-main" }, h("header", { class: "settings-head" }, title, desc), content));
+  void showPage(page);
+  await modal("설정", body, [{ label: "닫기", value: true, kind: "primary" }], { cls: "settings-dialog" });
   await app.reloadProfiles();
   await app.ai.load();
 }
@@ -315,6 +365,7 @@ async function profilesPage(app: App) {
   const tnsList = h("datalist", { id: "tns-aliases" }, ...tns.entries.map((e) => h("option", { value: e.alias }, [e.host, e.port].filter(Boolean).join(":") + (e.service ? `/${e.service}` : ""))));
   const where = (e: TnsEntry) => `${e.host ?? "?"}${e.port ? `:${e.port}` : ""}${e.service ? `/${e.service}` : ""}`;
   const edit = (p?: Profile) => {
+    markActive(list, p?.name ?? "");
     const name = h("input", { value: p?.name ?? "" });
     const user = h("input", { value: p?.user ?? "" });
     const cs = h("input", { value: p?.connect_string ?? "", placeholder: tns.entries.length ? `TNS 별칭 (${tns.entries.length}개에서 고르기) 또는 host:1521/SERVICE` : "host:1521/SERVICE 또는 TNS 별칭" });
@@ -375,9 +426,9 @@ async function profilesPage(app: App) {
   const refreshList = async () => {
     const ps = await api.listProfiles();
     list.replaceChildren(
-      ...ps.map((p) => h("button", { class: "list-item", onclick: (e: Event) => { e.preventDefault(); edit(p); } },
+      ...ps.map((p) => h("button", { class: "list-item", "data-name": p.name, onclick: (e: Event) => { e.preventDefault(); edit(p); } },
         h("span", { class: "dot", style: `background:${p.color ?? "transparent"}` }), `${p.name}`, h("small", {}, ` ${p.user}@${p.connect_string}`))),
-      h("button", { class: "list-item add", onclick: (e: Event) => { e.preventDefault(); edit(); } }, "+ 새 접속"));
+      h("button", { class: "list-item add", "data-name": "", onclick: (e: Event) => { e.preventDefault(); edit(); } }, "+ 새 접속"));
   };
   await refreshList();
   if (!app.profiles.length) edit();
@@ -391,14 +442,15 @@ async function profilesPage(app: App) {
     } catch (err) { toast(errOf(err).message, "error"); }
   };
   const tnsBox = h("div", { class: "tns-box" },
-    h("strong", {}, "tnsnames.ora "),
     tns.dir ? h("span", { title: tns.configured && tns.configured !== tns.dir ? `설정: ${tns.configured} (프로그램 폴더 기준 상대 경로)` : tns.dir },
       `${tns.dir} · 별칭 ${tns.entries.length}개${tns.configured ? (tns.configured !== tns.dir ? ` (설정: ${tns.configured})` : "") : " (자동으로 찾음)"}`)
       : h("span", { class: "warn" }, "찾지 못했습니다 — TNS_ADMIN·ORACLE_HOME·Instant Client 폴더를 봤습니다"),
     tns.error ? h("span", { class: "warn" }, ` · 읽기 실패: ${tns.error}`) : "",
     h("button", { class: "small", onclick: pickTns }, "폴더 지정"),
     tns.configured ? h("button", { class: "small", onclick: async (e: Event) => { e.preventDefault(); await api.setTnsAdmin(null); toast("지정을 지웠습니다 — 다시 시작하면 기본 위치를 씁니다", "ok"); } }, "지정 해제") : "");
-  return h("div", {}, tnsBox, tnsList, h("div", { class: "split" }, list, form));
+  return h("div", {},
+    h("h4", {}, "접속 프로필"), h("div", { class: "split" }, list, form),
+    h("h4", {}, "tnsnames.ora"), h("p", { class: "hint" }, "접속 문자열 칸에 TNS 별칭을 쓰면 이 파일에서 찾습니다."), tnsBox, tnsList);
 }
 
 /** 문법 안내 카드 보기 — 실제로 AI 에 보내는 내용. 기본 카드는 회사 규칙 파일로 옮겨 고친다 */
@@ -441,6 +493,7 @@ async function providersPage(app: App) {
   const list = h("div", { class: "list" });
   const form = h("div", { class: "form" });
   const edit = (p?: Provider) => {
+    markActive(list, p?.name ?? "");
     const name = h("input", { value: p?.name ?? "" });
     const kind = h("select", {},
       h("option", { value: "ollama", selected: p?.kind === "ollama" }, "Ollama (로컬)"),
@@ -559,9 +612,9 @@ async function providersPage(app: App) {
   const refreshList = async () => {
     const ps = await api.listProviders();
     list.replaceChildren(
-      ...ps.map((p) => h("button", { class: "list-item", onclick: (e: Event) => { e.preventDefault(); edit(p); } },
+      ...ps.map((p) => h("button", { class: "list-item", "data-name": p.name, onclick: (e: Event) => { e.preventDefault(); edit(p); } },
         `${p.name}`, h("small", {}, ` ${p.model}${p.remote ? " · 외부" : " · 로컬"}`))),
-      h("button", { class: "list-item add", onclick: (e: Event) => { e.preventDefault(); edit(); } }, "+ 새 공급자"));
+      h("button", { class: "list-item add", "data-name": "", onclick: (e: Event) => { e.preventDefault(); edit(); } }, "+ 새 공급자"));
   };
   await refreshList();
   // Oracle 문법 안내 — 요청에 맞는 카드를 골라 넣는다. 회사 규칙은 사용자 파일에
@@ -570,10 +623,10 @@ async function providersPage(app: App) {
     h("option", { value: "auto" }, "자동 (낱말로 약할 때만)"),
     h("option", { value: "always" }, "항상"),
     h("option", { value: "off" }, "끔 (낱말로만)")) as HTMLSelectElement;
-  const guides = h("div", { class: "guides-box" },
-    h("strong", {}, "Oracle 문법 안내 "),
-    h("span", { class: "hint" }, `질문·SQL·오류에 맞는 안내 카드를 몇 장 골라 AI 에 함께 보냅니다 (기본 ${gi?.builtin ?? "?"}장${gi?.custom ? ` + 회사 규칙 ${gi.custom}장` : ""}). AI 답 위에 '참고 문법'으로 표시됩니다.`),
-    h("button", { class: "small", title: gi?.path ?? "", onclick: async (e: Event) => {
+  const guides = [
+    h("p", { class: "hint" }, `질문·SQL·오류에 맞는 안내 카드를 몇 장 골라 AI 에 함께 보냅니다 (기본 ${gi?.builtin ?? "?"}장${gi?.custom ? ` + 회사 규칙 ${gi.custom}장` : ""}). AI 답 위에 '참고 문법'으로 표시됩니다.`),
+    field("AI 로도 고르기", guideSel, "카드 주제 목록을 AI 에 먼저 보내 고르게 한 뒤, 고른 카드만 질문과 함께 보냅니다 (질의가 한 번 더 — 많아야 10초, 실패하면 낱말로 고른 것만)"),
+    h("div", { class: "row" }, h("button", { title: gi?.path ?? "", onclick: async (e: Event) => {
       e.preventDefault();
       try {
         const path = await invoke<string>("ai_guides_edit");
@@ -581,14 +634,13 @@ async function providersPage(app: App) {
         toast("편집하고 저장하면 다음 질문부터 씁니다", "info", 5000);
       } catch (err) { toast(errOf(err).message, "error"); }
     } }, gi?.exists ? "회사 규칙 편집" : "회사 규칙 추가"),
-    h("button", { class: "small", title: "AI 에 보내는 문법 안내 카드를 모두 보고, 기본 카드를 회사 규칙으로 옮겨 고친다", onclick: (e: Event) => { e.preventDefault(); void showGuides(app); } }, "카드 보기"),
-    h("label", { class: "check", title: "카드 주제 목록을 AI 에 먼저 보내 고르게 한 뒤, 고른 카드만 질문과 함께 보낸다 (질의가 한 번 더 — 많아야 10초, 실패하면 낱말로 고른 것만)" },
-      "AI 로도 고르기 ", guideSel));
+    h("button", { title: "AI 에 보내는 문법 안내 카드를 모두 보고, 기본 카드를 회사 규칙으로 옮겨 고친다", onclick: (e: Event) => { e.preventDefault(); void showGuides(app); } }, "카드 보기")),
+  ];
   void invoke<string>("ai_guide_select").then((v) => { guideSel.value = v; }).catch(() => {});
   guideSel.addEventListener("change", () => {
     invoke("set_ai_guide_select", { mode: guideSel.value }).then(() => toast("저장했습니다", "ok", 1200)).catch((e) => toast(errOf(e).message, "error"));
   });
-  return h("div", {}, guides, h("div", { class: "split" }, list, form));
+  return h("div", {}, h("h4", {}, "AI 공급자"), h("div", { class: "split" }, list, form), h("h4", {}, "Oracle 문법 안내"), ...guides);
 }
 
 async function mcpPage(_app: App) {

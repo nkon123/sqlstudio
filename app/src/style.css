@@ -23,7 +23,10 @@
 }
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; margin: 0; }
-body { background: var(--bg); color: var(--text); font: 13px/1.4 var(--sans); overflow: hidden; }
+body { background: var(--bg); color: var(--text); font: 13px/1.4 var(--sans); overflow: hidden; user-select: none; }
+/* 글 고르기는 내용이 있는 곳에서만 — 메뉴·단추·목록·탭을 끌다가 화면 여기저기가 칠해지지 않게.
+   입력 칸·편집기·출력·실행계획·구조·AI 대화·오류와 값 보기·값의 출처·알림은 골라 복사할 수 있다 */
+input, textarea, [contenteditable="true"], .cm-content, pre, code, .pane.desc, .ai-log, .modal-text, .err, .lin-box, #toasts { user-select: text; }
 #app { display: flex; flex-direction: column; }
 button {
   font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line);

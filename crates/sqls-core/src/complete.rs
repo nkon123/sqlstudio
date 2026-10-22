@@ -2341,8 +2341,17 @@ impl LineageCx<'_> {
         if let Some(d) = &r.derived {
             return Some(d.clone());
         }
-        let key = self.cache.resolve(r.owner.as_deref(), r.name.as_deref()?)?;
+        let name = r.name.as_deref()?;
+        let Some(key) = self.cache.resolve(r.owner.as_deref(), name) else {
+            // 캐시에 없는 이름 (캐시를 읽은 뒤 만든 테이블 등) — 접속한 사용자의 것으로 보고 채워 본다
+            if r.owner.is_none() && !self.cache.user.is_empty() {
+                self.missing.borrow_mut().push(Missing::Columns { owner: self.cache.user.clone(), table: name.to_string() });
+            }
+            return None;
+        };
         match self.cache.cols(&key) {
+            // 채워 봤는데 열이 없으면(동의어 너머·DB 링크 등) 모르는 것과 같다
+            Some(c) if c.is_empty() => None,
             Some(c) => Some(c.iter().map(|c| c.name.clone()).collect()),
             None => {
                 self.missing.borrow_mut().push(Missing::Columns { owner: key.0, table: key.1 });
@@ -2399,6 +2408,15 @@ impl LineageCx<'_> {
                 }
             }
         }
+        // * 의 테이블 하나가 열 목록을 모르는 것이면 그 테이블의 같은 이름 열로 잇는다 (column 이 그 테이블로 간다)
+        for it in items {
+            if let Src::Star(r) = &it.src {
+                let targets: Vec<&TableRef> = match r { Some(r) => vec![*r], None => refs.iter().collect() };
+                if targets.iter().filter(|t| self.cols_of(t).is_none()).count() == 1 {
+                    return Some((it, Some(name.to_string())));
+                }
+            }
+        }
         None
     }
 
@@ -2409,7 +2427,11 @@ impl LineageCx<'_> {
             None if refs.len() == 1 => &refs[0],
             None => match refs.iter().find(|r| self.cols_of(r).is_some_and(|c| c.iter().any(|x| x == col))) {
                 Some(r) => r,
-                None => return Lineage::unknown(col, format!("{col} 열이 어느 테이블의 것인지 모릅니다 (테이블 별칭을 붙여 보세요)")),
+                // 열 목록을 모르는 테이블이 하나뿐이면 그것
+                None => match refs.iter().filter(|r| self.cols_of(r).is_none()).collect::<Vec<_>>().as_slice() {
+                    [r] => r,
+                    _ => return Lineage::unknown(col, format!("{col} 열이 어느 테이블의 것인지 모릅니다 (테이블 별칭을 붙여 보세요)")),
+                },
             },
         };
         if let Some(k) = r.name.as_deref().and_then(|n| n.strip_prefix(PIVOT_MARK)).and_then(|k| k.parse::<usize>().ok()) {
@@ -2436,6 +2458,7 @@ impl LineageCx<'_> {
             None => (r.owner.clone(), n),
         };
         let info = owner.as_ref().and_then(|o| self.cache.cols(&(o.clone(), table.clone()))).and_then(|cs| cs.iter().find(|c| c.name == col).cloned());
+        let info_missing = self.cols_of(r).is_none();
         let source = SourceCol {
             owner,
             table,
@@ -2444,7 +2467,9 @@ impl LineageCx<'_> {
             data_type: info.as_ref().map(|c| c.data_type.clone()),
             comment: info.and_then(|c| c.comment).filter(|c| !c.trim().is_empty()),
         };
-        Lineage { source: Some(source), ..Lineage::new(col, "column") }
+        // 열 목록을 몰라 이름으로만 이었으면 알린다 (열 정보·타입이 없다)
+        let reason = (info_missing && r.derived.is_none()).then(|| "이 테이블의 열 목록을 캐시에서 찾지 못해 이름으로 이었습니다 — 열이 실제로 있는지 확인하세요".to_string());
+        Lineage { source: Some(source), reason, ..Lineage::new(col, "column") }
     }
 
     /// 식 — 그 안에 나오는 열들과 스칼라 서브쿼리를 입력으로

@@ -514,3 +514,21 @@ fn lineage_pivot_over_union() {
     let l = lin("select a, b from (select ename a, sal b from emp)", Some(0), "NOPE");
     assert_eq!(l.reason.as_deref(), Some("SELECT 목록 [A, B] 에서 NOPE (1번째 열) 을 찾지 못했습니다"));
 }
+
+#[test]
+fn lineage_star_of_unknown_table() {
+    // PIVOT 앞 인라인 뷰가 캐시에 없는 테이블의 * — 열 목록을 몰라도 같은 이름 열로 잇고, 확인이 필요하다고 알린다
+    let q = "select a.r1 from (select * from xyz_unknown) a pivot (sum(qty) for rnum in (1 r1)) a";
+    let (l, missing) = column_lineage(q, None, "R1", &cache());
+    assert_eq!(srcs(&l), vec!["XYZ_UNKNOWN.QTY", "XYZ_UNKNOWN.RNUM"]);
+    assert!(l.inputs[0].inputs[0].reason.as_deref().is_some_and(|r| r.contains("열 목록을 캐시에서 찾지 못해")));
+    // 접속한 사용자의 것으로 보고 채울 것으로 알린다
+    assert!(missing.contains(&Missing::Columns { owner: "SCOTT".into(), table: "XYZ_UNKNOWN".into() }));
+    // 열을 아는 테이블이면 알림 없이
+    let l = lin("select a.r1 from (select * from emp) a pivot (sum(sal) for deptno in (10 r1)) a", None, "R1");
+    assert_eq!(srcs(&l), vec!["EMP.SAL", "EMP.DEPTNO"]);
+    assert_eq!(l.inputs[0].inputs[0].reason, None);
+    // 모르는 테이블이 둘이면 어느 것인지 정하지 않는다
+    let l = lin("select * from xyz_a, xyz_b", None, "QTY");
+    assert_eq!(l.kind, "unknown");
+}

@@ -338,33 +338,38 @@ pub fn column_notes(st: State<'_, AppState>, id: u64, sql: String) -> Result<std
 /// 결과 열이 만들어진 길 (테이블.열까지). 캐시로 풀고, 모자라면 메타 세션으로 그 테이블들의 열을 채워 한 번 더 (우클릭할 때만)
 pub async fn column_lineage(st: &AppState, id: u64, sql: &str, pos: Option<usize>, name: &str) -> Result<complete::Lineage, ErrView> {
     let hub = hub_for(st, id)?;
-    let (first, missing) = complete::column_lineage(sql, pos, name, &hub.cache.rd());
-    if missing.is_empty() {
-        return Ok(first);
-    }
-    let Some(s) = hub.session() else { return Ok(first) };
-    let mut todo: Vec<Missing> = Vec::new();
-    for m in missing {
-        if !todo.contains(&m) {
-            todo.push(m);
-        }
-    }
-    todo.truncate(8);
-    let fill = async {
-        for m in &todo {
-            if let Ok(fills) = load::fill(&s, m).await {
-                let mut cache = hub.cache.wr();
-                for f in fills {
-                    cache.apply(f);
+    let (mut best, mut missing) = complete::column_lineage(sql, pos, name, &hub.cache.rd());
+    let Some(s) = hub.session() else { return Ok(best) };
+    // 캐시에 열이 없는 테이블을 채우고 다시 — 채운 뒤 더 안쪽에서 또 나올 수 있어 몇 번까지 (모두 합쳐 5초)
+    let mut tried: Vec<Missing> = Vec::new();
+    let rounds = async {
+        for _ in 0..3 {
+            let todo: Vec<Missing> = missing.iter().filter(|m| !tried.contains(m)).fold(Vec::new(), |mut v, m| {
+                if !v.contains(m) {
+                    v.push(m.clone());
+                }
+                v
+            });
+            if todo.is_empty() {
+                break;
+            }
+            for m in todo.iter().take(8) {
+                if let Ok(fills) = load::fill(&s, m).await {
+                    let mut cache = hub.cache.wr();
+                    for f in fills {
+                        cache.apply(f);
+                    }
                 }
             }
+            tried.extend(todo);
+            (best, missing) = complete::column_lineage(sql, pos, name, &hub.cache.rd());
         }
     };
-    if tokio::time::timeout(Duration::from_secs(5), fill).await.is_err() {
+    if tokio::time::timeout(Duration::from_secs(5), rounds).await.is_err() {
         tracing::debug!("열 출처: 열 채우기가 늦어 있는 것으로 답함");
+        return Ok(complete::column_lineage(sql, pos, name, &hub.cache.rd()).0);
     }
-    let (again, _) = complete::column_lineage(sql, pos, name, &hub.cache.rd());
-    Ok(again)
+    Ok(best)
 }
 
 #[tauri::command]

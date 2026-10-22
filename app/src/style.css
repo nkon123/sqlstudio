@@ -171,7 +171,8 @@ body.row-resizing { cursor: row-resize; user-select: none; }
 /* ── 그리드 ── */
 .grid { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; outline: none; font: 12px var(--mono); }
 .grid-header { overflow: hidden; border-bottom: 1px solid var(--line); background: var(--bg); flex: none; }
-.grid-viewport { flex: 1; overflow: auto; position: relative; }
+/* 끌면 셀 선택만 — 열이 없는 빈 곳에서 끌어도 글자 선택이 생기지 않게 (고치는 칸은 아래 .grid-input 에서 다시 켠다) */
+.grid-viewport { flex: 1; overflow: auto; position: relative; user-select: none; }
 .grid-spacer { position: absolute; top: 0; left: 0; }
 .grid-body { position: relative; }
 .grid-row { position: absolute; top: 0; left: 0; display: flex; height: 22px; }
@@ -370,7 +371,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .grid-head .grid-cell.ro { color: var(--dim); font-style: italic; }
 .grid-cell.dirty { background: color-mix(in srgb, var(--warn) 25%, transparent) !important; }
 .grid-row.deleted .grid-cell { text-decoration: line-through; color: var(--danger); }
-.grid-input { box-sizing: border-box; height: 20px; font: inherit; padding: 0 3px; border: 1px solid var(--accent); }
+.grid-input { user-select: text; box-sizing: border-box; height: 20px; font: inherit; padding: 0 3px; border: 1px solid var(--accent); }
 
 /* ── 데이터 흐름도 ── */
 .an-main.an-wide { grid-template-columns: 0 0 minmax(0, 1fr); }

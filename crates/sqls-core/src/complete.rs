@@ -2013,7 +2013,21 @@ impl LineageCx<'_> {
 
         let found = self.locate(&items, &refs, pos, name);
         let Some((item, col)) = found else {
-            return Lineage::unknown(label, format!("SELECT 목록에서 {label} 을 찾지 못했습니다"));
+            // 어느 쿼리의 어떤 목록을 봤는지 — 사용자가 어디서 끊겼는지 알 수 있게
+            let shown: Vec<String> = items
+                .iter()
+                .map(|it| match (&it.out, &it.src) {
+                    (Some(o), _) => o.clone(),
+                    (None, Src::Star(Some(r))) => format!("{}.*", r.shown()),
+                    (None, Src::Star(None)) => "*".into(),
+                    (None, _) => format!("(이름 없는 식 {})", Self::clip(Self::text_of(&text, it.body), 30)),
+                })
+                .collect();
+            let at = pos.map(|p| format!(" ({}번째 열)", p + 1)).unwrap_or_default();
+            let mut node = Lineage::unknown(label, format!("SELECT 목록 [{}] 에서 {label}{at} 을 찾지 못했습니다", Self::clip(shown.join(", "), 300)));
+            node.from = from;
+            node.filter = filter;
+            return node;
         };
         let out = item.out.clone().or_else(|| col.clone()).unwrap_or_else(|| label.to_string());
         let mut node = match &item.src {

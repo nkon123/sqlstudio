@@ -493,3 +493,24 @@ fn lineage_unpivot() {
     assert_eq!((l.kind.as_str(), l.expr.as_deref()), ("constant", Some("'S' · 'C'")));
     assert_eq!(srcs(&lin(q, Some(0), "DEPTNO")), vec!["EMP.DEPTNO"]);
 }
+
+#[test]
+fn lineage_pivot_over_union() {
+    // PIVOT 앞이 UNION — 갈래마다 이름이 달라도(QTY · CONV_QTY) 첫 갈래 이름으로 묶여 따라간다
+    let q = "select * from (select sal qty, empno rnum from emp a union all select case when sal > 0 then sal else sal / comm end conv_qty, rnum from (select max(sal) over () sal, comm, empno rnum from emp)) pivot (max(qty) cqty for (rnum) in (1 r1, 2 r2))";
+    let l = lin(q, None, "R1_CQTY");
+    assert_eq!((l.kind.as_str(), l.filter.as_deref()), ("aggregate", Some("(rnum) = 1")));
+    assert_eq!(srcs(&l), vec!["EMP.SAL", "EMP.COMM", "EMP.EMPNO"]);
+    let u = &l.inputs[0].inputs[0];
+    assert_eq!((u.kind.as_str(), u.inputs[1].name.as_str(), u.inputs[1].kind.as_str()), ("union", "CONV_QTY", "computed"));
+    // SELECT * · 별칭.* · WITH 로 감싸도
+    for q in [
+        "select * from (select * from (select ename, job mon, sal qty from emp union all select ename, 'X' mon, sal conv_qty from bonus)) pivot (sum(qty) for mon in ('CLERK' c))",
+        "with u as (select ename, job mon, sal qty from emp union all select ename, 'X' mon, sal conv_qty from bonus) select * from u pivot (sum(qty) for mon in ('CLERK' c))",
+    ] {
+        assert_eq!(srcs(&lin(q, None, "C")), vec!["EMP.SAL", "BONUS.SAL", "EMP.JOB"], "{q}");
+    }
+    // 못 찾으면 어느 목록을 봤는지 알린다
+    let l = lin("select a, b from (select ename a, sal b from emp)", Some(0), "NOPE");
+    assert_eq!(l.reason.as_deref(), Some("SELECT 목록 [A, B] 에서 NOPE (1번째 열) 을 찾지 못했습니다"));
+}

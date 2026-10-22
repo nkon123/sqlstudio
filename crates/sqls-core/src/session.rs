@@ -668,6 +668,12 @@ impl Worker {
     /// 트랜잭션 상태를 읽어 둔다 — 답을 보내기 전에 (부른 쪽이 바로 읽는다)
     fn note_txn(&self) {
         use oracle::oci_attr::TransactionInProgress;
+        // 읽기 전용 세션은 실행마다 SET TRANSACTION READ ONLY 로 트랜잭션을 열어 두지만 바꿀 수 있는 것이 없다 —
+        // 드라이버는 "진행 중" 이라 해도 커밋할 것은 없다
+        if self.spec.read_only {
+            self.txn.store(0, Ordering::Relaxed);
+            return;
+        }
         let v = match self.conn.oci_attr::<TransactionInProgress>() {
             Ok(true) => 1,
             Ok(false) => 0,
@@ -966,7 +972,8 @@ impl Worker {
         // 커밋하지 않은 변경이 있으면 그것까지 롤백하면 안 된다 — 세이브포인트까지만 되돌린다.
         // 변경이 없으면 끝내고 시작한다 (읽기 전용 트랜잭션 안에서는 EXPLAIN PLAN 이 쓰지 못한다)
         use oracle::oci_attr::TransactionInProgress;
-        let keep = matches!(self.conn.oci_attr::<TransactionInProgress>(), Ok(true));
+        // 읽기 전용 세션의 트랜잭션은 SET TRANSACTION READ ONLY 로 연 것이라 끝내도 잃을 것이 없다
+        let keep = !self.spec.read_only && matches!(self.conn.oci_attr::<TransactionInProgress>(), Ok(true));
         if keep {
             self.conn.execute("SAVEPOINT SQLS_EXPLAIN", &[])?;
         } else {

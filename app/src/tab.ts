@@ -200,6 +200,7 @@ export class Tab {
       save: () => app.save(),
       saveAs: () => app.saveAs(),
       format: () => app.formatSql(),
+      wrapList: () => void app.wrapSelectList(),
       describe: () => app.describeAtCursor(),
       history: () => app.showHistory(),
       // 붙여 넣기·되돌리기처럼 DOM input 이 나지 않는 편집도 — 탭의 ● (저장하지 않은 편집)

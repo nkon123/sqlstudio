@@ -153,7 +153,7 @@ eq("create table t2 (a, b) nologging as select x, y from t1;", "CREATE TABLE t2 
 eq("with r (n) as (select 1 from dual union all select n + 1 from r where n < 3) search depth first by n set ord select * from r",
 `WITH r (n) AS (SELECT 1
                  FROM dual
-               UNION ALL
+                UNION ALL
                SELECT n + 1
                  FROM r
                 WHERE n < 3)
@@ -162,6 +162,22 @@ SELECT *
   FROM r`);
 eq("select deptno, sum(sal) from emp group by grouping sets ((deptno), ())",
   "SELECT deptno\n     , SUM(sal)\n  FROM emp\n GROUP BY GROUPING SETS ((deptno), ())");
+
+// UNION ALL · MINUS 는 절 키워드처럼 — UNION 의 N 이 위 AND 의 D 와 같은 칸. INTERSECT(긴 것)는 왼쪽 끝
+eq("select a from t1 where x = 1 and y = 2 union all select b from t2 minus select c from t3 intersect select d from t4",
+`SELECT a
+  FROM t1
+ WHERE x = 1
+   AND y = 2
+ UNION ALL
+SELECT b
+  FROM t2
+ MINUS
+SELECT c
+  FROM t3
+INTERSECT
+SELECT d
+  FROM t4`);
 
 // 조건의 연산자 맞추기 — 절(ON·WHERE)마다 따로, = · >= · IN · LIKE · BETWEEN · IS 를 같은 칸에. 여러 줄 조건(서브쿼리)은 빼고
 const aligned: FormatPrefs = { ...DEFAULT_PREFS, alignOps: true };
@@ -227,7 +243,7 @@ SELECT *
              , ROW_NUMBER() OVER (PARTITION BY s.cust_id ORDER BY s.amt DESC) rn
           FROM s) t
  WHERE t.rn = 1
-UNION ALL
+ UNION ALL
 SELECT NULL
      , 0
      , 0

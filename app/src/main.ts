@@ -15,7 +15,9 @@ import { showSpace } from "./space";
 import { enableTabDrag } from "./tabdrag";
 import { cellCondition, listCondition, listText, placeCondition, type CondOp, type ListCond, type ListText } from "./cond";
 import { changeCase } from "./editor";
-import { autoFormat, formatSql, startsWithDml } from "./format";
+import { autoFormat, formatSql, loadPrefs, startsWithDml } from "./format";
+import { findList, wrapList } from "./listwrap";
+import { vw } from "./sqlfmt";
 import type { GitPanel } from "./git";
 import { condOf, placeAtCursor, placeInClause, TARGET_LABEL, type Placed, type Target } from "./colinsert";
 import { aliasMap, showColumns } from "./colpopup";
@@ -292,6 +294,48 @@ export class App {
     if (!r.ok) return toast(r.reason, "error", 6000);
     if (r.text === src) return toast("이미 정리되어 있습니다", "info");
     view.dispatch({ changes: { from, to, insert: r.text }, selection: { anchor: from, head: from + r.text.length }, userEvent: "input.format", scrollIntoView: true });
+    t.editor.focus();
+  }
+
+  /** Ctrl+Alt+L — SELECT 목록(선택 영역, 없으면 커서 문장)을 몇 줄로 나눌지 묻고 칸을 맞춰 배치한다 */
+  async wrapSelectList() {
+    const t = this.active;
+    if (!t) return;
+    const view = t.editor.view;
+    if (view.state.selection.ranges.length > 1) return toast("여러 곳이 선택되어 있습니다 — Esc 로 하나로 만든 뒤 하세요", "info");
+    const main = view.state.selection.main;
+    let from = main.from, to = main.to;
+    if (main.empty) {
+      const cur = await this.currentStatement(t);
+      if (!cur) return toast("나눌 SELECT 목록이 없습니다", "info");
+      ({ from, to } = cur);
+    }
+    const span = findList(view.state.sliceDoc(from, to));
+    if (typeof span === "string") return toast(span, "error", 6000);
+    if (span.items.length < 2) return toast("나눌 항목이 하나뿐입니다", "info");
+    const a = from + span.from, b = from + span.to;
+    const line = view.state.doc.lineAt(a);
+    const lead = line.text.slice(0, a - line.from);
+    const col = vw(lead);
+    const comma = loadPrefs().commaBefore;
+    const n = span.items.length;
+    let saved = 0;
+    try { saved = Number(localStorage.getItem("listwrap.rows")) || 0; } catch { /* 없으면 기본 */ }
+    const input = h("input", { type: "number", min: "1", max: String(n), value: String(Math.min(n, saved || Math.ceil(n / 4))) }) as HTMLInputElement;
+    const preview = h("pre", { class: "format-preview" });
+    const rows = () => Math.max(1, Math.min(n, Number(input.value) || 1));
+    const show = () => { preview.textContent = lead + wrapList(span.items, rows(), col, comma); };
+    input.addEventListener("input", show);
+    show();
+    const body = h("div", { class: "form" },
+      h("label", { class: "field" }, h("span", {}, `몇 줄로 나눌까요? (항목 ${n}개 — 1 ~ ${n})`), input,
+        h("small", {}, "줄마다 같은 수씩 놓고 칸을 맞춥니다. 쉼표 위치는 포맷 설정을 따릅니다.")),
+      preview);
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+    if (!(await modal("목록 나누기", body, [{ label: "취소", value: false }, { label: "나누기", value: true, kind: "primary" }], { wide: true }))) return;
+    try { localStorage.setItem("listwrap.rows", String(rows())); } catch { /* 기억 못 해도 된다 */ }
+    const text = wrapList(span.items, rows(), col, comma);
+    view.dispatch({ changes: { from: a, to: b, insert: text }, selection: { anchor: a, head: a + text.length }, userEvent: "input.format", scrollIntoView: true });
     t.editor.focus();
   }
 
@@ -1648,6 +1692,7 @@ export class App {
     const edit: MenuItem[] = [
       { label: "실행", hint: "Ctrl+Enter", run: () => this.runStatement() },
       { label: "SQL 포맷", hint: "Ctrl+Shift+F", run: () => this.formatSql() },
+      { label: "SELECT 목록을 몇 줄로…", hint: "Ctrl+Alt+L", run: () => void this.wrapSelectList() },
       { label: "대문자로 (구문만)", hint: "Ctrl+Shift+U", run: () => { changeCase("upper")(view); view.focus(); } },
       { label: "소문자로 (구문만)", hint: "Ctrl+Alt+U", run: () => { changeCase("lower")(view); view.focus(); } },
       { sep: true },

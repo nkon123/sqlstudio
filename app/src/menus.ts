@@ -48,6 +48,7 @@ export function fileMenu(app: App): MenuItem[] {
     { sep: true },
     { label: "실행 이력", hint: "F8", run: () => app.showHistory() },
     { label: "SQL 포맷", hint: "Ctrl+Shift+F", run: () => void app.formatSql() },
+    { label: "SELECT 목록을 몇 줄로…", hint: "Ctrl+Alt+L", run: () => void app.wrapSelectList() },
     { label: `자동 포맷${Object.values(autoFormat()).some(Boolean) ? " (켜짐)" : ""}`, sub: autoFormatItems(app) },
   ];
 }
@@ -104,6 +105,7 @@ export function palette(app: App) {
     { group: "파일", label: "저장", keys: "Ctrl+S", alias: "save", run: () => void app.save() },
     { group: "파일", label: "다른 이름으로 저장", keys: "Ctrl+Shift+S", alias: "save as", run: () => void app.saveAs() },
     { group: "편집", label: "SQL 포맷", keys: "Ctrl+Shift+F", alias: "format 정리", run: () => void app.formatSql() },
+    { group: "편집", label: "SELECT 목록을 몇 줄로", keys: "Ctrl+Alt+L", alias: "columns wrap 컬럼 나누기 줄", run: () => void app.wrapSelectList() },
     ...autoFormatItems(app).flatMap((it): Command[] => ("run" in it && it.run && !it.label.endsWith("…")
       ? [{ group: "자동 포맷", label: `${it.label.slice(2)} ${it.label.startsWith("✓") ? "끄기" : "켜기"}`, alias: "auto format 자동 정리", run: it.run }] : [])),
     { group: "편집", label: "포맷 스타일 설정", alias: "format style 정렬 쉼표", run: () => void app.settings("편집기") },

@@ -85,6 +85,8 @@ export interface EditorActions {
   /** Ctrl+Shift+S — 다른 이름으로 저장 */
   saveAs: () => void;
   format: () => void;
+  /** Ctrl+Alt+L — SELECT 목록을 몇 줄로 나누기 */
+  wrapList: () => void;
   /** F4 — 커서의 테이블 컬럼 팝업 */
   describe: () => void;
   /** F8 — SQL 실행 이력 */
@@ -214,6 +216,7 @@ export class SqlEditor {
             // 구문만 대·소문자로 (값·이름표는 그대로) — 기본의 '선택 다시 하기(Ctrl+Shift+U)' 보다 먼저
             { key: "Ctrl-Shift-u", mac: "Cmd-Shift-u", run: changeCase("upper"), preventDefault: true },
             { key: "Ctrl-Alt-u", mac: "Cmd-Alt-u", run: changeCase("lower"), preventDefault: true },
+            { key: "Ctrl-Alt-l", mac: "Cmd-Alt-l", run: run(actions.wrapList), preventDefault: true },
             { key: "Ctrl-Shift-f", mac: "Cmd-Shift-f", run: run(actions.format), preventDefault: true },
             { key: "F4", run: run(actions.describe), preventDefault: true },
             { key: "F8", run: run(actions.history), preventDefault: true },

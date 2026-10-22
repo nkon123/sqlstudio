@@ -288,7 +288,12 @@ class Fmt {
   /** 절 키워드를 놓을 칸: 6칸 안은 오른쪽 맞춤, 긴 것(GROUP BY …)은 한 칸 들여, 조인은 FROM 과 같은 칸 */
   private kwStart(c: Clause, base: number) {
     const R = base + 6;
-    if (["with", "insert", "update", "delete", "setop", "merge", "multi"].includes(c.kind)) return base;
+    // UNION ALL · MINUS — 첫 낱말을 절 키워드처럼 오른쪽에 맞춘다 (UNION 의 N 이 위 AND 의 D 와 같은 칸). INTERSECT 처럼 긴 것은 왼쪽 끝
+    if (c.kind === "setop") {
+      const len = vw(c.kw.split(/\s+/)[0]);
+      return len <= 6 ? R - len : base;
+    }
+    if (["with", "insert", "update", "delete", "merge", "multi"].includes(c.kind)) return base;
     if (c.kind === "join") return R - 4;
     const len = vw(c.kw);
     return len <= 6 ? R - len : base + 1;

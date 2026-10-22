@@ -25,7 +25,7 @@ import { gotoMatchingParen, parenHighlight, parenSelect } from "./brackets";
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import type { Command } from "@codemirror/view";
-import { EditorSelection, EditorState, StateEffect, StateField } from "@codemirror/state";
+import { Annotation, EditorSelection, EditorState, StateEffect, StateField } from "@codemirror/state";
 import { type CaseMode, convertRange } from "./case-convert";
 import { autoFormatExtension, caseWordBefore } from "./autofmt";
 import {
@@ -89,7 +89,12 @@ export interface EditorActions {
   describe: () => void;
   /** F8 — SQL 실행 이력 */
   history: () => void;
+  /** 글이 바뀜 — 치기·붙여 넣기·잘라내기·되돌리기·끌어 놓기·포맷 모두 (파일을 불러와 바꾼 것은 아니다) */
+  edited?: () => void;
 }
+
+/** setText 로 통째로 바꾼 것 — 편집이 아니다 (파일 열기·다시 읽기) */
+const loaded = Annotation.define<boolean>();
 
 // ── 키보드 사각형 선택 (Alt+Shift+방향키) ─────────────────
 // 시작점(줄, 열)을 기억하고, 방향키로 끝점을 옮기며 줄마다 같은 열 범위를 선택한다.
@@ -193,6 +198,9 @@ export class SqlEditor {
           sql({ dialect: ORACLE, upperCaseKeywords: true }),
           marks,
           autoFormatExtension(),
+          EditorView.updateListener.of((u) => {
+            if (u.docChanged && !u.transactions.some((tr) => tr.annotation(loaded))) actions.edited?.();
+          }),
           keymap.of([
             { key: "Ctrl-Enter", mac: "Cmd-Enter", run: run(actions.runStatement), preventDefault: true },
             // 줄바꿈: 새 줄은 지금 줄의 첫 글자와 같은 자리에서 시작 (언어 규칙으로 들여쓰기를 따로 정하지 않는다)
@@ -233,7 +241,7 @@ export class SqlEditor {
   }
 
   setText(t: string) {
-    this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: t } });
+    this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: t }, annotations: loaded.of(true) });
   }
 
   cursor() {

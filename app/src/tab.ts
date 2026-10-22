@@ -202,8 +202,9 @@ export class Tab {
       format: () => app.formatSql(),
       describe: () => app.describeAtCursor(),
       history: () => app.showHistory(),
+      // 붙여 넣기·되돌리기처럼 DOM input 이 나지 않는 편집도 — 탭의 ● (저장하지 않은 편집)
+      edited: () => this.setDirty(true),
     }, text, sqlCompletion(() => this.conn?.id));
-    this.editor.view.dom.addEventListener("input", () => this.setDirty(true));
     this.editor.view.dom.addEventListener("contextmenu", (e) => void app.editorMenu(this, e));
     dragSplit(splitter, editorHost);
     this.editorHostEl = editorHost;

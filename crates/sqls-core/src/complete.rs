@@ -1863,7 +1863,7 @@ const AGGREGATES: &[&str] = &["SUM", "COUNT", "AVG", "MIN", "MAX", "LISTAGG", "S
 /// 위치로 먼저 찾고(`*` 는 캐시의 열 순서로 편다), 안 되면 이름으로 찾는다.
 /// 두 번째 값은 캐시에 없어 채우면 더 정확해지는 것 (채운 뒤 다시 부른다)
 pub fn column_lineage(sql: &str, pos: Option<usize>, name: &str, cache: &SchemaCache) -> (Lineage, Vec<Missing>) {
-    let cx = LineageCx { cache, missing: std::cell::RefCell::new(Vec::new()) };
+    let cx = LineageCx { cache, missing: std::cell::RefCell::new(Vec::new()), pivots: std::cell::RefCell::new(Vec::new()) };
     let l = cx.query(sql, pos, &name.trim().trim_matches('"').to_uppercase(), 0);
     (l, cx.missing.into_inner())
 }
@@ -1871,6 +1871,34 @@ pub fn column_lineage(sql: &str, pos: Option<usize>, name: &str, cache: &SchemaC
 struct LineageCx<'c> {
     cache: &'c SchemaCache,
     missing: std::cell::RefCell<Vec<Missing>>,
+    /// 쿼리에서 만난 PIVOT·UNPIVOT — 그 결과를 가리키는 참조의 이름이 [`PIVOT_MARK`] + 번호
+    pivots: std::cell::RefCell<Vec<Pivot>>,
+}
+
+/// PIVOT·UNPIVOT 결과를 가리키는 가짜 테이블 이름 앞머리 (SQL 에 나올 수 없는 글자)
+const PIVOT_MARK: &str = "\u{1}PIVOT";
+
+/// PIVOT·UNPIVOT 하나 — 앞 테이블에서 어떤 열이 나오는지
+#[derive(Clone)]
+struct Pivot {
+    /// PIVOT 앞의 테이블 (열을 따라 들어갈 곳)
+    src: TableRef,
+    /// "PIVOT" 또는 "UNPIVOT"
+    kw: &'static str,
+    /// 나오는 열 (대문자 이름) — 순서대로
+    cols: Vec<(String, PivotCol)>,
+}
+
+#[derive(Clone)]
+enum PivotCol {
+    /// 그대로 지나온 열 (PIVOT 이면 묶는 열)
+    Keep,
+    /// PIVOT 이 만든 열 — 조건(FOR … = 값)에 맞는 행만 모은 집계
+    Agg { expr: String, cols: Vec<String>, for_cols: Vec<String>, cond: String },
+    /// UNPIVOT 의 값 열 — IN 의 열들이 행으로 (이름표, 열)
+    Values(Vec<(String, String)>),
+    /// UNPIVOT 의 FOR 열 — IN 의 이름표
+    Labels(Vec<String>),
 }
 
 /// SELECT 목록 항목 하나의 출처
@@ -1975,6 +2003,11 @@ impl LineageCx<'_> {
         let ctes = parse_ctes(&toks);
         let ctes_at = cte_bodies(&toks);
         let refs = parse_refs(&toks, 0, &ctes);
+        // FROM t PIVOT (…) — SELECT 목록이 보는 것은 PIVOT 의 결과
+        let refs = match self.pivot_ref(&toks, sel, &text, &refs) {
+            Some(r) => vec![r],
+            None => refs,
+        };
         let items = Self::items(&toks, sel, &refs);
         let (from, filter) = Self::from_where(&toks, sel, &text);
 
@@ -1996,6 +2029,168 @@ impl LineageCx<'_> {
             node.from = from;
             node.filter = filter;
         }
+        node
+    }
+
+    /// `FROM t PIVOT (…) [별칭]` · `UNPIVOT` 이면 그 결과를 가리키는 참조 (열 목록과 만든 길은 self.pivots 에)
+    fn pivot_ref(&self, toks: &[Tok], sel: usize, text: &str, refs: &[TableRef]) -> Option<TableRef> {
+        let d = toks[sel].depth;
+        let from = (sel..toks.len()).find(|&i| toks[i].depth == d && is_w(toks.get(i), "FROM"))?;
+        let at = (from..toks.len()).find(|&i| {
+            toks[i].depth == d && matches!(word(&toks[i]), Some("PIVOT" | "UNPIVOT")) && toks[i + 1..].iter().take(3).any(|t| t.t == T::P('('))
+        })?;
+        let kw = if is_w(toks.get(at), "PIVOT") { "PIVOT" } else { "UNPIVOT" };
+        // PIVOT XML · UNPIVOT INCLUDE NULLS 를 건너 여는 괄호
+        let open = (at + 1..toks.len()).find(|&i| toks[i].t == T::P('(') && toks[i].depth == d)?;
+        let close = (open + 1..toks.len()).find(|&i| toks[i].t == T::P(')') && toks[i].depth == d)?;
+        let body = &toks[open + 1..close];
+        let src = refs.last()?.clone();
+        let src_cols = self.cols_of(&src).unwrap_or_default();
+        let alias = toks
+            .get(close + 1)
+            .filter(|t| t.depth == d)
+            .and_then(ident)
+            .filter(|a| !NOT_ALIAS.contains(&a.as_str()) && !KEYWORDS.contains(&a.as_str()));
+        let for_at = body.iter().position(|t| t.depth == d + 1 && is_w(Some(t), "FOR"))?;
+        let in_at = body.iter().position(|t| t.depth == d + 1 && is_w(Some(t), "IN"))?;
+        let in_open = in_at + 1;
+        if body.get(in_open)?.t != T::P('(') {
+            return None;
+        }
+        let in_close = (in_open + 1..body.len()).find(|&i| body[i].t == T::P(')') && body[i].depth == d + 1)?;
+        let items = Self::split_top(&body[in_open + 1..in_close], d + 2);
+        // 조각 안의 열 이름들 (함수 이름 · a.b 의 a · 키워드는 빼고). known 이면 앞 테이블의 열만 (열을 알 때)
+        let names_in = |ts: &[Tok], known: bool| -> Vec<String> {
+            let mut out: Vec<String> = Vec::new();
+            for (i, t) in ts.iter().enumerate() {
+                let Some(n) = ident(t) else { continue };
+                if ts.get(i + 1).is_some_and(|x| x.t == T::P('(') || x.t == T::P('.')) {
+                    continue;
+                }
+                if matches!(t.t, T::Word(_)) && (KEYWORDS.contains(&n.as_str()) || PSEUDO.contains(&n.as_str())) {
+                    continue;
+                }
+                if (!known || src_cols.is_empty() || src_cols.contains(&n)) && !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+            out
+        };
+        let names = |ts: &[Tok]| names_in(ts, true);
+        // PIVOT 의 FOR 는 앞 테이블의 열, UNPIVOT 의 FOR 는 새로 생기는 열
+        let for_cols = names_in(&body[for_at + 1..in_at], kw == "PIVOT");
+        let mut cols: Vec<(String, PivotCol)> = Vec::new();
+        if kw == "PIVOT" {
+            // PIVOT XML 의 IN (ANY) · IN (SELECT …) — 열이 실행해야 정해진다
+            if items.first().and_then(|i| i.first()).is_some_and(|t| is_w(Some(t), "ANY") || is_w(Some(t), "SELECT")) {
+                return None;
+            }
+            let aggs: Vec<(&[Tok], Option<String>)> = Self::split_top(&body[..for_at], d + 1).into_iter().map(|a| Self::split_alias(a, d + 1)).collect();
+            let used: Vec<String> = aggs.iter().flat_map(|(a, _)| names(a)).chain(for_cols.iter().cloned()).collect();
+            cols.extend(src_cols.iter().filter(|c| !used.contains(c)).map(|c| (c.clone(), PivotCol::Keep)));
+            let for_text = Self::text_of(text, &body[for_at + 1..in_at]);
+            for item in &items {
+                let (v, valias) = Self::split_alias(item, d + 2);
+                let vtext = Self::text_of(text, v);
+                // 이름표가 없으면 값 그대로 ('CLERK' → CLERK)
+                let vname = valias.unwrap_or_else(|| vtext.trim_matches('\'').to_uppercase());
+                for (a, aalias) in &aggs {
+                    let name = match aalias {
+                        Some(x) => format!("{vname}_{x}"),
+                        None => vname.clone(),
+                    };
+                    let cond = format!("{for_text} = {vtext}");
+                    cols.push((name, PivotCol::Agg { expr: Self::text_of(text, a), cols: names(a), for_cols: for_cols.clone(), cond }));
+                }
+            }
+        } else {
+            let val_cols = names_in(&body[..for_at], false);
+            // IN 항목: 열(들) [AS 이름표]. 이름표가 없으면 열 이름이 이름표
+            let parts: Vec<(String, Vec<String>)> = items
+                .iter()
+                .map(|it| {
+                    let as_at = it.iter().position(|t| t.depth == d + 2 && is_w(Some(t), "AS")).unwrap_or(it.len());
+                    let cs = names(&it[..as_at]);
+                    let label = if as_at < it.len() { Self::text_of(text, &it[as_at + 1..]) } else { format!("'{}'", cs.join(",")) };
+                    (label, cs)
+                })
+                .collect();
+            let used: Vec<&String> = parts.iter().flat_map(|(_, cs)| cs).collect();
+            cols.extend(src_cols.iter().filter(|c| !used.contains(c)).map(|c| (c.clone(), PivotCol::Keep)));
+            let labels: Vec<String> = parts.iter().map(|(l, _)| l.clone()).collect();
+            cols.extend(for_cols.iter().map(|c| (c.clone(), PivotCol::Labels(labels.clone()))));
+            for (k, v) in val_cols.iter().enumerate() {
+                let from = parts.iter().filter_map(|(l, cs)| cs.get(k).map(|c| (l.clone(), c.clone()))).collect();
+                cols.push((v.clone(), PivotCol::Values(from)));
+            }
+        }
+        let mut pivots = self.pivots.borrow_mut();
+        let name = format!("{PIVOT_MARK}{}", pivots.len());
+        let derived = cols.iter().map(|(n, _)| n.clone()).collect();
+        pivots.push(Pivot { src, kw, cols });
+        Some(TableRef { owner: None, name: Some(name), alias, derived: Some(derived), level: 0, body: None })
+    }
+
+    /// 같은 깊이의 쉼표로 나눈 조각들
+    fn split_top(toks: &[Tok], depth: i32) -> Vec<&[Tok]> {
+        let mut out = Vec::new();
+        let mut start = 0;
+        for (i, t) in toks.iter().enumerate() {
+            if t.depth == depth && t.t == T::P(',') {
+                out.push(&toks[start..i]);
+                start = i + 1;
+            }
+        }
+        out.push(&toks[start..]);
+        out.into_iter().filter(|x| !x.is_empty()).collect()
+    }
+
+    /// `식 [AS] 별칭` → (식, 별칭)
+    fn split_alias(it: &[Tok], depth: i32) -> (&[Tok], Option<String>) {
+        if let [.., prev, last] = it {
+            let last_ident = last.depth == depth && matches!(last.t, T::Word(_) | T::QWord(_)) && !is_w(Some(last), "END");
+            if last_ident && is_w(Some(prev), "AS") {
+                return (&it[..it.len() - 2], ident(last));
+            }
+            if last_ident && prev.depth == depth && matches!(prev.t, T::Word(_) | T::QWord(_) | T::Str | T::Num | T::P(')')) {
+                return (&it[..it.len() - 1], ident(last));
+            }
+        }
+        (it, None)
+    }
+
+    /// PIVOT·UNPIVOT 결과의 열 하나
+    fn pivot_column(&self, k: usize, col: &str, ctes_at: &HashMap<String, (usize, usize)>, text: &str, nest: u8) -> Lineage {
+        // 안쪽을 따라가다 다른 PIVOT 을 만날 수 있다 — 빌린 채로 들어가지 않게 복사해 둔다
+        let Some(p) = self.pivots.borrow().get(k).cloned() else { return Lineage::unknown(col, "PIVOT 을 찾지 못했습니다") };
+        let src = std::slice::from_ref(&p.src);
+        let trace = |c: &str, via: Option<String>| Lineage { via, ..self.column(Some(&p.src), c, src, ctes_at, text, nest) };
+        let Some((_, how)) = p.cols.iter().find(|(n, _)| n == col) else {
+            return Lineage::unknown(col, format!("{} 결과에서 {col} 열을 찾지 못했습니다", p.kw));
+        };
+        let mut node = match how {
+            PivotCol::Keep => {
+                let via = if p.kw == "PIVOT" { "PIVOT — 묶는 열 (그대로)" } else { "UNPIVOT — 그대로" };
+                let mut n = Lineage { via: Some(via.into()), ..Lineage::new(col, "view") };
+                n.inputs.push(trace(col, None));
+                n
+            }
+            PivotCol::Agg { expr, cols, for_cols, cond } => {
+                let mut n = Lineage { via: Some("PIVOT".into()), expr: Some(expr.clone()), filter: Some(cond.clone()), ..Lineage::new(col, "aggregate") };
+                n.inputs.extend(cols.iter().map(|c| trace(c, Some("값".into()))));
+                n.inputs.extend(for_cols.iter().map(|c| trace(c, Some(format!("조건 {cond}")))));
+                n
+            }
+            PivotCol::Values(from) => {
+                let mut n = Lineage { via: Some("UNPIVOT".into()), expr: Some("IN 의 열들을 행으로 펼침".into()), ..Lineage::new(col, "union") };
+                n.inputs.extend(from.iter().map(|(label, c)| trace(c, Some(format!("{label} 인 행")))));
+                n
+            }
+            PivotCol::Labels(labels) => Lineage { via: Some("UNPIVOT".into()), expr: Some(labels.join(" · ")), ..Lineage::new(col, "constant") },
+        };
+        // 비워 두면 바깥 쿼리의 FROM·WHERE 로 덮인다 (PIVOT 의 조건이 사라진다)
+        let shown = p.src.shown();
+        node.from = Some(if shown.is_empty() { format!("(…) {}", p.kw) } else { format!("{shown} {}", p.kw) });
         node
     }
 
@@ -2203,6 +2398,9 @@ impl LineageCx<'_> {
                 None => return Lineage::unknown(col, format!("{col} 열이 어느 테이블의 것인지 모릅니다 (테이블 별칭을 붙여 보세요)")),
             },
         };
+        if let Some(k) = r.name.as_deref().and_then(|n| n.strip_prefix(PIVOT_MARK)).and_then(|k| k.parse::<usize>().ok()) {
+            return self.pivot_column(k, col, ctes_at, text, nest);
+        }
         if r.derived.is_some() {
             let via = match (&r.name, &r.alias) {
                 (Some(n), Some(a)) => format!("WITH {n} ({a})"),

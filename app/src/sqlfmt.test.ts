@@ -55,6 +55,37 @@ eq("select o.order_id, c.cust_nm, sum(i.qty * i.price) total, case when o.status
 HAVING SUM(i.qty) > 0
  ORDER BY total DESC`);
 
+// PIVOT — 집계는 목록처럼, FOR 는 첫 집계 칸, IN 의 값도 목록처럼 (한 줄로 늘어놓지 않는다)
+eq("select * from (select job, deptno, sal from emp) pivot (sum(sal) as s, count(*) as n for deptno in (10 as d10, 20 as d20, 30 as d30)) p where p.job = 'CLERK' order by 1",
+`SELECT *
+  FROM (SELECT job
+             , deptno
+             , sal
+          FROM emp)
+ PIVOT (SUM(sal) AS s
+      , COUNT(*) AS n
+        FOR deptno IN (10 AS d10
+                     , 20 AS d20
+                     , 30 AS d30)) p
+ WHERE p.job = 'CLERK'
+ ORDER BY 1`);
+eq("select * from (select deptno, sal, comm from emp) unpivot include nulls (amt for kind in (sal as 'S', comm as 'C'))",
+`SELECT *
+  FROM (SELECT deptno
+             , sal
+             , comm
+          FROM emp)
+ UNPIVOT INCLUDE NULLS (amt
+                        FOR kind IN (sal AS 'S'
+                                   , comm AS 'C'))`);
+eq("select * from emp pivot xml (sum(sal) for deptno in (any))",
+`SELECT *
+  FROM emp
+ PIVOT XML (SUM(sal)
+            FOR deptno IN (ANY))`);
+// PIVOT 이라는 이름의 열은 PIVOT 절로 보지 않는다
+eq("select pivot from t", "SELECT PIVOT\n  FROM t");
+
 // UPDATE · IN 서브쿼리
 eq("update orders o set o.status = 'S', o.upd_dt = sysdate where o.order_id in (select x.order_id from tmp x where x.flag = 'Y')",
 `UPDATE orders o

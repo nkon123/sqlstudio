@@ -129,7 +129,7 @@ const SPACE_PAREN = new Set(("IN EXISTS AS VALUES OVER AND OR NOT ON USING THEN 
 /** 값으로 쓰이는 키워드 — 뒤의 -/+ 는 빼기·더하기 */
 const VALUE_WORDS = new Set("NULL LEVEL ROWNUM ROWID SYSDATE SYSTIMESTAMP CURRENT_DATE CURRENT_TIMESTAMP TRUE FALSE".split(" "));
 
-type Kind = "list" | "cond" | "join" | "flat" | "setop" | "with" | "insert" | "update" | "delete";
+type Kind = "list" | "cond" | "join" | "flat" | "setop" | "with" | "insert" | "update" | "delete" | "pivot";
 interface Clause { kw: string; n: number; kind: Kind }
 interface Snap { l: number; cur: string; pos: number; prev: Tok | null; mb: boolean; un: boolean }
 
@@ -260,6 +260,9 @@ class Fmt {
       case "UPDATE": return this.allowWith ? c(1, "update") : null;
       case "DELETE": return this.allowWith ? c(w(1) === "FROM" ? 2 : 1, "delete") : null;
       case "MERGE": throw new Error("MERGE");
+      // PIVOT ( … ) · PIVOT XML ( … ) · UNPIVOT INCLUDE NULLS ( … ) — 이름으로 쓴 PIVOT 은 아니다
+      case "PIVOT": case "UNPIVOT":
+        return this.at(1)?.t === "(" || ["XML", "INCLUDE", "EXCLUDE"].includes(w(1)) ? c(1, "pivot") : null;
     }
     return null;
   }
@@ -308,6 +311,7 @@ class Fmt {
         case "list": case "with": this.list(this.col() + 1); break;
         case "cond": this.cond(R); break;
         case "setop": break;
+        case "pivot": this.pivot(); break;
         default: this.cont = this.col() + 1; this.expr({ clauses: true }); break;
       }
       first = false;
@@ -316,10 +320,10 @@ class Fmt {
     this.allowWith = saveWith;
   }
 
-  private list(itemCol: number) {
+  private list(itemCol: number, stops?: Set<string>) {
     const commaCol = itemCol - 2;
     this.cont = itemCol;
-    this.expr({ clauses: true, list: true });
+    this.expr({ clauses: true, list: true, stops });
     while (this.at()?.t === ",") {
       this.pos++;
       if (this.o.fill) {
@@ -327,7 +331,7 @@ class Fmt {
         const before = this.lines.length;
         this.emit(",", false);
         this.prev = { t: ",", v: ",", nl: false, sp: false };
-        this.expr({ clauses: true, list: true });
+        this.expr({ clauses: true, list: true, stops });
         if (this.lines.length === before && this.col() <= this.o.width && !this.mustBreak) continue;
         this.restore(s);
       }
@@ -340,8 +344,62 @@ class Fmt {
       }
       this.prev = { t: ",", v: ",", nl: false, sp: false };
       this.cont = itemCol;
-      this.expr({ clauses: true, list: true });
+      this.expr({ clauses: true, list: true, stops });
     }
+  }
+
+  /** 여는 괄호 하나 — 없으면 읽지 못한 것 */
+  private open() {
+    const t = this.at();
+    if (t?.t !== "(") throw new Error("괄호가 와야 합니다");
+    this.emit("(", true);
+    this.prev = t;
+    this.unary = false;
+    this.pos++;
+  }
+
+  private close() {
+    const t = this.at();
+    if (t?.t !== ")") throw new Error("괄호 짝이 맞지 않습니다");
+    this.emit(")", false);
+    this.prev = t;
+    this.pos++;
+  }
+
+  /** PIVOT (집계 목록 FOR 열 IN (값 목록)) [별칭] — UNPIVOT 은 집계 대신 값 열.
+   *  집계·값은 SELECT 목록처럼 한 줄에 하나, FOR 는 첫 집계와 같은 칸:
+   *
+   *     PIVOT (SUM(sal) AS s
+   *          , COUNT(*) AS n
+   *            FOR deptno IN (10 AS d10
+   *                         , 20 AS d20))
+   */
+  private pivot() {
+    // PIVOT XML · UNPIVOT INCLUDE NULLS — 키워드 대소문자로
+    while (this.at()?.t === "word") {
+      this.emit(this.kw(this.at()!.v), true);
+      this.prev = this.at()!;
+      this.pos++;
+    }
+    this.open();
+    const itemCol = this.col();
+    this.list(itemCol, new Set(["FOR"]));
+    if (this.up() !== "FOR") throw new Error("PIVOT 에 FOR 가 없습니다");
+    this.brk(itemCol);
+    this.tok();
+    this.cont = this.col() + 1;
+    this.expr({ stops: new Set(["IN"]) });
+    if (this.up() !== "IN") throw new Error("PIVOT 에 IN 이 없습니다");
+    this.tok();
+    this.open();
+    // PIVOT XML 의 IN (ANY) · IN (SELECT …)
+    if (this.up() === "SELECT" || this.up() === "WITH") this.query(this.col());
+    else this.list(this.col());
+    this.close();
+    this.close();
+    // 별칭
+    const a = this.at();
+    if ((a?.t === "word" || a?.t === "qid") && !this.clauseAt() && !KEYWORDS.has(this.up())) this.tok();
   }
 
   private cond(R: number) {

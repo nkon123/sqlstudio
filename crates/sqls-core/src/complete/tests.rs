@@ -458,3 +458,38 @@ fn lineage_missing_columns() {
     assert_eq!(srcs(&lin("select id, amt * 2 from erp.orders", Some(1), "X")), vec!["ORDERS.AMT"]);
 }
 
+
+#[test]
+fn lineage_pivot() {
+    let q = "select * from (select job, deptno, sal from emp) pivot (sum(sal) for deptno in (10 as d10, 20 as d20, 30 as d30))";
+    // 묶는 열 — 그대로 지나온다
+    let l = lin(q, Some(0), "JOB");
+    assert_eq!((l.kind.as_str(), srcs(&l)), ("view", vec!["EMP.JOB".to_string()]));
+    // PIVOT 이 만든 열 — 집계 값과 조건 열
+    let l = lin(q, Some(2), "D20");
+    assert_eq!(l.kind, "aggregate");
+    assert_eq!(l.expr.as_deref(), Some("sum(sal)"));
+    assert_eq!(l.filter.as_deref(), Some("deptno = 20"));
+    assert_eq!(srcs(&l), vec!["EMP.SAL", "EMP.DEPTNO"]);
+    assert_eq!(l.inputs[1].via.as_deref(), Some("조건 deptno = 20"));
+    // 이름으로도, 테이블 바로 뒤 · 집계 별칭 · 이름표 없는 값 · PIVOT 별칭
+    let q = "select p.job, p.\"10_S\" from emp pivot (sum(sal) s, count(*) n for deptno in (10, 20)) p";
+    assert_eq!(srcs(&lin(q, None, "10_S")), vec!["EMP.SAL", "EMP.DEPTNO"]);
+    assert_eq!(lin("select * from emp pivot (sum(sal) s, count(*) n for deptno in (10, 20))", None, "20_N").expr.as_deref(), Some("count(*)"));
+    // 묶는 열은 집계·FOR 에 안 쓴 열 전부 (EMPNO … COMM) — * 의 자리
+    assert_eq!(srcs(&lin("select * from emp pivot (sum(sal) for deptno in (10 d10))", Some(6), "D10")), vec!["EMP.SAL", "EMP.DEPTNO"]);
+    // 문자 값 — 'CLERK' 열
+    assert_eq!(lin("select * from emp pivot (max(ename) for job in ('CLERK', 'MANAGER'))", None, "CLERK").filter.as_deref(), Some("job = 'CLERK'"));
+}
+
+#[test]
+fn lineage_unpivot() {
+    let q = "select * from (select deptno, sal, comm from emp) unpivot (amt for kind in (sal as 'S', comm as 'C'))";
+    let l = lin(q, None, "AMT");
+    assert_eq!(l.kind, "union");
+    assert_eq!(srcs(&l), vec!["EMP.SAL", "EMP.COMM"]);
+    assert_eq!(l.inputs[0].via.as_deref(), Some("'S' 인 행"));
+    let l = lin(q, Some(1), "KIND");
+    assert_eq!((l.kind.as_str(), l.expr.as_deref()), ("constant", Some("'S' · 'C'")));
+    assert_eq!(srcs(&lin(q, Some(0), "DEPTNO")), vec!["EMP.DEPTNO"]);
+}

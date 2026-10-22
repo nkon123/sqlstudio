@@ -1,7 +1,7 @@
 // npm test — 괄호 쌍 찾기 (문법 트리로 — 문자열·주석 안의 괄호는 세지 않는다)
 import { sql } from "@codemirror/lang-sql";
 import { EditorState } from "@codemirror/state";
-import { enclosingPair, innerRange, outerPair } from "./brackets";
+import { dirOf, enclosingPair, innerRange, outerPair } from "./brackets";
 import { ORACLE } from "./oracle-dialect";
 
 let n = 0;
@@ -44,6 +44,14 @@ eq(at("select f(a /* ) */, |b) from t"), "(a /* ) */, b)", "주석 안 )");
   const state = EditorState.create({ doc, extensions: [sql({ dialect: ORACLE })] });
   const r = innerRange(state, enclosingPair(state, doc.indexOf("a\n"))!);
   eq(doc.slice(r.from, r.to), "select a\n    from t", "서브쿼리 안쪽");
+  n++;
+}
+// 원판 방향 — 방향키 둘이면 대각선, 맞선 것은 없는 셈
+for (const [keys, want] of [
+  [["ArrowUp"], "N"], [["ArrowRight"], "E"], [["ArrowUp", "ArrowLeft"], "NW"], [["ArrowDown", "ArrowRight"], "SE"],
+  [["ArrowUp", "ArrowDown"], null], [["ArrowUp", "ArrowDown", "ArrowLeft"], "W"], [[], null],
+] as [string[], string | null][]) {
+  eq(dirOf(new Set(keys)), want, `dirOf(${keys.join("+")})`);
   n++;
 }
 console.log(`  괄호 ${n}건`);

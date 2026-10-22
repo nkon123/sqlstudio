@@ -1,7 +1,7 @@
 // 괄호 — 커서를 감싼 ( … ) 의 짝을 강하게 보이고, 짝으로 바로 간다.
 //
 //   Ctrl+]        짝 괄호로 (괄호 옆이면 그 짝, 아니면 감싼 괄호의 끝 ")" 뒤로). 다시 누르면 "(" 앞으로
-//   Ctrl+Shift+]  괄호 메뉴 (parenmenu.ts) — 안쪽 선택·복사 등
+//   Ctrl+Shift+]  괄호 원판 (parenmenu.ts) — 8방향으로 안쪽 선택·복사·실행 등
 //
 // 괄호는 SQL 문법 트리(Parens)로 찾는다 — 문자열·주석 안의 괄호는 세지 않는다.
 
@@ -94,4 +94,15 @@ export function parenHighlight(): Extension {
     },
     { decorations: (v) => v.decorations },
   );
+}
+
+/** 괄호 원판(parenmenu.ts)의 8방향 */
+export type Dir = "NW" | "N" | "NE" | "W" | "E" | "SW" | "S" | "SE";
+
+/** 눌린 방향키들 → 방향 (↑↓ 처럼 맞선 것은 없는 셈) */
+export function dirOf(keys: Set<string>): Dir | null {
+  const v = (keys.has("ArrowDown") ? 1 : 0) - (keys.has("ArrowUp") ? 1 : 0);
+  const h = (keys.has("ArrowRight") ? 1 : 0) - (keys.has("ArrowLeft") ? 1 : 0);
+  const d = `${v < 0 ? "N" : v > 0 ? "S" : ""}${h < 0 ? "W" : h > 0 ? "E" : ""}`;
+  return d ? (d as Dir) : null;
 }

@@ -25,7 +25,7 @@ import { gotoMatchingParen, parenHighlight, parenSelect } from "./brackets";
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import type { Command } from "@codemirror/view";
-import { Annotation, EditorSelection, EditorState, StateEffect, StateField } from "@codemirror/state";
+import { Annotation, EditorSelection, EditorState, Prec, StateEffect, StateField } from "@codemirror/state";
 import { type CaseMode, convertRange } from "./case-convert";
 import { autoFormatExtension, caseWordBefore } from "./autofmt";
 import {
@@ -181,6 +181,18 @@ export class SqlEditor {
           // 커서를 감싼 ( … ) 쌍 — 괄호 옆이 아니어도
           parenHighlight(),
           parenSelect(),
+          // Ctrl+Alt+글자 — Windows 에서는 AltGr 로 보고 한글 입력 상태의 키(ㅣ)를 영문(L)으로 바꿔 찾지 않는다 (CodeMirror).
+          // 그래서 키맵에 두면 한/영이 '한글' 일 때 먹지 않는다 — 물리 키로 직접 받는다
+          Prec.highest(EditorView.domEventHandlers({
+            keydown: (e, view) => {
+              if (!(e.ctrlKey && e.altKey) || e.shiftKey || e.metaKey) return false;
+              const f = e.code === "KeyL" ? () => actions.wrapList() : e.code === "KeyU" ? () => changeCase("lower")(view) : null;
+              if (!f) return false;
+              e.preventDefault();
+              f();
+              return true;
+            },
+          })),
           closeBrackets(),
           highlightActiveLine(),
           highlightSelectionMatches(),

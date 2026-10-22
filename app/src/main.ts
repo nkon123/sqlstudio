@@ -4,6 +4,7 @@
 // (한 탭의 긴 쿼리가 다른 탭을 묶지 않는다 — 세션마다 서버 쪽 스레드가 따로 있다).
 
 import "./mock/install"; // 가짜 DB 모드 (npm run mock) — 맨 먼저
+import { flushUiState } from "./uistate"; // 화면 상태를 데이터 폴더 파일에도 — localStorage 를 쓰기 전에
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -354,6 +355,7 @@ export class App {
     this.refresh();
     getCurrentWindow().onCloseRequested(async (e) => {
       await this.saveTabs(true).catch(() => {});
+      await flushUiState();
       const pending = this.tabs.filter((t) => t.txnPending);
       // 탭을 되살리는 중이면 저장하지 않은 편집은 다음에 켤 때 그대로 나오므로 묻지 않는다
       const dirty = restoreEnabled() ? [] : this.tabs.filter((t) => t.dirty);

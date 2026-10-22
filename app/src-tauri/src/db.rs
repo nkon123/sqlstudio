@@ -84,7 +84,8 @@ pub fn set_data_dir(dir: Option<String>) -> R<String> {
         let skip = [crate::WEBVIEW_FROM, "webview", sqls_core::config::LOCATION_FILE];
         std::fs::create_dir_all(&new).and_then(|_| copy_tree(&cur, &new, &|n| !skip.contains(&n))).map_err(io)?;
         // 포터블의 WebView 데이터(화면 설정·바인드 이력)는 쓰는 중이라 잠겨 있다 — 다시 시작할 때 옮긴다 (crate::take_pending_webview)
-        if cur.join("webview").is_dir() && !new.join("webview").exists() {
+        // 화면 상태 파일(ui-state.json)이 있으면 그것이 함께 복사되어 따로 옮길 것이 없다
+        if cur.join("webview").is_dir() && !new.join("webview").exists() && !cur.join(crate::UI_STATE).is_file() {
             std::fs::write(new.join(crate::WEBVIEW_FROM), cur.join("webview").display().to_string()).map_err(io)?;
         }
     }

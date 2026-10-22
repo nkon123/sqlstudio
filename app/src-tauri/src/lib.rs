@@ -28,6 +28,16 @@ pub(crate) fn closes_sessions(label: &str) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn seed_script_is_plain_js() {
+        let js = super::seed_script(&serde_json::json!({ "ui.theme": "dark", "q": "a\"b'</script>" }), 1700000000000.0);
+        assert!(js.starts_with("(function(){try{var s={"), "{js}");
+        assert!(js.contains("t=1700000000000,"), "{js}");
+        if let Ok(p) = std::env::var("SQLSTUDIO_SEED_OUT") {
+            std::fs::write(p, js).unwrap();
+        }
+    }
+
+    #[test]
     fn only_main_window_closes_sessions() {
         assert!(super::closes_sessions("main"));
         assert!(!super::closes_sessions("dfd-1"));
@@ -35,9 +45,72 @@ mod tests {
     }
 }
 
-/// 포터블이면 WebView 데이터 폴더 (모든 창이 같은 곳을 써야 한다)
+/// 포터블이면 WebView 데이터 폴더 (모든 창이 같은 곳을 써야 한다). 설치판은 None — Tauri 기본(로컬)
+///
+/// 로컬 PC(`%LOCALAPPDATA%\SQLStudio\webview-<데이터 폴더마다 다른 값>`)에 둔다. 데이터 폴더가 네트워크 드라이브면
+/// 그 안에 두었을 때 첫 화면 문서를 받는 데 몇 초씩 걸렸다. 화면 상태는 데이터 폴더의 [`UI_STATE`] 로 따라간다.
+/// 그 파일이 아직 없고 예전 폴더(데이터 폴더 안 webview)가 있으면 이번만 예전 폴더를 쓴다 — 화면이 그 값을 파일로 옮겨 적는다
 pub(crate) fn webview_dir() -> Option<std::path::PathBuf> {
-    sqls_core::config::portable_data_dir().map(|d| d.join("webview"))
+    static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let data = sqls_core::config::portable_data_dir()?;
+        let old = data.join("webview");
+        if !ui_state_path().is_file() && old.is_dir() {
+            return Some(old);
+        }
+        let Some(local) = std::env::var_os("LOCALAPPDATA") else { return Some(old) };
+        let key = data.canonicalize().unwrap_or(data).display().to_string().to_lowercase();
+        Some(std::path::PathBuf::from(local).join("SQLStudio").join(format!("webview-{:016x}", fnv1a(&key))))
+    })
+    .clone()
+}
+
+/// 늘 같은 값이 나오는 짧은 해시 (std 의 해시는 Rust 버전마다 달라질 수 있다)
+fn fnv1a(s: &str) -> u64 {
+    s.bytes().fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+}
+
+/// 화면 상태 파일 (설정 파일 옆) — 화면의 localStorage 를 그대로 (uistate.ts)
+pub(crate) const UI_STATE: &str = "ui-state.json";
+
+fn ui_state_path() -> std::path::PathBuf {
+    sqls_core::config::config_path().parent().map(|p| p.join(UI_STATE)).unwrap_or_else(|| UI_STATE.into())
+}
+
+/// 마지막으로 파일에 적은 시각 (ms) — 저장이 겹쳐도 순서대로, PC 시계가 서로 달라도 늘 커지게
+static UI_STATE_TS: std::sync::Mutex<f64> = std::sync::Mutex::new(0.0);
+
+/// 창을 열 때 화면 코드보다 먼저 돌 스크립트 — 파일이 이 PC 의 localStorage 보다 새것이면 그 내용으로 바꾼다
+fn ui_state_script() -> Option<String> {
+    let text = std::fs::read_to_string(ui_state_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let ts = v.get("ts")?.as_f64()?;
+    let items = v.get("items")?;
+    let mut last = UI_STATE_TS.lock().unwrap_or_else(|e| e.into_inner());
+    *last = last.max(ts);
+    Some(seed_script(items, ts))
+}
+
+fn seed_script(items: &serde_json::Value, ts: f64) -> String {
+    format!(
+        r#"(function(){{try{{var s={items},t={ts},ls=window.localStorage;if(t>+(ls.getItem("__ui_ts")||0)){{ls.clear();for(var k in s)ls.setItem(k,s[k]);ls.setItem("__ui_ts",String(t));}}}}catch(e){{}}}})();"#
+    )
+}
+
+/// 화면 상태 저장 — 실제로 적은 시각을 돌려준다 (화면은 그 값을 기억해 다음 시작 때 비교한다)
+#[tauri::command]
+async fn ui_state_save(ts: f64, items: std::collections::BTreeMap<String, String>) -> Result<f64, String> {
+    let mut last = UI_STATE_TS.lock().unwrap_or_else(|e| e.into_inner());
+    let ts = ts.max(*last + 1.0);
+    let p = ui_state_path();
+    let tmp = p.with_extension("json.tmp");
+    let body = serde_json::json!({ "ts": ts, "items": items }).to_string();
+    std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &p)).map_err(|e| {
+        tracing::warn!("화면 상태 저장 실패: {e}");
+        e.to_string()
+    })?;
+    *last = ts;
+    Ok(ts)
 }
 
 /// WebView2 실행 인자 — 모든 창이 같아야 한다 (같은 데이터 폴더의 WebView 는 인자가 다르면 못 만든다).
@@ -67,7 +140,7 @@ pub(crate) const WEBVIEW_FROM: &str = ".webview-from";
 /// 이전 데이터 폴더의 WebView 데이터를 새 폴더로. 이전 프로세스가 아직 잡고 있을 수 있어 잠깐 기다리며 다시 해 본다
 fn take_pending_webview() {
     let Some(to) = webview_dir() else { return };
-    let Some(mark) = to.parent().map(|d| d.join(WEBVIEW_FROM)) else { return };
+    let Some(mark) = sqls_core::config::portable_data_dir().map(|d| d.join(WEBVIEW_FROM)) else { return };
     let Ok(from) = std::fs::read_to_string(&mark) else { return };
     if !to.exists() {
         for _ in 0..10 {
@@ -244,6 +317,7 @@ pub fn run() {
             import::import_run,
             copydata::copy_plan,
             copydata::copy_run,
+            ui_state_save,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
@@ -263,7 +337,11 @@ pub fn run() {
             let cfg = app.config().app.windows.iter().find(|w| w.label == "main").cloned().ok_or("main 창 설정이 없습니다")?;
             let mut b = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?.additional_browser_args(WEBVIEW_ARGS);
             if let Some(dir) = webview_dir() {
+                tracing::info!("WebView 데이터 폴더 {}", dir.display());
                 b = b.data_directory(dir);
+            }
+            if let Some(js) = ui_state_script() {
+                b = b.initialization_script(js);
             }
             b.build()?;
             // 화면 쪽 '시작(화면 앞)' 의 문서 요청 시각과 비교해 창(WebView) 만들기에 걸린 시간을 본다

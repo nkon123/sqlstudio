@@ -1,6 +1,7 @@
 // 데이터 흐름도 별도 창 — 메인 창과 따로 띄워 두고 본다 (모니터 두 대면 옆에).
 // 프로필의 저장된 분석 결과를 읽으므로, 메인 창의 접속이 끊겨도 그대로 본다.
 
+import "./uistate"; // 화면 상태(흐름도 배치 등)를 데이터 폴더 파일에도
 import { invoke } from "@tauri-apps/api/core";
 import { errOf } from "./api";
 import { DfdView } from "./dfd";

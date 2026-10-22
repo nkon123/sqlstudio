@@ -7,7 +7,8 @@
 //   Ctrl+S           저장 · Ctrl+Shift+S 다른 이름으로 저장
 //   Ctrl+Shift+F     SQL 포맷 (선택 영역 또는 커서 문장)
 //   Ctrl+]           짝 괄호로 (감싼 괄호의 끝 ↔ 처음)
-//   Ctrl+Shift+]     괄호 원판 — 8방향: ← 안쪽 선택 · → 안쪽 복사 · ↑↓ 여는·끝 괄호로 · ↙ 포맷 · ↘ 실행 · ↖↗ 안쪽·바깥 괄호
+//   Ctrl+Shift+]     괄호 안쪽 선택 (넓힌 뒤면 한 겹 안쪽으로) · Ctrl+Shift+[ 바깥 괄호 안쪽으로 넓히기
+//   Ctrl+Alt+] [     같은 높이의 다음·이전 괄호 안쪽으로
 //
 // 여러 곳 편집 (열 편집):
 //   Alt+드래그            사각형(열) 선택
@@ -20,8 +21,7 @@ import { sql } from "@codemirror/lang-sql";
 import { ORACLE, oracleHighlight } from "./oracle-dialect";
 import { snippetSource } from "./snippets";
 import { quickMenu } from "./quickmenu";
-import { gotoMatchingParen, parenHighlight } from "./brackets";
-import { parenMenu } from "./parenmenu";
+import { gotoMatchingParen, parenHighlight, parenSelect } from "./brackets";
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import type { Command } from "@codemirror/view";
@@ -173,7 +173,7 @@ export class SqlEditor {
           bracketMatching(),
           // 커서를 감싼 ( … ) 쌍 — 괄호 옆이 아니어도
           parenHighlight(),
-          parenMenu({ run: actions.runStatement, format: actions.format }),
+          parenSelect(),
           closeBrackets(),
           highlightActiveLine(),
           highlightSelectionMatches(),

@@ -1,7 +1,7 @@
 // npm test — 괄호 쌍 찾기 (문법 트리로 — 문자열·주석 안의 괄호는 세지 않는다)
 import { sql } from "@codemirror/lang-sql";
 import { EditorState } from "@codemirror/state";
-import { dirOf, enclosingPair, innerRange, outerPair } from "./brackets";
+import { childPairs, enclosingPair, innerRange, outerPair, siblingPairs, wider } from "./brackets";
 import { ORACLE } from "./oracle-dialect";
 
 let n = 0;
@@ -46,12 +46,28 @@ eq(at("select f(a /* ) */, |b) from t"), "(a /* ) */, b)", "주석 안 )");
   eq(doc.slice(r.from, r.to), "select a\n    from t", "서브쿼리 안쪽");
   n++;
 }
-// 원판 방향 — 방향키 둘이면 대각선, 맞선 것은 없는 셈
-for (const [keys, want] of [
-  [["ArrowUp"], "N"], [["ArrowRight"], "E"], [["ArrowUp", "ArrowLeft"], "NW"], [["ArrowDown", "ArrowRight"], "SE"],
-  [["ArrowUp", "ArrowDown"], null], [["ArrowUp", "ArrowDown", "ArrowLeft"], "W"], [[], null],
-] as [string[], string | null][]) {
-  eq(dirOf(new Set(keys)), want, `dirOf(${keys.join("+")})`);
-  n++;
+// Ctrl+Shift+[ — 지금 고른 것보다 넓은 가장 안쪽 괄호
+{
+  const doc = "select a from (select nvl(c, 0) from t) x where (b)";
+  const state = EditorState.create({ doc, extensions: [sql({ dialect: ORACLE })] });
+  const text = (p: ReturnType<typeof wider>) => (p ? doc.slice(p.open, p.close + 1) : null);
+  const c = doc.indexOf("c, 0");
+  eq(text(wider(state, c, c + 1)), "(c, 0)", "글자 하나 → 감싼 괄호");
+  eq(text(wider(state, c, c + 4)), "(select nvl(c, 0) from t)", "안쪽 전체 → 바깥");
+  const sub = doc.indexOf("select nvl");
+  eq(text(wider(state, sub, sub + "select nvl(c, 0) from t".length)), null, "가장 바깥이면 없음");
+  n += 3;
+}
+// 안쪽으로 들어갈 곳 · 같은 높이의 괄호들
+{
+  const doc = "select * from (select a from t where b in (1, 2) and nvl(c, 0) = 1) x where (y)";
+  const state = EditorState.create({ doc, extensions: [sql({ dialect: ORACLE })] });
+  const texts = (ps: { open: number; close: number }[]) => ps.map((p) => doc.slice(p.open, p.close + 1)).join(" | ");
+  const sub = enclosingPair(state, doc.indexOf("where b"))!;
+  eq(texts(childPairs(state, sub)), "(1, 2) | (c, 0)", "바로 안의 괄호들 (더 깊은 것 빼고)");
+  const inList = enclosingPair(state, doc.indexOf("1, 2"))!;
+  eq(texts(siblingPairs(state, inList)), "(1, 2) | (c, 0)", "같은 높이");
+  eq(texts(siblingPairs(state, sub)), "(select a from t where b in (1, 2) and nvl(c, 0) = 1) | (y)", "맨 바깥 높이");
+  n += 3;
 }
 console.log(`  괄호 ${n}건`);

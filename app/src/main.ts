@@ -29,7 +29,7 @@ import { openCopyData } from "./copydata";
 import { openHistory } from "./history";
 import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
-import { fromLineStart } from "./autofmt";
+import { fromLineStart, hasManualLayout, manualLayout } from "./autofmt";
 import { initSession, loadSession, restoreEnabled, saveSession } from "./tabsession";
 import { loadSnippets } from "./snippets";
 import { alertBox, applyTheme, bindBox, confirmBox, h, modal, passwordBox, toast } from "./ui";
@@ -293,7 +293,8 @@ export class App {
     const r = formatSql(src);
     if (!r.ok) return toast(r.reason, "error", 6000);
     if (r.text === src) return toast("이미 정리되어 있습니다", "info");
-    view.dispatch({ changes: { from, to, insert: r.text }, selection: { anchor: from, head: from + r.text.length }, userEvent: "input.format", scrollIntoView: true });
+    // 직접 포맷하면 손으로 배치한 표시도 지운다 (다시 자동 포맷의 대상이 된다)
+    view.dispatch({ changes: { from, to, insert: r.text }, selection: { anchor: from, head: from + r.text.length }, effects: manualLayout(from, from + r.text.length, false), userEvent: "input.format", scrollIntoView: true });
     t.editor.focus();
   }
 
@@ -335,7 +336,8 @@ export class App {
     if (!(await modal("목록 나누기", body, [{ label: "취소", value: false }, { label: "나누기", value: true, kind: "primary" }], { wide: true }))) return;
     try { localStorage.setItem("listwrap.rows", String(rows())); } catch { /* 기억 못 해도 된다 */ }
     const text = wrapList(span.items, rows(), col, comma);
-    view.dispatch({ changes: { from: a, to: b, insert: text }, selection: { anchor: a, head: a + text.length }, userEvent: "input.format", scrollIntoView: true });
+    // 자동 포맷(실행할 때·; 칠 때)이 다시 한 줄에 하나로 풀지 않게 표시해 둔다
+    view.dispatch({ changes: { from: a, to: b, insert: text }, selection: { anchor: a, head: a + text.length }, effects: manualLayout(a, a + text.length), userEvent: "input.format", scrollIntoView: true });
     t.editor.focus();
   }
 
@@ -647,7 +649,8 @@ export class App {
     let cur = await this.currentStatement(t);
     if (!cur) return toast("실행할 문장이 없습니다", "error");
     // 자동 포맷: 실행하는 문장을 먼저 정리 (선택해서 실행할 때는 그대로)
-    if (autoFormat().onRun && !t.editor.selection()) {
+    // 손으로 배치한 곳(SELECT 목록을 몇 줄로 등)이 든 문장은 그대로
+    if (autoFormat().onRun && !t.editor.selection() && !hasManualLayout(t.editor.view.state, cur.from, cur.to)) {
       // 첫 글자 앞 들여쓰기도 같이 (앞에 공백만 있을 때)
       const start = fromLineStart(t.editor.view.state, cur.from);
       const src = t.editor.view.state.sliceDoc(start, cur.to);

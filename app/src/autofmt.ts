@@ -6,8 +6,8 @@
 // 정리는 Ctrl+Shift+F 와 같은 포맷(formatSql)이라, 같은 SQL 이 아니게 되면 손대지 않는다.
 
 import { syntaxTree } from "@codemirror/language";
-import { EditorState, type Extension } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { EditorState, type Extension, StateEffect, StateField } from "@codemirror/state";
+import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 import { autoFormat, formatSql, loadPrefs, startsWithDml } from "./format";
 import { FUNCS, KEYWORDS } from "./sqlfmt";
 
@@ -66,6 +66,36 @@ function lastSemicolon(s: string): number {
 }
 
 /** 줄 끝에서 ; 를 치면 — 그 문장을 ; 까지 정리해서 넣는다. 정리하지 않으면 false (평소대로 ; 만 들어간다) */
+// ── 손으로 배치한 곳 ─────────────────────────────────
+// SELECT 목록을 몇 줄로(Ctrl+Alt+L) 처럼 손으로 맞춘 곳은 자동 포맷(실행할 때·; 칠 때)이 다시 풀지 않는다.
+// 글이 바뀌어도 따라 움직이는 보이지 않는 표시. Ctrl+Shift+F 로 직접 포맷하면 지운다.
+const setManual = StateEffect.define<{ from: number; to: number; on: boolean }>();
+const manualMark = Decoration.mark({});
+const manualField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(set, tr) {
+    set = set.map(tr.changes);
+    for (const e of tr.effects) {
+      if (!e.is(setManual)) continue;
+      const { from, to, on } = e.value;
+      set = on ? set.update({ add: [manualMark.range(from, to)] }) : set.update({ filter: (a, b) => b < from || a > to, filterFrom: from, filterTo: to });
+    }
+    return set;
+  },
+});
+
+/** 손으로 배치했다고 표시 (자동 포맷이 건드리지 않게) — 같은 트랜잭션에 넣을 효과 */
+export function manualLayout(from: number, to: number, on = true) {
+  return setManual.of({ from, to, on });
+}
+
+/** 그 구간에 손으로 배치한 곳이 있나 */
+export function hasManualLayout(state: EditorState, from: number, to: number): boolean {
+  let hit = false;
+  state.field(manualField, false)?.between(from, to, () => { hit = true; return false; });
+  return hit;
+}
+
 function formatOnSemicolon(view: EditorView, from: number, to: number): boolean {
   const st = view.state;
   if (from !== to || st.selection.ranges.length > 1) return false;
@@ -84,7 +114,7 @@ function formatOnSemicolon(view: EditorView, from: number, to: number): boolean 
   if (lineFrom === start && st.doc.lineAt(start).from !== start) return false;
   start = lineFrom;
   const text = st.sliceDoc(start, from) + ";";
-  if (!startsWithDml(text)) return false;
+  if (!startsWithDml(text) || hasManualLayout(st, start, from)) return false;
   const r = formatSql(text);
   if (!r.ok || r.text === text) return false;
   view.dispatch({ changes: { from: start, to, insert: r.text }, selection: { anchor: start + r.text.length }, userEvent: "input.format", scrollIntoView: true });
@@ -111,6 +141,7 @@ const pasteFilter = EditorState.transactionFilter.of((tr) => {
 
 export function autoFormatExtension(): Extension {
   return [
+    manualField,
     EditorView.inputHandler.of((view, from, to, text) => {
       if (text.length !== 1) return false;
       if (BOUNDARY.test(text)) caseWordBefore(view, from, text);

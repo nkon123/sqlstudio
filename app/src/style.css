@@ -26,7 +26,7 @@ html, body, #app { height: 100%; margin: 0; }
 body { background: var(--bg); color: var(--text); font: 13px/1.4 var(--sans); overflow: hidden; user-select: none; }
 /* 글 고르기는 내용이 있는 곳에서만 — 메뉴·단추·목록·탭을 끌다가 화면 여기저기가 칠해지지 않게.
    입력 칸·편집기·출력·실행계획·구조·AI 대화·오류와 값 보기·값의 출처·알림은 골라 복사할 수 있다 */
-input, textarea, [contenteditable="true"], .cm-content, pre, code, .pane.desc, .ai-log, .modal-text, .err, .lin-box, #toasts { user-select: text; }
+input, textarea, [contenteditable="true"], .cm-content, pre, code, .dfd-side, .pane.desc, .ai-log, .modal-text, .err, .lin-box, #toasts { user-select: text; }
 #app { display: flex; flex-direction: column; }
 button {
   font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line);
@@ -439,6 +439,10 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .dfd-side h4 { margin: 8px 0 2px; font-size: 12px; color: var(--dim); }
 .dfd-side .hint { color: var(--dim); margin: 4px 0; }
 .dfd-title { font-family: var(--mono); font-weight: 600; word-break: break-all; }
+.dfd-copy { padding: 0 4px; font: 12px var(--sans); background: transparent; border: 1px solid transparent; color: var(--dim); cursor: pointer; vertical-align: 1px; }
+.dfd-copy:hover { border-color: var(--line); color: var(--text); }
+.dfd-side button { user-select: none; }
+.dfd-side .row { flex-wrap: wrap; }
 .dfd-legend { display: grid; gap: 3px; margin: 8px 0; }
 .dfd-sw { display: inline-block; width: 22px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
 

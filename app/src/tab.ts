@@ -83,7 +83,10 @@ export class Tab {
   /** PL/SQL 분석 화면 (탭의 접속 프로필 기준) */
   analysis(): AnalysisView {
     if (!this.an) {
-      this.an = new AnalysisView(() => this.conn?.id, () => this.showEditor());
+      this.an = new AnalysisView(() => this.conn?.id, () => this.showEditor(), {
+        source: (id, owner, name, kind, line) => void this.app.openSource(id, owner, name, kind, line),
+        table: (id, name) => void this.app.openTable(id, name),
+      });
       this.root.append(this.an.el);
     }
     if (this.cmp) this.cmp.el.hidden = true;

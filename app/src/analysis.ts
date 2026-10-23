@@ -8,7 +8,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api, errOf, type Provider } from "./api";
-import type { DfdView } from "./dfd";
+import type { DfdSourceHooks, DfdView } from "./dfd";
 import { confirmBox, field, h, modal, toast } from "./ui";
 import { ResultGrid } from "./grid";
 import { showMenu, type MenuItem } from "./ctxmenu";
@@ -197,7 +197,12 @@ export class AnalysisView {
   /** 흐름도에 마지막으로 가운데 둔 것 — 탭을 오갈 때 사용자가 옮긴 가운데를 덮어쓰지 않게 */
   private dfdCentered: string | null = null;
 
-  constructor(private sessionId: () => number | undefined, private onClose: () => void) {
+  /** 흐름도에서 소스 열기 — 단위 상세(줄 번호)를 한 번만 읽는다. 결과가 바뀌면 비운다 */
+  private unitCache = new Map<string, Promise<{ unit: UnitResult }>>();
+
+  /** code: 소스·테이블 구조를 새 탭·팝업으로 (앱이 준다) */
+  constructor(private sessionId: () => number | undefined, private onClose: () => void,
+    private code?: { source: (id: number, owner: string, name: string, kind: string, line?: number) => void; table: (id: number, name: string) => void }) {
     this.startBtn.onclick = () => this.start();
     try {
       const saved = JSON.parse(localStorage.getItem("analysis.codeFolders") ?? "[]");
@@ -990,6 +995,7 @@ export class AnalysisView {
       this.dfd ??= new DfdView((id) => { this.view = "calls"; this.focusNode = id; this.render(); }, {
         popout: (center, dir) => invoke("open_dfd_window", { ...this.src(), center, dir }).catch((e) => toast(errOf(e).message, "error")),
         profile: async () => this.set ?? (await this.liveName()),
+        source: this.code ? this.dfdSource() : undefined,
       });
       if (this.view !== "dfd") return;
     }
@@ -997,11 +1003,64 @@ export class AnalysisView {
     // 가운데: 방금 고른 것 → 호출 관계에서 보던 서브프로그램 → 열어 둔 단위. 바뀌었을 때만 옮긴다 (사용자가 옮긴 가운데를 지킨다)
     const want = this.dfdFocus ?? this.defaultDfdTarget(g);
     this.dfdFocus = null;
+    if (this.dfdOf !== g) this.unitCache.clear();
     if (this.dfdOf !== g || (want && `${want.unit}:${want.focus}` !== this.dfdCentered)) {
       this.dfdOf = g;
       this.dfd.setData(g, want?.focus ?? null, want ? "both" : null, want?.unit ?? null);
       this.dfdCentered = want ? `${want.unit}:${want.focus}` : null;
     }
+  }
+
+  /** 흐름도 노드 → 소스. 처리는 그 노드(패키지 단위면 패키지)의 단위, 줄은 단위 소스(ALL_SOURCE)의 줄 */
+  private dfdSource(): DfdSourceHooks {
+    const nodeOf = (id: string) => {
+      const g = this.dfdOf;
+      if (!g) return null;
+      const n = g.nodes.find((x) => x.id === id);
+      if (n) return { node: n, unit: n.unit };
+      // 패키지 단위: 그 패키지의 아무 서브프로그램의 단위
+      const m = g.nodes.find((x) => x.id.split(".").slice(0, 2).join(".") === id && x.id.split(".").length >= 3);
+      return m ? { node: null, unit: m.unit } : null;
+    };
+    const unitRef = (key: string) => {
+      const p = key.split(".");
+      const type = p.pop()!.replace(/_/g, " ");
+      return { owner: p[0], name: p.slice(1).join("."), type };
+    };
+    // Pro*C·XML 은 번역한 글이라 줄이 파일과 다르고, DB 에도 없다
+    const inDb = (key: string) => !/^(PROC|XML) BODY$/.test(unitRef(key).type);
+    const conn = () => (this.set ? undefined : this.sessionId());
+    return {
+      can: (id, type) => {
+        if (conn() == null) return false;
+        if (type === "table") return true;
+        const r = nodeOf(id);
+        return !!r && inDb(r.unit);
+      },
+      open: (id, type, line) => {
+        const c = conn();
+        if (c == null) return toast("먼저 접속하세요", "error");
+        if (type === "table") return this.code?.table(c, id);
+        const r = nodeOf(id);
+        if (!r) return;
+        const u = unitRef(r.unit);
+        this.code?.source(c, u.owner, u.name, u.type, line ?? r.node?.start_line);
+      },
+      lines: async (proc, table) => {
+        const r = nodeOf(proc);
+        const src = this.src();
+        if (!r || !src) return [];
+        let p = this.unitCache.get(r.unit);
+        if (!p) { p = invoke<{ unit: UnitResult }>("analysis_unit", { ...src, key: r.unit }); this.unitCache.set(r.unit, p); }
+        const { unit } = await p;
+        const sub = r.node && unit.subprograms.find((s) => s.start_line === r.node!.start_line && s.end_line === r.node!.end_line);
+        const facts = sub ? sub.facts : unit.facts;
+        const last = (x: string) => x.toUpperCase().split(".").pop();
+        const want = table.toUpperCase();
+        const t = facts.tables.find((x) => x.name.toUpperCase() === want) ?? facts.tables.find((x) => last(x.name) === last(table));
+        return t?.lines ?? [];
+      },
+    };
   }
 
   private defaultDfdTarget(g: Integrated): DfdTarget | null {

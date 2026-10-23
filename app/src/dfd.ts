@@ -7,10 +7,10 @@ import type { Core, EdgeSingular, NodeSingular } from "cytoscape";
 import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { errOf } from "./api";
-import { type Base, type DfdSource, type EdgeKind, type XmlMode, buildBase, buildView, busiest, edgesOf, fileBoxId, flattenBoxes, hasXml, packageOf } from "./dfd-model";
+import { type Base, type BaseEdge, type DfdSource, type EdgeKind, type NodeType, type XmlMode, buildBase, buildView, busiest, edgesOf, fileBoxId, flattenBoxes, hasXml, packageOf } from "./dfd-model";
 import { BOX_TOP, LAYOUTS, VERT_LABEL, type LayoutKind, type Placed, place } from "./dfd-layout";
 import { field, h, modal, toast } from "./ui";
-import { showMenu } from "./ctxmenu";
+import { showMenu, type MenuItem } from "./ctxmenu";
 import type { DfdReport, Report } from "./dfd-report";
 
 /** XML 쿼리(화면) 상자 색 */
@@ -19,6 +19,16 @@ export const COLORS = { read: "#2f6fdd", write: "#e07a1f", call: "#8a93a0", flow
 export const KIND_KO: Record<EdgeKind, string> = { read: "읽기", write: "쓰기", call: "호출", trig: "트리거 발동", flow: "커서 흐름", use: "쓰임 (연산 모름)" };
 /** 이보다 크면 처음에는 가장 바쁜 노드를 가운데로 */
 const WHOLE_LIMIT = 80;
+
+/** 흐름도에서 소스로 — 분석 탭이 준다 (접속이 있어야 연다). 별도 창에는 없다 */
+export interface DfdSourceHooks {
+  /** 소스(처리·트리거)나 구조(테이블)를 열 수 있는지 — Pro*C·XML 은 번역한 글이라 열지 않는다 */
+  can(id: string, type: NodeType): boolean;
+  /** line: 그 소스의 줄 */
+  open(id: string, type: NodeType, line?: number): void;
+  /** 처리가 그 테이블을 읽고 쓰는 줄 */
+  lines(proc: string, table: string): Promise<number[]>;
+}
 
 export type Libs = { cytoscape: typeof import("cytoscape"); ELK: typeof import("elkjs/lib/elk.bundled.js").default };
 let libs: Promise<Libs> | null = null;
@@ -64,7 +74,7 @@ export class DfdView {
 
   /** profile: 보고서를 둘 결과 폴더 이름 (없으면 보고서 단추를 숨긴다) */
   constructor(private onOpenNode: ((id: string) => void) | null,
-    private opts: { popout?: (center: string | null, dir: string) => void; profile?: () => Promise<string | null> } = {}) {
+    private opts: { popout?: (center: string | null, dir: string) => void; profile?: () => Promise<string | null>; source?: DfdSourceHooks } = {}) {
     this.centerIn.setAttribute("list", "dfd-names");
     const tb = h("div", { class: "dfd-toolbar" },
       this.centerIn, this.names, this.dirSel, this.depthSel,
@@ -320,6 +330,11 @@ export class DfdView {
     cy.on("tap", "node", (ev) => this.showNode(ev.target.data("ref")));
     cy.on("tap", "edge", (ev) => this.showEdge(ev.target as EdgeSingular));
     cy.on("tap", (ev) => { if (ev.target === cy) this.sideHint(); });
+    cy.on("cxttap", "node", (ev) => {
+      const n = ev.target as NodeSingular;
+      const oe = ev.originalEvent as MouseEvent;
+      if (n.data("type") !== "lane") this.nodeMenu(n.data("ref"), oe.clientX, oe.clientY);
+    });
     cy.on("dbltap", "node", (ev) => {
       const n = ev.target as NodeSingular;
       // 파일 상자: 파일 단위로 바꿔 그 파일을 가운데로
@@ -345,7 +360,7 @@ export class DfdView {
       h("div", { class: "dfd-legend" },
         ...(Object.entries(COLORS) as [EdgeKind, string][]).map(([k, c]) => h("div", {}, h("span", { class: "dfd-sw", style: `background:${c}` }), KIND_KO[k]))),
       h("div", { class: "hint" }, "점선(·····)은 추정 — 소스에서 직접 확인하지 못하고 사전이나 모델로 채운 선입니다."),
-      h("div", { class: "hint" }, "클릭: 상세 · 더블클릭: 가운데로 · 마우스 올리기: 닿는 선만 진하게 · ＋: 화면 밖으로 더 이어짐"));
+      h("div", { class: "hint" }, "클릭: 상세 · 더블클릭: 가운데로 · 오른쪽 클릭: 소스 열기·이름 복사 · 마우스 올리기: 닿는 선만 진하게 · ＋: 화면 밖으로 더 이어짐"));
   }
 
   /** 파일 상자 — 안의 쿼리 id 들 */
@@ -353,7 +368,7 @@ export class DfdView {
     const b = this.base!;
     const qs = [...b.nodes.values()].filter((n) => n.file === file);
     const shown = new Set(this.cy?.getElementById(fileBoxId(file)).children().map((n) => n.data("ref") as string) ?? []);
-    this.side.replaceChildren(h("h4", {}, "화면 (XML 파일)"), h("div", { class: "dfd-title" }, file),
+    this.side.replaceChildren(h("h4", {}, "화면 (XML 파일)"), this.title(file),
       h("div", { class: "row" },
         h("button", { class: "small", title: "파일 단위로 바꿔 이 파일을 가운데로", onclick: () => { this.xmlSel.value = "file"; this.rebase(file); } }, "파일로 가운데")),
       h("h4", {}, `쿼리 ${qs.length}${shown.size < qs.length ? ` (그림에 ${shown.size})` : ""}`),
@@ -371,15 +386,16 @@ export class DfdView {
     const { ins, outs } = edgesOf(b, id);
     const row = (e: (typeof ins)[number], other: string) => h("li", {},
       h("a", { href: "#", class: "an-link", onclick: (ev: Event) => { ev.preventDefault(); this.showNode(other); } }, other),
-      h("small", { class: "dim" }, ` ${KIND_KO[e.kind]}${e.label && e.kind !== "read" ? ` ${e.label}` : ""}${e.lines?.length ? ` · ${e.lines.join(", ")}행` : ""}`));
+      h("small", { class: "dim" }, ` ${KIND_KO[e.kind]}${e.label && e.kind !== "read" ? ` ${e.label}` : ""}`), this.lineLinks(e));
     this.side.replaceChildren(
       h("h4", {}, { proc: this.unitSel.value === "pkg" ? "처리 (패키지)" : "처리 (프로시저)", trig: "트리거", table: "테이블",
         xml: n.file ? "화면 (XML 쿼리)" : "화면 (XML 파일)", xmlfile: "화면 (XML 파일)" }[n.type]),
-      h("div", { class: "dfd-title" }, id),
+      this.title(id),
       n.file ? h("div", {}, h("a", { href: "#", class: "an-link", onclick: (ev: Event) => { ev.preventDefault(); this.showFile(n.file!); } }, `파일 ${n.file}`)) : "",
       n.summary ? h("p", {}, n.summary) : "",
       n.commits ? h("div", { class: "warn" }, "COMMIT/ROLLBACK 함") : "",
       h("div", { class: "row" },
+        this.canOpen(id) ? h("button", { class: "small primary", title: n.type === "table" ? "컬럼 목록" : "소스를 새 탭에", onclick: () => this.openNode(id) }, n.type === "table" ? "구조 보기" : "소스 열기") : "",
         h("button", { class: "small", onclick: () => this.setCenter(id) }, "가운데로"),
         h("button", { class: "small", onclick: () => { this.hidden.add(id); this.draw(); } }, "숨기기"),
         this.onOpenNode && n.type !== "table" && n.id.split(".").length >= 2 && (n.type === "xml" ? !!n.file : this.unitSel.value === "proc") ? h("button", { class: "small", title: "호출 관계 탭에서 본다", onclick: () => this.onOpenNode?.(id) }, "상세") : ""),
@@ -390,11 +406,62 @@ export class DfdView {
   private showEdge(e: EdgeSingular) {
     const kind = e.data("kind") as EdgeKind;
     this.side.replaceChildren(h("h4", {}, KIND_KO[kind]),
-      h("div", { class: "dfd-title" }, e.source().data("ref")), h("div", { class: "dim" }, "↓"), h("div", { class: "dfd-title" }, e.target().data("ref")),
+      this.title(e.source().data("ref")), h("div", { class: "dim" }, "↓"), this.title(e.target().data("ref")),
       e.data("label") && kind !== "use" ? h("p", {}, kind === "write" ? `연산 ${e.data("label")}` : e.data("label")) : "",
       e.data("guess") ? h("p", { class: "warn" }, kind === "use"
         ? "사전(ALL_DEPENDENCIES)에는 참조한다고 나오지만 소스에서 쓰는 곳을 찾지 못했습니다. '확인 필요' 목록을 보세요."
-        : "추정 — 소스에서 직접 확인하지 못했습니다 (모델이 사전·동적 SQL 을 보고 추정).") : "");
+        : "추정 — 소스에서 직접 확인하지 못했습니다 (모델이 사전·동적 SQL 을 보고 추정).") : "",
+      this.lineLinks(this.base?.edges.find((x) => x.s === e.source().data("ref") && x.t === e.target().data("ref") && x.kind === kind)));
+  }
+
+  /** 이름 + 복사 단추 */
+  private title(id: string): HTMLElement {
+    return h("div", { class: "dfd-title" }, id, " ",
+      h("button", { class: "icon dfd-copy", title: "이름 복사", onclick: () => copy(id) }, "⧉"));
+  }
+
+  private canOpen(id: string): boolean {
+    const n = this.base?.nodes.get(id);
+    return !!n && !!this.opts.source?.can(id, n.type);
+  }
+
+  private openNode(id: string, line?: number) {
+    const n = this.base?.nodes.get(id);
+    if (n) this.opts.source?.open(id, n.type, line);
+  }
+
+  /** 선이 소스의 몇 행인지 — 누르면 그 줄로. 호출선은 부르는 쪽, 읽기·쓰기는 처리 쪽 소스 */
+  private lineLinks(e: BaseEdge | undefined): HTMLElement | "" {
+    if (!e) return "";
+    const hooks = this.opts.source;
+    const type = (x: string) => this.base?.nodes.get(x)?.type;
+    let proc: string, lines: Promise<number[]>;
+    if (e.kind === "call") { proc = e.s; lines = Promise.resolve(e.lines ?? []); }
+    else if (e.kind === "read" || e.kind === "write" || e.kind === "use") {
+      proc = type(e.s) === "table" ? e.t : e.s;
+      const table = proc === e.s ? e.t : e.s;
+      if (!hooks || !this.canOpen(proc)) return "";
+      lines = hooks.lines(proc, table).catch(() => []);
+    } else return "";
+    const span = h("small", { class: "dfd-lines" });
+    void lines.then((ls) => {
+      if (!ls.length) return;
+      const open = !!hooks && this.canOpen(proc);
+      span.replaceChildren(" · ", ...ls.flatMap((l, i) => [i ? ", " : "", open
+        ? h("a", { href: "#", class: "an-link", title: `${proc} 의 ${l}행을 새 탭에`, onclick: (ev: Event) => { ev.preventDefault(); this.openNode(proc, l); } }, String(l))
+        : String(l)]), "행");
+    });
+    return span;
+  }
+
+  private nodeMenu(id: string, x: number, y: number) {
+    const n = this.base?.nodes.get(id);
+    if (!n) return;
+    const items: MenuItem[] = [{ title: id }];
+    if (this.canOpen(id)) items.push({ label: n.type === "table" ? "구조 보기" : "소스 열기", hint: n.type === "table" ? "컬럼" : "새 탭", run: () => this.openNode(id) });
+    items.push({ label: "이름 복사", run: () => copy(id) });
+    if (n.type !== "xmlfile") items.push({ sep: true }, { label: "가운데로", run: () => this.setCenter(id) }, { label: "숨기기", run: () => { this.hidden.add(id); this.draw(); } });
+    showMenu(x, y, items);
   }
 
   private async savePng() {
@@ -413,6 +480,10 @@ export class DfdView {
       toast(errOf(e).message, "error");
     }
   }
+}
+
+function copy(text: string) {
+  navigator.clipboard.writeText(text).then(() => toast(`복사: ${text}`, "ok", 1500)).catch(() => {});
 }
 
 /** 흐름도 그림 모양 — 보고서 편집기도 같은 것을 쓰고 덧붙인다 */

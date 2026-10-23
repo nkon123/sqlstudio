@@ -1239,6 +1239,23 @@ export class App {
 
   // ── 컬럼 팝업 ────────────────────────────────────
 
+  /** 객체 소스(DDL)를 새 탭에 — line 은 소스(ALL_SOURCE)의 줄 번호 */
+  async openSource(id: number, owner: string, name: string, kind: string, line?: number) {
+    const ddl = await api.getDdl(id, kind, `"${owner}"."${name}"`).catch((e) => `-- ${errOf(e).message}`);
+    const nt = this.newTab(true, ddl);
+    if (line) {
+      // DDL 앞의 빈 줄을 건너 CREATE 줄이 소스의 1번째 줄
+      const base = ddl.split("\n").findIndex((l) => /^\s*CREATE\b/i.test(l));
+      nt.editor.gotoLine((base < 0 ? 0 : base) + line);
+    }
+  }
+
+  /** 테이블 구조(컬럼) 팝업 — name: "OWNER.TABLE" 또는 TABLE */
+  async openTable(id: number, name: string) {
+    const q = name.split(".").map((p) => `"${p}"`).join(".");
+    try { this.openColumns(await api.describe(id, q)); } catch (e) { toast(errOf(e).message, "error"); }
+  }
+
   private openColumns(d: TableDesc, at?: { x: number; y: number }, alias?: string) {
     const t = this.active;
     // 캐시로 먼저 띄웠으면 기본값·인덱스·통계를 뒤에서 채운다
@@ -1271,13 +1288,7 @@ export class App {
             try { return this.openColumns(await api.describe(id, `"${owner}"."${name}"`)); } catch (e) { return toast(errOf(e).message, "error"); }
           }
         }
-        const ddl = await api.getDdl(id, kind, `"${owner}"."${name}"`).catch((e) => `-- ${errOf(e).message}`);
-        const nt = this.newTab(true, ddl);
-        if (line) {
-          // DDL 앞의 빈 줄을 건너 CREATE 줄이 소스의 1번째 줄
-          const base = ddl.split("\n").findIndex((l) => /^\s*CREATE\b/i.test(l));
-          nt.editor.gotoLine((base < 0 ? 0 : base) + line);
-        }
+        await this.openSource(id, owner, name, kind, line);
       },
       usage: (column) => {
         const t = this.active;
@@ -1616,15 +1627,7 @@ export class App {
     const id = t.conn.id;
     // 편집 모드면 ROWID 를 붙여 다시 조회한 결과라 열 위치가 원래 쿼리와 다르다 — 이름으로만 찾는다
     void showColumnSource(id, q.sql, t.grid.isEditing() ? null : col, column, {
-      openSource: async (owner, name, kind, line) => {
-        const ddl = await api.getDdl(id, kind, `"${owner}"."${name}"`).catch((e) => `-- ${errOf(e).message}`);
-        const nt = this.newTab(true, ddl);
-        if (line) {
-          // DDL 앞의 빈 줄을 건너 CREATE 줄이 소스의 1번째 줄
-          const base = ddl.split("\n").findIndex((l) => /^\s*CREATE\b/i.test(l));
-          nt.editor.gotoLine((base < 0 ? 0 : base) + line);
-        }
-      },
+      openSource: (owner, name, kind, line) => this.openSource(id, owner, name, kind, line),
       showUsage: (table, c) => void showUsage(id, table, c, async (owner, name, kind) =>
         this.newTab(true, await api.getDdl(id, kind, `"${owner}"."${name}"`).catch((e) => `-- ${errOf(e).message}`))),
       openAnalysis: () => { t.analysis(); },

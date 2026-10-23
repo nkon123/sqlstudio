@@ -267,7 +267,10 @@ const DB: Record<string, (a: Args) => unknown> = {
     const uses = n === "ORDER_ITEMS" ? [dep("SCOTT", "ORDERS", "TABLE", "FK FK_ITEMS_ORDER")] : n === "EMP" ? [dep("SCOTT", "DEPT", "TABLE", "FK FK_EMP_DEPT")] : [];
     return { object: `SCOTT.${n}`, used_by: by, uses };
   },
-  get_ddl: (a) => { const t = findTable(a.name as string); return t ? ddlOf(t.desc) : `-- (가짜 모드) ${a.objectType} ${a.name} 의 소스는 없습니다`; },
+  get_ddl: (a) => {
+    // 흐름도의 가짜 패키지 — 줄 번호가 보이게
+    if (String(a.name).includes("PKG_SAL")) return `\n  CREATE OR REPLACE PACKAGE BODY "SCOTT"."PKG_SAL" AS\n${Array.from({ length: 39 }, (_, i) => `  -- ${i + 2}행`).join("\n")}`;
+    const t = findTable(a.name as string); return t ? ddlOf(t.desc) : `-- (가짜 모드) ${a.objectType} ${a.name} 의 소스는 없습니다`; },
   complete: (a) => complete(a as { text: string; cursor: number }),
   completion_status: () => ({ profile: "가짜 DB", phase: "ready", objects: Object.keys(TABLES).length + OTHER_OBJECTS.length, columns: Object.values(TABLES).reduce((n, t) => n + t.desc.columns.length, 0) }),
   refresh_completion: () => null,
@@ -300,11 +303,42 @@ const LOCAL: Record<string, (a: Args) => unknown> = {
   write_sql_file: (a) => { localStorage.setItem(`mock.file:${a.path}`, String(a.text)); return null; },
   // 분석 화면을 열 수 있게 — 결과는 없다. 중단된 가져오기는 localStorage "mock.pending" 으로 시험한다
   analysis_sets: () => [],
+  // 흐름도를 볼 수 있게 — 패키지 하나(서브프로그램 둘)와 테이블 둘
+  analysis_dir: () => "C:/mock/analysis",
+  analysis_result: () => MOCK_ANALYSIS,
+  analysis_unit: () => ({ unit: MOCK_UNIT, chunks: [] }),
   analysis_pending_imports: () => { try { return JSON.parse(localStorage.getItem("mock.pending") ?? "[]"); } catch { return []; } },
   analysis_discard_import: (a) => {
     try { localStorage.setItem("mock.pending", JSON.stringify(JSON.parse(localStorage.getItem("mock.pending") ?? "[]").filter((p: { id: string }) => p.id !== a.id))); } catch { /* 없음 */ }
     return null;
   },
+};
+
+const MOCK_FACTS = (tables: { name: string; ops: string; lines: number[] }[]) =>
+  ({ tables, calls: [], sequences: [], dynamic_sql: [], transactions: [], raises: [], handles: [], swallowed: [], complexity: 2, lines: 20 });
+const MOCK_NODE = (path: string, start_line: number, end_line: number, commits: boolean, summary: string) => ({
+  id: `SCOTT.PKG_SAL.${path}`, unit: "SCOTT.PKG_SAL.PACKAGE_BODY", path, kind: "PROCEDURE", signature: `PROCEDURE ${path}`,
+  start_line, end_line, summary, complexity: 2, commits });
+const MOCK_ANALYSIS = {
+  units: 1,
+  nodes: [MOCK_NODE("CALC", 3, 20, false, "부서별 급여 합계를 계산한다"), MOCK_NODE("RUN", 22, 40, true, "급여를 올리고 커밋한다")],
+  edges: [{ from: "SCOTT.PKG_SAL.RUN", to: "SCOTT.PKG_SAL.CALC", resolved: true, lines: [30] }],
+  tables: [
+    { table: "SCOTT.EMP", by: { "SCOTT.PKG_SAL.CALC": "R", "SCOTT.PKG_SAL.RUN": "RU" }, impacted_entries: [] },
+    { table: "SCOTT.DEPT", by: { "SCOTT.PKG_SAL.CALC": "R" }, impacted_entries: [] },
+  ],
+  entries: ["SCOTT.PKG_SAL.RUN"], cycles: [], unused: [], transactions: {}, findings: [],
+};
+const MOCK_UNIT = {
+  key: "SCOTT.PKG_SAL.PACKAGE_BODY", owner: "SCOTT", name: "PKG_SAL", unit_type: "PACKAGE BODY", lines: 40, analyzed_at: 0,
+  stats: { chunks: 2, asked: 0, cached: 0, failed: 0 }, model: null,
+  facts: MOCK_FACTS([{ name: "EMP", ops: "RU", lines: [8, 12, 25, 33] }, { name: "DEPT", ops: "R", lines: [9] }]),
+  subprograms: [
+    { path: "CALC", name: "CALC", overload: 0, kind: "PROCEDURE", signature: "PROCEDURE CALC", start_line: 3, end_line: 20, chunk_ids: [],
+      facts: MOCK_FACTS([{ name: "EMP", ops: "R", lines: [8, 12] }, { name: "DEPT", ops: "R", lines: [9] }]) },
+    { path: "RUN", name: "RUN", overload: 0, kind: "PROCEDURE", signature: "PROCEDURE RUN", start_line: 22, end_line: 40, chunk_ids: [],
+      facts: MOCK_FACTS([{ name: "EMP", ops: "RU", lines: [25, 33] }]) },
+  ],
 };
 
 function banner(where: string) {

@@ -798,3 +798,12 @@ body.tab-dragging { cursor: grabbing; user-select: none; }
 .settings .split { grid-template-columns: 230px minmax(0, 1fr); gap: 18px; padding-top: 4px; }
 .settings .split > .list { padding-right: 14px; border-right: 1px solid color-mix(in srgb, var(--line) 60%, transparent); }
 .settings .tns-box { gap: 8px; padding: 2px 0 4px; border-bottom: none; margin: 0; font-size: 12.5px; }
+/* 분석 화면을 여는 동안 — 막대가 오가고, 결과가 없으면 단계 목록 */
+.an-progress.busy { position: relative; overflow: hidden; }
+.an-progress.busy .an-bar-fill { position: absolute; width: 30% !important; animation: an-busy 1.1s ease-in-out infinite; }
+@keyframes an-busy { from { left: -30%; } to { left: 100%; } }
+.an-loading { padding: 24px; color: var(--dim); }
+.an-loading-head { display: flex; align-items: center; gap: 8px; color: var(--text); font-weight: 600; margin-bottom: 10px; }
+.an-loading ol { margin: 0; padding-left: 20px; line-height: 1.9; }
+.an-loading li.done { color: var(--text); }
+.an-loading li.now { color: var(--accent); font-weight: 600; }

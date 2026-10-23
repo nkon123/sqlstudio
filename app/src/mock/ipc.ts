@@ -305,7 +305,7 @@ const LOCAL: Record<string, (a: Args) => unknown> = {
   analysis_sets: () => [],
   // 흐름도를 볼 수 있게 — 패키지 하나(서브프로그램 둘)와 테이블 둘
   analysis_dir: () => "C:/mock/analysis",
-  analysis_result: () => MOCK_ANALYSIS,
+  analysis_result: async () => { await sleep(1500); return MOCK_ANALYSIS; },
   analysis_unit: () => ({ unit: MOCK_UNIT, chunks: [] }),
   analysis_pending_imports: () => { try { return JSON.parse(localStorage.getItem("mock.pending") ?? "[]"); } catch { return []; } },
   analysis_discard_import: (a) => {

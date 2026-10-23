@@ -270,6 +270,27 @@ export class AnalysisView {
     if (name) this.nameIn.value = name;
     if (!this.unlisten) this.unlisten = await listen<Progress>("analysis-progress", (e) => this.onProgress(e.payload));
     try {
+      await this.openSteps();
+    } finally {
+      this.loading(null);
+    }
+  }
+
+  /** 여는 동안 지금 무엇을 읽는지 — 결과가 아직 없으면 오른쪽에 단계 목록, 늘 위에 움직이는 막대 */
+  private loading(steps: string[] | null, at = 0) {
+    this.bar.parentElement!.classList.toggle("busy", !!steps);
+    if (!steps) return;
+    this.statusEl.textContent = `${steps[at]} 읽는 중… (${at + 1}/${steps.length})`;
+    if (this.g) return;
+    this.content.replaceChildren(h("div", { class: "an-loading" },
+      h("div", { class: "an-loading-head" }, h("span", { class: "spinner" }), "분석 화면을 준비하는 중"),
+      h("ol", {}, ...steps.map((x, i) => h("li", { class: i < at ? "done" : i === at ? "now" : "" }, x, i < at ? " ✓" : "")))));
+  }
+
+  private async openSteps() {
+    const steps = ["AI 모델 목록", "저장된 분석 결과 목록", "분석할 단위 목록", "분석 결과 (호출 관계·테이블 통합)"];
+    this.loading(steps, 0);
+    try {
       this.providers = await api.listProviders();
     } catch { this.providers = []; }
     const prev = this.provSel.value;
@@ -280,12 +301,19 @@ export class AnalysisView {
       if (local) this.provSel.value = local.name;
     }
     this.updateBadge();
+    this.loading(steps, 1);
     await this.refreshSets();
     // 접속이 없으면 이 PC 의 결과 중 하나를 연다
     if (this.sessionId() == null && !this.set && this.sets.length) this.set = this.sets[0].name;
     this.syncSetSel();
+    steps[2] = this.set ? "결과의 단위 목록" : this.mode === "code" ? "소스 폴더의 파일 (Pro*C·XML)" : "DB 의 패키지·프로시저 목록 (사전)";
+    this.loading(steps, 2);
     await this.load();
+    // 목록 단계가 남긴 '단위 n개' 를 결과를 읽은 뒤 되돌린다
+    const listed = this.statusEl.textContent;
+    this.loading(steps, 3);
     await this.reload(false);
+    this.statusEl.textContent = listed;
   }
 
   /** 결과를 읽을 곳 — 명령 인자로 그대로 붙인다 */

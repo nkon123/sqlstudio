@@ -360,6 +360,9 @@ dialog.settings-dialog .modal-buttons { margin: 0; padding: 10px 20px; border-to
 .an-table code, .an-chip { font-family: var(--mono); }
 .an-right { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .an-content { flex: 1; overflow: auto; min-height: 0; }
+/* 그리드·그림·단추 밖의 글은 골라 복사할 수 있게 */
+.an-content, .an-pending, .dbg-status { user-select: text; }
+.an-content button, .an-content .grid, .an-content .dfd-canvas, .an-content .dfd-toolbar { user-select: none; }
 .an-pad { padding: 8px 12px; }
 .an-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .an-stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }

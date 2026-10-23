@@ -86,40 +86,40 @@ eq("select * from emp pivot xml (sum(sal) for deptno in (any))",
 // MERGE — USING·ON·WHEN 을 절처럼 맞추고, 갈래 안의 UPDATE·INSERT 는 한 칸 들인 문장처럼
 eq("merge into emp t using (select empno, sal from emp_new where deptno = 10) s on (t.empno = s.empno) when matched then update set t.sal = s.sal, t.upd_dt = sysdate where t.sal <> s.sal delete where t.sal = 0 when not matched then insert (empno, sal, ins_dt) values (s.empno, s.sal, sysdate) where s.sal > 0",
 `MERGE INTO emp t
- USING (SELECT empno
-             , sal
-          FROM emp_new
-         WHERE deptno = 10) s
-    ON (t.empno = s.empno)
-  WHEN MATCHED THEN
-       UPDATE
-          SET t.sal = s.sal
-            , t.upd_dt = SYSDATE
-        WHERE t.sal <> s.sal
-       DELETE
-        WHERE t.sal = 0
-  WHEN NOT MATCHED THEN
-       INSERT (empno, sal, ins_dt)
-       VALUES (s.empno, s.sal, SYSDATE)
-        WHERE s.sal > 0`);
+USING (SELECT empno
+            , sal
+         FROM emp_new
+        WHERE deptno = 10) s
+   ON (t.empno = s.empno)
+ WHEN MATCHED THEN
+      UPDATE
+         SET t.sal = s.sal
+           , t.upd_dt = SYSDATE
+       WHERE t.sal <> s.sal
+      DELETE
+       WHERE t.sal = 0
+ WHEN NOT MATCHED THEN
+      INSERT (empno, sal, ins_dt)
+      VALUES (s.empno, s.sal, SYSDATE)
+       WHERE s.sal > 0`);
 // 괄호 없는 ON 은 조건처럼 AND 를 맞춘다
 eq("merge into emp t using emp_new s on t.empno = s.empno and t.deptno = 10 when not matched then insert values (s.empno, s.sal)",
 `MERGE INTO emp t
- USING emp_new s
-    ON t.empno = s.empno
-   AND t.deptno = 10
-  WHEN NOT MATCHED THEN
-       INSERT
-       VALUES (s.empno, s.sal)`);
+USING emp_new s
+   ON t.empno = s.empno
+  AND t.deptno = 10
+ WHEN NOT MATCHED THEN
+      INSERT
+      VALUES (s.empno, s.sal)`);
 
 // 키워드 사이의 힌트 — 그대로 두고 절은 알아본다
 eq("merge /*+ append */ into emp t using emp_new n on (t.empno = n.empno) when matched then update set t.sal = n.sal",
 `MERGE /*+ append */ INTO emp t
- USING emp_new n
-    ON (t.empno = n.empno)
-  WHEN MATCHED THEN
-       UPDATE
-          SET t.sal = n.sal`);
+USING emp_new n
+   ON (t.empno = n.empno)
+ WHEN MATCHED THEN
+      UPDATE
+         SET t.sal = n.sal`);
 eq("insert /*+ append */ into t (a) select a from s", "INSERT /*+ append */ INTO t (a)\nSELECT a\n  FROM s");
 // INSERT ALL · FIRST — INTO 마다 한 줄, 조건 아래는 한 칸 들여
 eq("insert first when x > 10 then into t1 values (x) else into t3 values (x) select x from src",

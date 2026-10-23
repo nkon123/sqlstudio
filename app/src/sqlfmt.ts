@@ -386,20 +386,21 @@ class Fmt {
   /** MERGE INTO 대상 USING 원본 ON (조건) WHEN [NOT] MATCHED THEN … — 갈래 안의 UPDATE·INSERT 는 한 칸 들인 문장처럼:
    *
    *    MERGE INTO emp t
-   *     USING (SELECT …) s
-   *        ON (t.empno = s.empno)
-   *      WHEN MATCHED THEN
-   *           UPDATE
-   *              SET t.sal = s.sal
-   *            WHERE t.sal <> s.sal
-   *           DELETE
-   *            WHERE t.sal = 0
-   *      WHEN NOT MATCHED THEN
-   *           INSERT (empno, sal)
-   *           VALUES (s.empno, s.sal)
+   *    USING (SELECT …) s
+   *       ON (t.empno = s.empno)
+   *     WHEN MATCHED THEN
+   *          UPDATE
+   *             SET t.sal = s.sal
+   *           WHERE t.sal <> s.sal
+   *          DELETE
+   *           WHERE t.sal = 0
+   *     WHEN NOT MATCHED THEN
+   *          INSERT (empno, sal)
+   *          VALUES (s.empno, s.sal)
    */
   private merge(base: number) {
-    const R = base + 6;
+    // USING·ON·WHEN 은 MERGE 의 끝(다섯째 칸)에 맞춘다
+    const R = base + 5;
     const WHEN = new Set(["WHEN"]);
     this.cont = this.col() + 1;
     this.expr({ clauses: true });

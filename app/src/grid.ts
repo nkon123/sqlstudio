@@ -858,6 +858,13 @@ export class ResultGrid {
     else if (right > vp.scrollLeft + vp.clientWidth) vp.scrollLeft = right - vp.clientWidth;
   }
 
+  /** 키보드로 그리드에 — 커서가 있으면 그 셀을 보이고, 없으면 첫 셀에 */
+  focus() {
+    this.el.focus({ preventScroll: true });
+    if (this.cur) this.reveal(this.cur.r, this.cur.c);
+    else this.selectRow(0);
+  }
+
   /** 화면 행 `r` 의 셀 하나를 고르고 커서를 둔다 (거르기 칸에서 ↓ 로 내려왔을 때 등) */
   selectRow(r: number) {
     if (!this.view.length) return;

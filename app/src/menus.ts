@@ -119,6 +119,7 @@ export function palette(app: App) {
     { group: "도구", label: "세션·락 모니터", alias: "session lock monitor kill", disabled: off("monitor"), run: () => app.monitorActive() },
     { group: "보기", label: "왼쪽 영역 접기/펼치기", keys: "Ctrl+Shift+1", alias: "테이블 프로젝트", run: () => app.layout.toggle("left") },
     { group: "보기", label: "AI 영역 접기/펼치기", keys: "Ctrl+Shift+3", run: () => app.layout.toggle("right") },
+    { group: "보기", label: "영역 이동 — 편집기·결과 그리드·테이블 목록·AI", keys: "Ctrl+Shift+2", alias: "포커스 그리드로 결과로", run: () => app.areaNav() },
     { group: "보기", label: "AI 입력칸으로", keys: "Ctrl+K", run: () => { app.layout.toggle("right", true); app.ai.focus(); } },
     { group: "도움말", label: "단축키 목록", keys: "F1", alias: "shortcut", run: () => showShortcuts() },
     { group: "설정", label: "설정 열기", alias: "settings", run: () => void app.settings() },

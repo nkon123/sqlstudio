@@ -810,3 +810,18 @@ body.tab-dragging { cursor: grabbing; user-select: none; }
 .an-loading ol { margin: 0; padding-left: 20px; line-height: 1.9; }
 .an-loading li.done { color: var(--text); }
 .an-loading li.now { color: var(--accent); font-weight: 600; }
+/* 영역 이동 (Ctrl+Shift+2) — 가운데의 4방향 표시 */
+.areanav-veil { position: fixed; inset: 0; z-index: 9000; display: grid; place-items: center; background: color-mix(in srgb, var(--bg) 35%, transparent); }
+.areanav { display: grid; grid-template-columns: repeat(3, 120px); grid-template-rows: repeat(3, 64px); gap: 6px; padding: 12px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 32px rgba(0,0,0,.25); }
+.areanav-cell { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font-size: 12px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); cursor: pointer; }
+.areanav-cell:hover { border-color: var(--accent); }
+.areanav-cell.here { opacity: .4; }
+.areanav-arrow { font-size: 18px; line-height: 1; color: var(--accent); }
+.areanav-editor { grid-area: 1 / 2; }
+.areanav-left { grid-area: 2 / 1; }
+.areanav-mid { grid-area: 2 / 2; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; font-size: 11px; color: var(--dim); line-height: 1.3; }
+.areanav-mid small { font-size: 10px; }
+.areanav-right { grid-area: 2 / 3; }
+.areanav-grid { grid-area: 3 / 2; }

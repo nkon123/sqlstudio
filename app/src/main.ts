@@ -4,6 +4,7 @@
 // (한 탭의 긴 쿼리가 다른 탭을 묶지 않는다 — 세션마다 서버 쪽 스레드가 따로 있다).
 
 import "./mock/install"; // 가짜 DB 모드 (npm run mock) — 맨 먼저
+import { type Area, areaNavOpen, showAreaNav } from "./areanav";
 import { flushUiState } from "./uistate"; // 화면 상태를 데이터 폴더 파일에도 — localStorage 를 쓰기 전에
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -67,6 +68,10 @@ export class App {
     ...["TABLE", "VIEW", "PACKAGE", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "TYPE", "MATERIALIZED VIEW", "INDEX"].map((t) => h("option", { value: t }, t)),
     h("option", { value: "" }, "(전체)"));
   private browserFilter = h("input", { placeholder: "이름 필터 (예: ORD%)" });
+  /** 왼쪽 영역 (테이블·프로젝트) — 영역 이동이 포커스를 둘 곳을 찾는다 */
+  private browserEl!: HTMLElement;
+  /** 영역 이동(Ctrl+Shift+2)으로 떠나온 영역 — 한 번 더 누르면 돌아간다 */
+  private lastArea: Area | null = null;
   private browserObjs: ObjectEntry[] = [];
   private pickedTables = new Set<string>();
   ai: AiPanel;
@@ -152,6 +157,7 @@ export class App {
     };
     for (const [k, label] of [["table", "테이블"], ["git", "프로젝트"]]) sideTabs.append(h("button", { "data-k": k, onclick: () => showSide(k) }, label));
     const browser = h("aside", { class: "browser" }, sideTabs, tablePane, this.gitPane);
+    this.browserEl = browser;
     let sideTab = "table";
     try { sideTab = localStorage.getItem("side.tab") === "git" ? "git" : "table"; } catch { /* 기본 */ }
     showSide(sideTab);
@@ -192,6 +198,13 @@ export class App {
         e.preventDefault();
         e.stopPropagation();
         this.palette();
+        return;
+      }
+      // Ctrl+Shift+2: 영역 이동 (4방향 표시) — 떠 있을 때의 키는 표시가 받는다
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === "Digit2" && !areaNavOpen() && !document.querySelector("dialog[open]")) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.areaNav();
         return;
       }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === "KeyK") {
@@ -973,6 +986,45 @@ export class App {
     if (!t) return;
     if (!t.conn) return toast("먼저 접속하세요", "error");
     t.monitor().open();
+  }
+
+  /** 영역 이동 — 편집기 · 결과 그리드 · 테이블 목록 · AI 를 4방향으로 고른다 */
+  areaNav() {
+    const cur = this.currentArea();
+    showAreaNav(cur, (a) => this.goArea(a, cur), () => {
+      // 직전 영역이 없으면 편집기 ↔ 결과 그리드
+      const to = this.lastArea && this.lastArea !== cur ? this.lastArea : cur === "grid" ? "editor" : "grid";
+      this.goArea(to, cur);
+    });
+  }
+
+  private currentArea(): Area | null {
+    const a = document.activeElement;
+    const t = this.active;
+    if (!a || a === document.body) return null;
+    if (this.ai.el.contains(a)) return "right";
+    if (this.browserEl.contains(a)) return "left";
+    if (t?.grid.el.contains(a)) return "grid";
+    if (t?.editor.view.dom.contains(a)) return "editor";
+    return null;
+  }
+
+  private goArea(a: Area, from: Area | null) {
+    const t = this.active;
+    if (from && from !== a) this.lastArea = from;
+    if (a === "left") {
+      this.layout.toggle("left", true);
+      // 보이는 첫 입력칸 (테이블 목록이면 이름 필터)
+      const vis = (q: string) => [...this.browserEl.querySelectorAll<HTMLElement>(q)].find((x) => x.offsetParent);
+      const el = vis("input") ?? vis("select, button, [tabindex]");
+      el?.focus();
+      return;
+    }
+    if (a === "right") { this.layout.toggle("right", true); this.ai.focus(); return; }
+    if (!t) return;
+    // 분석·디버거 화면이 떠 있으면 편집기 화면으로
+    t.showEditor();
+    if (a === "grid") { t.show("result"); t.grid.focus(); }
   }
 
   analyzeActive(owner?: string, name?: string) {

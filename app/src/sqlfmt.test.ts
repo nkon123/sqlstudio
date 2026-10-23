@@ -203,6 +203,28 @@ eq("select a from t where 고객명 = 'a=b' and x.long_name not like 'a%' and b 
  WHERE 고객명      = 'a=b'
    AND x.long_name NOT LIKE 'a%'
    AND b           <> 2`, aligned);
+// SET 의 대입도 = 를 맞춘다 (UPDATE · MERGE 갈래). 여러 줄로 이어지는 항목은 빼고
+eq("update emp e set e.sal = 1, e.commission_pct = 2, e.x = (select max(y) from t where t.a = e.a and t.b = 1) where e.empno = 7 and e.deptno_long = 1",
+`UPDATE emp e
+   SET e.sal            = 1
+     , e.commission_pct = 2
+     , e.x = (SELECT MAX(y)
+                FROM t
+               WHERE t.a = e.a
+                 AND t.b = 1)
+ WHERE e.empno       = 7
+   AND e.deptno_long = 1`, aligned);
+eq("merge into emp t using src s on (t.empno = s.empno) when matched then update set t.sal = s.sal, t.commission = s.comm, t.upd_dt = sysdate where t.sal <> s.sal",
+`MERGE INTO emp t
+USING src s
+   ON (t.empno = s.empno)
+ WHEN MATCHED THEN
+      UPDATE
+         SET t.sal        = s.sal
+           , t.commission = s.comm
+           , t.upd_dt     = SYSDATE
+       WHERE t.sal <> s.sal`, aligned);
+eq("update t set a = 1, bbb = 2", "UPDATE t\n   SET a   = 1,\n       bbb = 2",{ ...aligned, commaBefore: false });
 // 예시에서 읽는다
 if (!detectPrefs("SELECT a\n  FROM t\n WHERE a.x   = 1\n   AND a.yyy = 2").prefs.alignOps) throw new Error("detectPrefs: 연산자 맞춤을 읽지 못함");
 

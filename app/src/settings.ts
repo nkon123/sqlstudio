@@ -159,7 +159,7 @@ function editorPage(app: App) {
   const comma = sel(p.commaBefore ? "before" : "after", [["before", "줄 앞 (, SAL)"], ["after", "줄 끝 (SAL,)"]]);
   const ind = sel(String(p.indent), [["2", "2칸"], ["4", "4칸"]]);
   const logic = sel(p.logicalBefore ? "before" : "after", [["before", "줄 앞 (AND x = 1)"], ["after", "줄 끝 (x = 1 AND)"]]);
-  const align = sel(p.alignOps ? "on" : "off", [["off", "맞추지 않음"], ["on", "맞춤 (a.x   = 1 · b.name LIKE …)"]]);
+  const align = sel(p.alignOps ? "on" : "off", [["off", "맞추지 않음"], ["on", "맞춤 (a.x   = 1 · b.name LIKE … · SET 의 =)"]]);
   const width = h("input", { type: "number", min: "20", max: "200", value: String(p.expressionWidth) }) as HTMLInputElement;
   const preview = h("pre", { class: "format-preview" });
   const sample = "select o.order_id, c.cust_nm, sum(i.qty * i.price) total, case when o.status = 'C' then '취소' else '정상' end st " +

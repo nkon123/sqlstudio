@@ -810,5 +810,36 @@ export function alignOperators(text: string): string {
     }
     i = j;
   }
-  return lines.join("\n");
+  return alignSet(lines).join("\n");
+}
+
+/** SET 의 대입(UPDATE · MERGE 갈래)도 = 를 같은 칸에 — SET 줄과, 같은 칸에서 시작하는 다음 항목 줄(앞은 공백·쉼표뿐).
+ *  다음 줄로 이어지는 항목((a, b) = (SELECT …) 등)은 맞추지 않는다 */
+function alignSet(lines: string[]): string[] {
+  const SET_LINE = /^(\s*SET\s+)(\S.*)$/i;
+  for (let i = 0; i < lines.length; i++) {
+    const s = SET_LINE.exec(lines[i]);
+    if (!s) continue;
+    const col = vw(s[1]);
+    const rows: { k: number; head: string; item: string; multi: boolean }[] = [{ k: i, head: s[1], item: s[2], multi: false }];
+    let j = i + 1;
+    for (; j < lines.length; j++) {
+      const m = /^([\s,]*)(\S.*)$/.exec(lines[j]);
+      if (!m) break;
+      const w = vw(m[1]);
+      if (w === col && /^\s*,?\s*$/.test(m[1])) rows.push({ k: j, head: m[1], item: m[2], multi: false });
+      else if (w > col && !m[1].includes(",")) rows[rows.length - 1].multi = true;
+      else break;
+    }
+    const set = rows.flatMap((r) => {
+      const at = r.multi ? -1 : opAt(r.item);
+      return at > 0 && r.item[at] === "=" ? [{ ...r, lhs: r.item.slice(0, at).trimEnd(), rest: r.item.slice(at) }] : [];
+    });
+    if (set.length >= 2) {
+      const w = Math.max(...set.map((r) => vw(r.lhs)));
+      for (const r of set) lines[r.k] = `${r.head}${r.lhs}${" ".repeat(w - vw(r.lhs))} ${r.rest}`;
+    }
+    i = j - 1;
+  }
+  return lines;
 }

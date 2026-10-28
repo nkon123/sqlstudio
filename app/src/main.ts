@@ -38,6 +38,7 @@ import { Tab } from "./tab";
 import { SideLayout } from "./layout";
 import { connMenu, fileMenu, palette, runMenu, toolsMenu } from "./menus";
 import { settings } from "./settings";
+import { editToSelect } from "./editcmd";
 
 export class App {
   private tabs: Tab[] = [];
@@ -681,6 +682,18 @@ export class App {
       const b = await bindBox(a.binds);
       if (!b) return;
       binds = b;
+    }
+    // Toad 의 EDIT 테이블 [WHERE …] — 그 테이블을 편집 그리드로 (서버로 보내지 않는다)
+    const edit = editToSelect(stmt.text);
+    if (edit) {
+      t.editor.flash(from, to);
+      if (t.editTable) {
+        if (t.grid.changeCount() && !(await confirmBox("편집 끝내기", "적용하지 않은 변경을 버릴까요?", "버리기"))) return;
+        t.grid.setEditable(null);
+        this.endGridEdit(t);
+      }
+      t.lastQuery = { sql: edit, binds };
+      return this.toggleGridEdit(t);
     }
     let confirmed = false;
     if (a.confirm) {

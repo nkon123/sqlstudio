@@ -23,6 +23,9 @@ pub struct Config {
     pub oracle: OracleConfig,
     #[serde(default, rename = "connection")]
     pub connections: Vec<Profile>,
+    /// 접속 그룹 — 목록 순서가 화면 순서. 접속의 `group` 에 쓴 그룹은 여기 없어도 읽을 때 채운다
+    #[serde(default, rename = "group")]
+    pub groups: Vec<Group>,
     #[serde(default)]
     pub mcp: McpConfig,
     #[serde(default, rename = "llm")]
@@ -170,6 +173,35 @@ pub struct Profile {
     /// 운영 DB — 데이터·구조를 바꾸는 문장과 COMMIT 을 실행 전에 항상 확인한다 (서버 쪽에서 막는다)
     #[serde(default)]
     pub production: bool,
+    /// 속한 그룹 — `ERP` 또는 `ERP/운영` (두 단계까지). 없으면 그룹 없음
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+}
+
+/// 접속 그룹. `path` 는 `ERP` 또는 `ERP/운영` (두 단계까지)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Group {
+    pub path: String,
+    /// 이 그룹 접속의 기본 색 (접속에 색이 없을 때)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// 그룹 경로의 구분자
+pub const GROUP_SEP: char = '/';
+
+/// 그룹 경로를 다듬는다 — 칸마다 앞뒤 공백을 지우고 빈 칸은 뺀다. 세 단계 이상이거나 비면 None
+pub fn normalize_group(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split(GROUP_SEP).map(str::trim).filter(|x| !x.is_empty()).collect();
+    if parts.is_empty() || parts.len() > 2 {
+        return None;
+    }
+    Some(parts.join("/"))
+}
+
+/// 상위 그룹 경로 (`ERP/운영` → `ERP`). 맨 위면 None
+pub fn group_parent(path: &str) -> Option<&str> {
+    path.rsplit_once(GROUP_SEP).map(|(a, _)| a)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -356,7 +388,81 @@ impl Config {
                 return Err(format!("mcp.allowed_connections 의 '{a}' 에 해당하는 [[connection]] 이 없습니다"));
             }
         }
+        let mut cfg = cfg;
+        for p in &cfg.connections {
+            if let Some(g) = &p.group {
+                if normalize_group(g).is_none() {
+                    return Err(format!("접속 '{}' 의 그룹 '{g}' — 그룹은 두 단계(예: ERP/운영)까지입니다", p.name));
+                }
+            }
+        }
+        for g in &cfg.groups {
+            if normalize_group(&g.path).is_none() {
+                return Err(format!("그룹 '{}' — 그룹은 두 단계(예: ERP/운영)까지입니다", g.path));
+            }
+        }
+        cfg.tidy_groups();
         Ok(cfg)
+    }
+
+    /// 그룹 목록을 맞춘다 — 경로를 다듬고, 접속이 쓰는 그룹과 그 상위 그룹을 채우고, 겹친 것은 지운다
+    pub fn tidy_groups(&mut self) {
+        for p in &mut self.connections {
+            p.group = p.group.as_deref().and_then(normalize_group);
+        }
+        let mut out: Vec<Group> = Vec::new();
+        let add = |out: &mut Vec<Group>, path: &str, color: Option<String>| {
+            let mut path = path.to_string();
+            if let Some((parent, leaf)) = path.clone().split_once(GROUP_SEP) {
+                // 상위 그룹 이름의 대소문자는 먼저 나온 것을 따른다
+                match out.iter().find(|g| g.path.eq_ignore_ascii_case(parent)) {
+                    Some(g) => path = format!("{}{GROUP_SEP}{leaf}", g.path),
+                    None => out.push(Group { path: parent.to_string(), color: None }),
+                }
+            }
+            match out.iter_mut().find(|g| g.path.eq_ignore_ascii_case(&path)) {
+                Some(g) => {
+                    if g.color.is_none() {
+                        g.color = color;
+                    }
+                }
+                None => out.push(Group { path, color }),
+            }
+        };
+        for g in std::mem::take(&mut self.groups) {
+            if let Some(path) = normalize_group(&g.path) {
+                add(&mut out, &path, g.color);
+            }
+        }
+        for p in &self.connections {
+            if let Some(g) = &p.group {
+                add(&mut out, g, None);
+            }
+        }
+        // 접속의 그룹 이름 대소문자는 그룹 목록을 따른다
+        for p in &mut self.connections {
+            if let Some(g) = &p.group {
+                if let Some(x) = out.iter().find(|x| x.path.eq_ignore_ascii_case(g)) {
+                    p.group = Some(x.path.clone());
+                }
+            }
+        }
+        self.groups = out;
+    }
+
+    /// 접속의 표시 색 — 접속에 색이 없으면 그룹, 그 위 그룹 순으로
+    pub fn color_of(&self, p: &Profile) -> Option<String> {
+        if p.color.is_some() {
+            return p.color.clone();
+        }
+        let mut path = p.group.as_deref();
+        while let Some(g) = path {
+            if let Some(c) = self.groups.iter().find(|x| x.path.eq_ignore_ascii_case(g)).and_then(|x| x.color.clone()) {
+                return Some(c);
+            }
+            path = group_parent(g);
+        }
+        None
     }
 
     pub fn save(&self) -> Result<()> {
@@ -515,5 +621,40 @@ allowed_connections = ["erp-dev"]
     #[test]
     fn env_name() {
         assert_eq!(password_env_name("erp-dev 1"), "SQLSTUDIO_PW_ERP_DEV_1");
+    }
+
+    #[test]
+    fn groups() {
+        let c = Config::parse(
+            r##"
+[[group]]
+path = "MES"
+color = "#ff0000"
+
+[[connection]]
+name = "a"
+user = "u"
+connect_string = "x"
+group = " erp / 운영 "
+
+[[connection]]
+name = "b"
+user = "u"
+connect_string = "x"
+group = "mes/dev"
+"##,
+        )
+        .unwrap();
+        // 접속이 쓰는 그룹과 상위 그룹이 채워지고, 대소문자는 그룹 목록을 따른다
+        let paths: Vec<&str> = c.groups.iter().map(|g| g.path.as_str()).collect();
+        assert_eq!(paths, ["MES", "erp", "erp/운영", "MES/dev"]);
+        assert_eq!(c.connections[0].group.as_deref(), Some("erp/운영"));
+        assert_eq!(c.connections[1].group.as_deref(), Some("MES/dev"));
+        // 색은 접속 → 그룹 → 상위 그룹
+        assert_eq!(c.color_of(&c.connections[1]).as_deref(), Some("#ff0000"));
+        assert_eq!(c.color_of(&c.connections[0]), None);
+        assert!(Config::parse("[[group]]\npath = \"a/b/c\"").is_err());
+        assert_eq!(normalize_group("a//b"), Some("a/b".into()));
+        assert_eq!(group_parent("a/b"), Some("a"));
     }
 }

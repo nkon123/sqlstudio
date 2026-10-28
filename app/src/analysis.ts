@@ -7,7 +7,8 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { api, errOf, type Provider } from "./api";
+import { api, errOf, type Group, type Profile, type Provider } from "./api";
+import { profileOptions } from "./conngroups";
 import type { DfdSourceHooks, DfdView } from "./dfd";
 import { confirmBox, field, h, modal, toast } from "./ui";
 import { ResultGrid } from "./grid";
@@ -516,13 +517,14 @@ export class AnalysisView {
   private async mergeSet() {
     const x = this.sets.find((s) => s.name === this.set);
     if (!x?.imported) return;
-    let profiles: string[] = [];
+    let list: Profile[] = [], groups: Group[] = [];
     try {
-      profiles = (await api.listProfiles()).map((p) => p.name);
+      [list, groups] = await Promise.all([api.listProfiles(), api.listGroups().catch(() => [] as Group[])]);
     } catch { /* 아래에서 알린다 */ }
+    const profiles = list.map((p) => p.name);
     if (!profiles.length) return toast("접속 프로필이 없습니다", "error");
     const live = await this.liveName();
-    const sel = h("select", { style: "width:100%" }, ...profiles.map((n) => h("option", { value: n }, n)));
+    const sel = h("select", { style: "width:100%" }, ...profileOptions(groups, list, (p) => h("option", { value: p.name }, p.name)));
     sel.value = profiles.includes(x.imported.profile) ? x.imported.profile : live && profiles.includes(live) ? live : profiles[0];
     const del = h("input", { type: "checkbox", checked: true });
     const go = await modal("접속의 결과에 합치기", h("div", {},

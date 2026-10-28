@@ -9,7 +9,7 @@ import { flushUiState } from "./uistate"; // 화면 상태를 데이터 폴더 �
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, byteToUtf16, errOf, utf16ToByte, type Column, type ErrView, type ExecView, type ObjectEntry, type Profile, type TableDesc, type RowPage } from "./api";
+import { api, byteToUtf16, errOf, utf16ToByte, type Column, type ErrView, type ExecView, type Group, type ObjectEntry, type Profile, type TableDesc, type RowPage } from "./api";
 import { AiPanel } from "./ai";
 import { listen } from "@tauri-apps/api/event";
 import { showSpace } from "./space";
@@ -38,12 +38,14 @@ import { Tab } from "./tab";
 import { SideLayout } from "./layout";
 import { connMenu, fileMenu, palette, runMenu, toolsMenu } from "./menus";
 import { settings } from "./settings";
+import { profileOptions } from "./conngroups";
 import { editToSelect } from "./editcmd";
 
 export class App {
   private tabs: Tab[] = [];
   active: Tab | null = null;
   profiles: Profile[] = [];
+  groups: Group[] = [];
   private tabStrip = h("div", { class: "tabs" });
   /** 탭 옆의 "+" — 새 탭 (지금 탭과 같은 접속으로) */
   private plusBtn = h("button", { class: "tab-plus", title: "새 탭 (같은 접속으로)", onclick: () => this.newTab(true) }, "+");
@@ -433,9 +435,9 @@ export class App {
   }
 
   async reloadProfiles() {
-    this.profiles = await api.listProfiles();
+    [this.profiles, this.groups] = await Promise.all([api.listProfiles(), api.listGroups().catch(() => [] as Group[])]);
     const prev = localStorage.getItem("profile");
-    this.profileSel.replaceChildren(...this.profiles.map((p) =>
+    this.profileSel.replaceChildren(...profileOptions(this.groups, this.profiles, (p) =>
       h("option", { value: p.name, selected: p.name === prev }, `${p.name}${p.read_only ? " (읽기 전용)" : ""}`)));
   }
 

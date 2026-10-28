@@ -800,6 +800,18 @@ body.tab-dragging { cursor: grabbing; user-select: none; }
 .settings .list-item.active { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
 .settings .split { grid-template-columns: 230px minmax(0, 1fr); gap: 18px; padding-top: 4px; }
 .settings .split > .list { padding-right: 14px; border-right: 1px solid color-mix(in srgb, var(--line) 60%, transparent); }
+/* 접속 그룹 — 접기 ▾, 이름, 줄에 올리면 ↑ ↓ */
+.cg-item, .cg-group { cursor: pointer; min-width: 0; outline-offset: -2px; }
+.cg-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cg-group .cg-name { font-weight: 600; }
+.cg-group .cg-name small { font-weight: normal; }
+.cg-fold { border: 0; background: none; padding: 0 2px; width: 18px; color: var(--dim); cursor: pointer; flex: none; }
+.cg-move { display: flex; gap: 1px; flex: none; visibility: hidden; }
+.cg-item:hover .cg-move, .cg-group:hover .cg-move, .cg-item.active .cg-move, .cg-group.active .cg-move, .cg-item:focus-within .cg-move, .cg-group:focus-within .cg-move { visibility: visible; }
+.cg-move button { border: 0; background: none; padding: 0 4px; color: var(--dim); cursor: pointer; line-height: 1.2; }
+.cg-move button:hover:not(:disabled) { color: var(--text); background: var(--hover); border-radius: 4px; }
+.cg-move button:disabled { opacity: .3; cursor: default; }
+.form-title { margin: 0 0 4px; }
 .settings .tns-box { gap: 8px; padding: 2px 0 4px; border-bottom: none; margin: 0; font-size: 12.5px; }
 /* 분석 화면을 여는 동안 — 막대가 오가고, 결과가 없으면 단계 목록 */
 .an-progress.busy { position: relative; overflow: hidden; }

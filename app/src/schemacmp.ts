@@ -5,7 +5,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { api, errOf, type Profile } from "./api";
+import { api, errOf, type Group, type Profile } from "./api";
+import { profileOptions } from "./conngroups";
 import { ResultGrid } from "./grid";
 import { showMenu } from "./ctxmenu";
 import { h, passwordBox, toast } from "./ui";
@@ -88,11 +89,12 @@ export class SchemaCompareView {
     this.el.hidden = false;
     this.srcLabel.textContent = this.profileOf() ?? "(접속 안 됨)";
     this.unlisten ??= await listen<Progress>("schema-compare", (e) => this.onProgress(e.payload));
+    let groups: Group[] = [];
     try {
-      this.profiles = await api.listProfiles();
+      [this.profiles, groups] = await Promise.all([api.listProfiles(), api.listGroups().catch(() => [] as Group[])]);
     } catch { this.profiles = []; }
     const prev = this.tgtSel.value;
-    this.tgtSel.replaceChildren(...this.profiles.map((p) => h("option", { value: p.name, selected: p.name === prev }, `${p.name}${p.production ? " (운영)" : ""}`)));
+    this.tgtSel.replaceChildren(...profileOptions(groups, this.profiles, (p) => h("option", { value: p.name, selected: p.name === prev }, `${p.name}${p.production ? " (운영)" : ""}`)));
   }
 
   close() {

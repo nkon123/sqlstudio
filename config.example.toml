@@ -14,6 +14,7 @@ user = "erp_read"
 connect_string = "dbhost:1521/ORCL"   # host:port/서비스명 또는 TNS 별칭
 read_only = true                      # SELECT 만 (앱 판정 + SET TRANSACTION READ ONLY)
 color = "#1d8a4a"
+group = "ERP/개발"                     # 접속 그룹 — 두 단계까지 (설정 화면에서 접고·순서 바꾸기)
 
 [[connection]]
 name = "ERP-PROD"
@@ -21,6 +22,15 @@ user = "erp"
 connect_string = "ERPPROD"
 color = "#d33a3a"                     # 운영은 빨강
 call_timeout_secs = 600               # Oracle Client 18+ 에서만 동작
+group = "ERP/운영"
+
+# 그룹 순서·색 (적지 않아도 접속의 group 으로 채워진다). 색을 정하지 않은 접속은 그룹 색을 쓴다
+[[group]]
+path = "ERP"
+
+[[group]]
+path = "ERP/운영"
+color = "#d33a3a"
 
 # ── AI 공급자 ─────────────────────────────────────────
 [[llm]]

@@ -12,9 +12,13 @@ export interface Profile {
   name: string; user: string; connect_string: string;
   read_only?: boolean; as_sysdba?: boolean; call_timeout_secs?: number | null; color?: string | null;
   production?: boolean;
+  /** 속한 그룹 — ERP 또는 ERP/운영 (두 단계까지) */
+  group?: string | null;
   has_env_password?: boolean;
   has_saved_password?: boolean;
 }
+/** 접속 그룹 — 목록 순서가 화면 순서 */
+export interface Group { path: string; color?: string | null }
 export interface Connected {
   id: number; user: string; connect_string: string; server_version: string; read_only: boolean; color?: string | null; production?: boolean;
   /** 서버 세션 번호 — 같으면 같은 접속 */
@@ -94,6 +98,13 @@ export const api = {
   listProfiles: () => invoke<Profile[]>("list_profiles"),
   saveProfile: (profile: Profile, originalName?: string) => invoke<void>("save_profile", { profile, originalName }),
   deleteProfile: (name: string) => invoke<void>("delete_profile", { name }),
+  moveProfile: (name: string, up: boolean) => invoke<void>("move_profile", { name, up }),
+  listGroups: () => invoke<Group[]>("list_groups"),
+  /** 그룹 만들기·고치기 — original 이 있으면 그 그룹의 이름·위치를 바꾼다 (안의 접속도 따라간다) */
+  saveGroup: (path: string, color: string | null, original?: string) => invoke<void>("save_group", { path, color, original }),
+  /** 그룹 지우기 — withConnections 가 아니면 안의 접속은 상위 그룹(맨 위면 그룹 없음)으로 */
+  deleteGroup: (path: string, withConnections: boolean) => invoke<void>("delete_group", { path, withConnections }),
+  moveGroup: (path: string, up: boolean) => invoke<void>("move_group", { path, up }),
   connect: (profile: string, password?: string, remember?: boolean) => invoke<Connected>("connect", { profile, password, remember }),
   forgetPassword: (profile: string) => invoke<void>("forget_password", { profile }),
   tnsList: () => invoke<TnsView>("tns_list"),

@@ -206,8 +206,69 @@ function complete(a: { text: string; cursor: number }) {
 // ── 명령 표 ─────────────────────────────────────
 
 /** 가짜로 답하는 명령. undefined 를 돌려주면 (앱 창에서) 진짜 백엔드로 보낸다 */
+// 접속·그룹 — 화면 확인용으로 메모리에서만 바꾼다 (규칙은 db.rs 의 그룹 명령을 간추린 것)
+type MockProfile = { name: string; user: string; connect_string: string; group?: string | null; color?: string | null; production?: boolean; read_only?: boolean; has_saved_password?: boolean };
+let profiles: MockProfile[] = [
+  { name: "가짜 DB", user: "scott", connect_string: "mock", has_saved_password: true, color: "#c0392b" },
+  { name: "ERP 운영", user: "erp", connect_string: "erp-prd:1521/ERP", group: "ERP/운영", production: true, has_saved_password: true },
+  { name: "ERP 개발", user: "erp", connect_string: "erp-dev:1521/ERP", group: "ERP/개발", has_saved_password: true },
+  { name: "MES", user: "mes", connect_string: "mes:1521/MES", group: "MES", has_saved_password: true },
+];
+let groups: { path: string; color?: string | null }[] = [{ path: "ERP" }, { path: "ERP/운영", color: "#c0392b" }, { path: "ERP/개발" }, { path: "MES", color: "#27ae60" }];
+const U = (x?: string | null) => (x ?? "").toUpperCase();
+const under = (g: string | null | undefined, path: string) => !!g && (U(g) === U(path) || U(g).startsWith(U(path) + "/"));
+const parentOf = (g: string) => (g.includes("/") ? g.slice(0, g.lastIndexOf("/")) : null);
+function swapNear<T>(v: T[], idx: number[], k: number, up: boolean) {
+  const j = up ? k - 1 : k + 1;
+  if (k >= 0 && j >= 0 && j < idx.length) [v[idx[k]], v[idx[j]]] = [v[idx[j]], v[idx[k]]];
+}
+function tidyGroups() {
+  for (const p of profiles) for (const g of [p.group ? parentOf(p.group) : null, p.group]) if (g && !groups.some((x) => U(x.path) === U(g))) groups.push({ path: g });
+}
+
 const DB: Record<string, (a: Args) => unknown> = {
-  list_profiles: () => [{ name: "가짜 DB", user: "scott", connect_string: "mock", has_saved_password: true, color: "#c0392b" }],
+  list_profiles: () => profiles.map((p) => ({ ...p })),
+  list_groups: () => groups.map((g) => ({ ...g })),
+  save_profile: (a) => {
+    const p = a.profile as MockProfile, key = U((a.originalName as string | undefined) ?? p.name);
+    const i = profiles.findIndex((x) => U(x.name) === key);
+    if (i >= 0) profiles[i] = { ...profiles[i], ...p }; else profiles.push(p);
+    tidyGroups();
+    return null;
+  },
+  delete_profile: (a) => { profiles = profiles.filter((x) => U(x.name) !== U(a.name as string)); return null; },
+  move_profile: (a) => {
+    const me = profiles.findIndex((x) => U(x.name) === U(a.name as string));
+    const sib = profiles.map((_, i) => i).filter((i) => U(profiles[i].group) === U(profiles[me]?.group));
+    swapNear(profiles, sib, sib.indexOf(me), a.up as boolean);
+    return null;
+  },
+  save_group: (a) => {
+    const path = (a.path as string).split("/").map((x) => x.trim()).filter(Boolean).join("/"), orig = a.original as string | undefined;
+    if (!orig) {
+      if (groups.some((g) => U(g.path) === U(path))) fail(`같은 이름의 그룹이 있습니다: ${path}`, "invalid");
+      groups.push({ path, color: a.color as string | null });
+    } else {
+      const moved = (g: string) => path + g.slice(orig.length);
+      for (const g of groups) if (under(g.path, orig)) { if (U(g.path) === U(orig)) g.color = a.color as string | null; g.path = moved(g.path); }
+      for (const p of profiles) if (under(p.group, orig)) p.group = moved(p.group!);
+    }
+    tidyGroups();
+    return null;
+  },
+  delete_group: (a) => {
+    const path = a.path as string;
+    if (a.withConnections) profiles = profiles.filter((p) => !under(p.group, path));
+    else for (const p of profiles) if (under(p.group, path)) p.group = parentOf(path);
+    groups = groups.filter((g) => !under(g.path, path));
+    return null;
+  },
+  move_group: (a) => {
+    const path = a.path as string;
+    const sib = groups.map((_, i) => i).filter((i) => U(parentOf(groups[i].path)) === U(parentOf(path)));
+    swapNear(groups, sib, sib.findIndex((i) => U(groups[i].path) === U(path)), a.up as boolean);
+    return null;
+  },
   connect: async () => { await sleep(200); return { id: 1, user: "SCOTT", connect_string: "mock", server_version: "가짜 Oracle 11.2 (DB 없음)", read_only: false, sid: 42 }; },
   disconnect: () => null,
   forget_password: () => null,

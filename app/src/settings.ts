@@ -2,7 +2,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { api, errOf, type Profile, type Provider, type TnsEntry, type TnsView } from "./api";
+import { api, errOf, type Group, type Profile, type Provider, type TnsEntry, type TnsView } from "./api";
+import { colorOf, countIn, groupLabel, groupLeaf, groupParent, groupTree, isCollapsed, setCollapsed, type GroupNode } from "./conngroups";
 import { DEFAULT_PREFS, STYLE_PRESETS, autoFormat, detectPrefs, formatSql, loadPrefs, savePrefs, setAutoFormat, type AutoFormat, type FormatPrefs } from "./format";
 import { restoreEnabled, setRestoreEnabled } from "./tabsession";
 import { DEFAULT_SNIPPETS, parse as parseSnippets, saveSnippets, snippets, type Snip } from "./snippets";
@@ -20,7 +21,7 @@ const PAGES: { name: string; icon: string; desc: string; make: (app: App) => Pro
 
 /** 목록에서 지금 고친 항목을 표시 (data-name 으로) */
 function markActive(list: HTMLElement, name: string | undefined) {
-  for (const b of list.children) (b as HTMLElement).classList.toggle("active", !!name && (b as HTMLElement).dataset.name === name);
+  for (const b of list.querySelectorAll<HTMLElement>("[data-name]")) b.classList.toggle("active", !!name && b.dataset.name === name);
 }
 
 /** 선 아이콘 (24×24, 선만) */
@@ -369,9 +370,17 @@ async function profilesPage(app: App) {
   const tns = await api.tnsList().catch(() => ({ entries: [] } as TnsView));
   const tnsList = h("datalist", { id: "tns-aliases" }, ...tns.entries.map((e) => h("option", { value: e.alias }, [e.host, e.port].filter(Boolean).join(":") + (e.service ? `/${e.service}` : ""))));
   const where = (e: TnsEntry) => `${e.host ?? "?"}${e.port ? `:${e.port}` : ""}${e.service ? `/${e.service}` : ""}`;
-  const edit = (p?: Profile) => {
-    markActive(list, p?.name ?? "");
+  let groups: Group[] = [];
+  /** 지금 오른쪽에 연 것 — 목록을 다시 그려도 표시가 남게 */
+  let current = "";
+  const groupSelect = (value: string | null | undefined, allow: (g: Group) => boolean = () => true, none = "(그룹 없음)") =>
+    h("select", {}, h("option", { value: "" }, none),
+      ...groups.filter(allow).map((g) => h("option", { value: g.path, selected: !!value && g.path.toUpperCase() === value.toUpperCase() }, groupLabel(g.path))));
+  const edit = (p?: Profile, inGroup?: string) => {
+    current = p ? `p:${p.name}` : "p:";
+    markActive(list, current);
     const name = h("input", { value: p?.name ?? "" });
+    const group = groupSelect(p ? p.group : inGroup);
     const user = h("input", { value: p?.user ?? "" });
     const cs = h("input", { value: p?.connect_string ?? "", placeholder: tns.entries.length ? `TNS 별칭 (${tns.entries.length}개에서 고르기) 또는 host:1521/SERVICE` : "host:1521/SERVICE 또는 TNS 별칭" });
     cs.setAttribute("list", "tns-aliases");
@@ -393,10 +402,11 @@ async function profilesPage(app: App) {
     const useColor = h("input", { type: "checkbox", checked: !!p?.color });
     const timeout = h("input", { type: "number", min: "0", value: p?.call_timeout_secs ?? "" , placeholder: "없음" });
     form.replaceChildren(
-      field("이름", name), field("사용자", user), field("접속 문자열", cs, "11g 는 Instant Client 가 필요합니다 (19c 권장)"), csHint,
+      field("이름", name), field("그룹", group, groups.length ? undefined : "그룹은 목록 아래 '+ 새 그룹' 으로 만듭니다"),
+      field("사용자", user), field("접속 문자열", cs, "11g 는 Instant Client 가 필요합니다 (19c 권장)"), csHint,
       h("label", { class: "check" }, ro, "읽기 전용 (SELECT 만, 서버에서도 막음)"),
       h("label", { class: "check", title: "INSERT·UPDATE·DELETE·DDL·PL/SQL 블록·COMMIT 을 실행 전에 항상 확인합니다" }, prod, "운영 DB (바꾸는 문장·커밋 전에 항상 확인)"),
-      h("label", { class: "check" }, useColor, "탭 색 표시 (운영 DB 는 빨강 권장)", color),
+      h("label", { class: "check", title: "끄면 그룹의 색을 씁니다" }, useColor, "탭 색 표시 (운영 DB 는 빨강 권장)", color),
       field("호출 시간 상한(초)", timeout, "Oracle Client 18 이상에서만 동작"),
       h("small", {}, "비밀번호는 설정 파일에 쓰지 않습니다. 접속할 때 묻거나(‘비밀번호 저장’ 을 고르면 OS 자격 증명 관리자에), 환경변수 SQLSTUDIO_PW_<이름> 을 씁니다."),
       p?.has_saved_password ? h("div", { class: "row" }, h("span", {}, "저장된 비밀번호가 있습니다"),
@@ -414,9 +424,10 @@ async function profilesPage(app: App) {
             await api.saveProfile({
               name: name.value.trim(), user: user.value.trim(), connect_string: cs.value.trim(),
               read_only: ro.checked, production: prod.checked, color: useColor.checked ? color.value : null,
-              call_timeout_secs: timeout.value ? Number(timeout.value) : null,
+              call_timeout_secs: timeout.value ? Number(timeout.value) : null, group: group.value || null,
             }, p?.name);
             toast("저장했습니다", "ok");
+            current = `p:${name.value.trim()}`;
             await refreshList();
           } catch (err) { toast(errOf(err).message, "error"); }
         } }, "저장"),
@@ -425,15 +436,135 @@ async function profilesPage(app: App) {
           if (!(await confirmBox("삭제", `${p.name} 프로필을 지울까요?`, "삭제"))) return;
           await api.deleteProfile(p.name).catch((err) => toast(errOf(err).message, "error"));
           form.replaceChildren();
+          current = "";
           await refreshList();
         } }, "삭제") : null));
   };
+  /** 그룹 고치기 — 이름·상위 그룹·색, 하위 그룹·접속 추가, 안의 접속 한꺼번에 운영 DB 표시, 삭제 */
+  const editGroup = (n?: GroupNode, parent?: string) => {
+    const g = n?.group;
+    current = g ? `g:${g.path}` : "g:";
+    markActive(list, current);
+    const name = h("input", { value: g ? groupLeaf(g.path) : "", placeholder: "예: ERP" });
+    // 두 단계까지 — 하위 그룹이 있는 그룹은 다른 그룹 아래로 못 간다
+    const hasChildren = !!n?.children.length;
+    const up = groupSelect(g ? groupParent(g.path) : parent, (x) => !x.path.includes("/") && (!g || x.path.toUpperCase() !== g.path.toUpperCase()), "(맨 위)");
+    up.disabled = hasChildren;
+    const color = h("input", { type: "color", value: g?.color ?? "#3a7bd5" });
+    const useColor = h("input", { type: "checkbox", checked: !!g?.color });
+    const inside: Profile[] = [];
+    const collect = (x: GroupNode) => { inside.push(...x.profiles); x.children.forEach(collect); };
+    if (n) collect(n);
+    const save = async (e: Event) => {
+      e.preventDefault();
+      const leaf = name.value.trim();
+      if (!leaf) return toast("그룹 이름을 쓰세요", "error");
+      if (leaf.includes("/")) return toast("그룹 이름에는 / 를 쓸 수 없습니다 — 상위 그룹은 아래 칸에서 고르세요", "error");
+      const path = up.value ? `${up.value}/${leaf}` : leaf;
+      try {
+        await api.saveGroup(path, useColor.checked ? color.value : null, g?.path);
+        toast("저장했습니다", "ok");
+        current = `g:${path}`;
+        await refreshList();
+      } catch (err) { toast(errOf(err).message, "error"); }
+    };
+    const remove = async (e: Event) => {
+      e.preventDefault();
+      if (!g) return;
+      const where = groupParent(g.path) ? `상위 그룹 '${groupLabel(groupParent(g.path)!)}'` : "그룹 없음";
+      const what = await modal<"keep" | "all">(`'${groupLabel(g.path)}' 그룹 삭제`,
+        h("pre", { class: "modal-text" }, inside.length
+          ? `이 그룹${hasChildren ? "과 하위 그룹" : ""}에 접속이 ${inside.length}개 있습니다.\n\n· 그룹만 삭제: 접속은 ${where}으로 옮깁니다\n· 접속도 함께 삭제: ${inside.map((p) => p.name).join(", ")}`
+          : `빈 그룹입니다${hasChildren ? " (하위 그룹도 지웁니다)" : ""}.`),
+        inside.length
+          ? [{ label: "취소", value: null as never }, { label: "그룹만 삭제", value: "keep", kind: "primary" }, { label: "접속도 함께 삭제", value: "all", kind: "danger" }]
+          : [{ label: "취소", value: null as never }, { label: "삭제", value: "keep", kind: "danger" }]);
+      if (!what) return;
+      if (what === "all" && !(await confirmBox("접속도 삭제", `접속 ${inside.length}개를 지웁니다. 되돌릴 수 없습니다.`, "삭제"))) return;
+      try {
+        await api.deleteGroup(g.path, what === "all");
+        form.replaceChildren();
+        current = "";
+        await refreshList();
+      } catch (err) { toast(errOf(err).message, "error"); }
+    };
+    /** 안의 접속을 한꺼번에 — 운영 DB·읽기 전용 표시 */
+    const bulk = async (label: string, change: Partial<Profile>) => {
+      if (!(await confirmBox(label, `접속 ${inside.length}개: ${inside.map((p) => p.name).join(", ")}`, "바꾸기", false))) return;
+      try {
+        for (const p of inside) {
+          const { has_env_password: _a, has_saved_password: _b, ...rest } = p;
+          await api.saveProfile({ ...rest, ...change }, p.name);
+        }
+        toast(`${inside.length}개를 바꿨습니다`, "ok");
+        await refreshList();
+      } catch (err) { toast(errOf(err).message, "error"); await refreshList(); }
+    };
+    const small = (label: string, run: () => void, title?: string) =>
+      h("button", { class: "small", title, onclick: (e: Event) => { e.preventDefault(); run(); } }, label);
+    form.replaceChildren(
+      h("h4", { class: "form-title" }, g ? `그룹 · ${groupLabel(g.path)}` : "새 그룹"),
+      field("이름", name), field("상위 그룹", up, hasChildren ? "하위 그룹이 있어 다른 그룹 아래로 옮길 수 없습니다 (두 단계까지)" : "두 단계까지 (예: ERP / 운영)"),
+      h("label", { class: "check", title: "색을 정하지 않은 접속은 그룹의 색으로 탭에 보입니다 (하위 그룹은 위 그룹 색을 이어받습니다)" }, useColor, "그룹 색", color),
+      g ? h("small", {}, `접속 ${inside.length}개${hasChildren ? ` · 하위 그룹 ${n!.children.length}개` : ""}`) : "",
+      g ? h("div", { class: "row" },
+        small("+ 이 그룹에 새 접속", () => edit(undefined, g.path)),
+        !g.path.includes("/") ? small("+ 하위 그룹", () => editGroup(undefined, g.path)) : "") : "",
+      g && inside.length ? h("div", { class: "row" },
+        small("모두 운영 DB 로", () => void bulk("운영 DB 로 표시", { production: true }), "바꾸는 문장·커밋 전에 항상 확인"),
+        small("운영 DB 해제", () => void bulk("운영 DB 표시 해제", { production: false })),
+        small("모두 읽기 전용", () => void bulk("읽기 전용으로", { read_only: true })),
+        small("읽기 전용 해제", () => void bulk("읽기 전용 해제", { read_only: false }))) : "",
+      h("div", { class: "row" },
+        h("button", { class: "primary", onclick: save }, "저장"),
+        g ? h("button", { class: "danger", onclick: remove }, "삭제") : null));
+    name.focus();
+  };
+  const move = async (run: Promise<void>) => {
+    try { await run; await refreshList(); } catch (err) { toast(errOf(err).message, "error"); }
+  };
+  /** 줄 끝의 ↑ ↓ — 같은 단계 안에서 자리 바꾸기 */
+  const arrows = (up: () => Promise<void>, down: () => Promise<void>, first: boolean, last: boolean) =>
+    h("span", { class: "cg-move" },
+      h("button", { class: "icon", title: "위로", disabled: first, onclick: (e: Event) => { e.preventDefault(); e.stopPropagation(); void move(up()); } }, "↑"),
+      h("button", { class: "icon", title: "아래로", disabled: last, onclick: (e: Event) => { e.preventDefault(); e.stopPropagation(); void move(down()); } }, "↓"));
+  const profileRow = (p: Profile, depth: number, i: number, n: number) =>
+    h("div", { class: "list-item cg-item", "data-name": `p:${p.name}`, style: `padding-left:${10 + depth * 16}px`, tabindex: "0",
+      onclick: () => edit(p), onkeydown: (e: KeyboardEvent) => { if (e.key === "Enter") edit(p); } },
+      h("span", { class: "dot", style: `background:${colorOf(p, groups) ?? "transparent"}` }),
+      h("span", { class: "cg-name" }, p.name, h("small", {}, ` ${p.user}@${p.connect_string}`)),
+      arrows(() => api.moveProfile(p.name, true), () => api.moveProfile(p.name, false), i === 0, i === n - 1));
+  const groupRows = (n: GroupNode, depth: number, i: number, count: number): HTMLElement[] => {
+    const path = n.group.path;
+    const closed = isCollapsed(path);
+    const row = h("div", { class: `list-item cg-group${closed ? " closed" : ""}`, "data-name": `g:${path}`, style: `padding-left:${4 + depth * 16}px`, tabindex: "0",
+      onclick: () => editGroup(n), onkeydown: (e: KeyboardEvent) => {
+        if (e.key === "Enter") editGroup(n);
+        else if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); setCollapsed(path, e.key === "ArrowLeft"); void refreshList(); }
+      } },
+      h("button", { class: "icon cg-fold", title: closed ? "펼치기" : "접기", onclick: (e: Event) => {
+        e.preventDefault(); e.stopPropagation(); setCollapsed(path, !closed); void refreshList();
+      } }, closed ? "▸" : "▾"),
+      h("span", { class: "dot", style: `background:${n.group.color ?? "transparent"}` }),
+      h("span", { class: "cg-name" }, groupLeaf(path), h("small", {}, ` ${countIn(n)}`)),
+      arrows(() => api.moveGroup(path, true), () => api.moveGroup(path, false), i === 0, i === count - 1));
+    if (closed) return [row];
+    return [row,
+      ...n.children.flatMap((c, k) => groupRows(c, depth + 1, k, n.children.length)),
+      ...n.profiles.map((p, k) => profileRow(p, depth + 1, k, n.profiles.length))];
+  };
   const refreshList = async () => {
-    const ps = await api.listProfiles();
+    const [ps, gs] = await Promise.all([api.listProfiles(), api.listGroups().catch(() => [] as Group[])]);
+    groups = gs;
+    const { roots, loose } = groupTree(groups, ps);
     list.replaceChildren(
-      ...ps.map((p) => h("button", { class: "list-item", "data-name": p.name, onclick: (e: Event) => { e.preventDefault(); edit(p); } },
-        h("span", { class: "dot", style: `background:${p.color ?? "transparent"}` }), `${p.name}`, h("small", {}, ` ${p.user}@${p.connect_string}`))),
-      h("button", { class: "list-item add", "data-name": "", onclick: (e: Event) => { e.preventDefault(); edit(); } }, "+ 새 접속"));
+      ...roots.flatMap((n, i) => groupRows(n, 0, i, roots.length)),
+      ...loose.map((p, i) => profileRow(p, 0, i, loose.length)),
+      h("button", { class: "list-item add", "data-name": "p:", onclick: (e: Event) => { e.preventDefault(); edit(); } }, "+ 새 접속"),
+      h("button", { class: "list-item add", "data-name": "g:", onclick: (e: Event) => { e.preventDefault(); editGroup(); } }, "+ 새 그룹"));
+    markActive(list, current);
+    // 툴바 접속 선택·접속 메뉴도 새 순서로
+    await app.reloadProfiles().catch(() => {});
   };
   await refreshList();
   if (!app.profiles.length) edit();
@@ -454,7 +585,8 @@ async function profilesPage(app: App) {
     h("button", { class: "small", onclick: pickTns }, "폴더 지정"),
     tns.configured ? h("button", { class: "small", onclick: async (e: Event) => { e.preventDefault(); await api.setTnsAdmin(null); toast("지정을 지웠습니다 — 다시 시작하면 기본 위치를 씁니다", "ok"); } }, "지정 해제") : "");
   return h("div", {},
-    h("h4", {}, "접속 프로필"), h("div", { class: "split" }, list, form),
+    h("h4", {}, "접속 프로필"), h("p", { class: "hint" }, "그룹은 두 단계까지 · ▸ 로 접고 펴기 · ↑ ↓ 로 같은 단계 안에서 순서 바꾸기 · 그룹을 누르면 이름·색·삭제"),
+    h("div", { class: "split" }, list, form),
     h("h4", {}, "tnsnames.ora"), h("p", { class: "hint" }, "접속 문자열 칸에 TNS 별칭을 쓰면 이 파일에서 찾습니다."), tnsBox, tnsList);
 }
 

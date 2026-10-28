@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use sqls_core::config::{config_path, Profile};
+use sqls_core::config::{config_path, group_parent, normalize_group, Config, Group, Profile, GROUP_SEP};
 use sqls_core::sql::{self, StmtKind};
 use sqls_core::{meta, ExecOptions, ExecOutcome, ExecResult, RowPage};
 use tauri::ipc::Channel;
@@ -204,10 +204,14 @@ pub fn list_profiles(st: State<'_, AppState>) -> Vec<ProfileView> {
 }
 
 #[tauri::command]
-pub fn save_profile(st: State<'_, AppState>, profile: Profile, original_name: Option<String>) -> R<()> {
+pub fn save_profile(st: State<'_, AppState>, mut profile: Profile, original_name: Option<String>) -> R<()> {
     if profile.name.trim().is_empty() || profile.user.trim().is_empty() || profile.connect_string.trim().is_empty() {
         return Err(ErrView::msg("invalid", "이름, 사용자, 접속 문자열은 비울 수 없습니다"));
     }
+    profile.group = match profile.group.as_deref().filter(|g| !g.trim().is_empty()) {
+        Some(g) => Some(normalize_group(g).ok_or_else(|| ErrView::msg("invalid", "그룹은 두 단계(예: ERP/운영)까지입니다"))?),
+        None => None,
+    };
     {
         let mut cfg = st.cfg.wr();
         let key = original_name.unwrap_or_else(|| profile.name.clone());
@@ -232,19 +236,154 @@ pub fn save_profile(st: State<'_, AppState>, profile: Profile, original_name: Op
             Some(p) => *p = profile,
             None => cfg.connections.push(profile),
         }
+        cfg.tidy_groups();
     }
     st.save_config()
 }
 
 #[tauri::command]
 pub fn delete_profile(st: State<'_, AppState>, name: String) -> R<()> {
+    remove_profile(&mut st.cfg.wr(), &name);
+    st.save_config()
+}
+
+fn remove_profile(cfg: &mut Config, name: &str) {
+    cfg.connections.retain(|p| !p.name.eq_ignore_ascii_case(name));
+    cfg.mcp.allowed_connections.retain(|n| !n.eq_ignore_ascii_case(name));
+    // 분석 결과는 남겨 두되, 다른 접속이 '이름이 바뀐 옛 결과' 로 이어 붙이지 않게 표시한다
+    sqls_analyze::mark_deleted(name);
+}
+
+// ── 접속 그룹 ─────────────────────────────────────
+
+/// `g` 가 `path` 그룹이거나 그 하위 그룹인지
+fn in_group(g: Option<&str>, path: &str) -> bool {
+    g.is_some_and(|g| g.eq_ignore_ascii_case(path) || g.to_uppercase().starts_with(&format!("{}/", path.to_uppercase())))
+}
+
+fn same_parent(a: &str, b: &str) -> bool {
+    group_parent(a).map(str::to_uppercase) == group_parent(b).map(str::to_uppercase)
+}
+
+#[tauri::command]
+pub fn list_groups(st: State<'_, AppState>) -> Vec<Group> {
+    st.cfg.rd().groups.clone()
+}
+
+/// 그룹을 만들거나 고친다 — `original` 이 있으면 그 그룹의 이름·위치를 바꾼다 (하위 그룹·접속도 따라간다)
+#[tauri::command]
+pub fn save_group(st: State<'_, AppState>, path: String, color: Option<String>, original: Option<String>) -> R<()> {
+    let path = normalize_group(&path).ok_or_else(|| ErrView::msg("invalid", "그룹 이름을 쓰세요 — 두 단계(예: ERP/운영)까지입니다"))?;
     {
         let mut cfg = st.cfg.wr();
-        cfg.connections.retain(|p| !p.name.eq_ignore_ascii_case(&name));
-        cfg.mcp.allowed_connections.retain(|n| !n.eq_ignore_ascii_case(&name));
+        let taken = |cfg: &Config| cfg.groups.iter().any(|g| g.path.eq_ignore_ascii_case(&path));
+        match original.as_deref().filter(|o| !o.is_empty()) {
+            None => {
+                if taken(&cfg) {
+                    return Err(ErrView::msg("invalid", format!("같은 이름의 그룹이 있습니다: {path}")));
+                }
+                cfg.groups.push(Group { path, color });
+            }
+            Some(orig) => {
+                let renamed = !path.eq_ignore_ascii_case(orig);
+                if renamed && taken(&cfg) {
+                    return Err(ErrView::msg("invalid", format!("같은 이름의 그룹이 있습니다: {path}")));
+                }
+                if renamed && in_group(Some(&path), orig) {
+                    return Err(ErrView::msg("invalid", "그룹을 자기 아래로 옮길 수 없습니다"));
+                }
+                let has_children = cfg.groups.iter().any(|g| group_parent(&g.path).is_some_and(|p| p.eq_ignore_ascii_case(orig)));
+                if has_children && path.contains(GROUP_SEP) {
+                    return Err(ErrView::msg("invalid", "하위 그룹이 있는 그룹은 다른 그룹 아래로 옮길 수 없습니다 (두 단계까지)"));
+                }
+                // 다른 그룹 아래로 옮기면 그 그룹의 끝에 둔다
+                let to_end = !same_parent(&path, orig);
+                let moved = |g: &str| format!("{path}{}", &g[orig.len()..]);
+                for g in cfg.groups.iter_mut() {
+                    if in_group(Some(&g.path), orig) {
+                        if g.path.eq_ignore_ascii_case(orig) {
+                            g.color = color.clone();
+                        }
+                        g.path = moved(&g.path);
+                    }
+                }
+                for p in cfg.connections.iter_mut() {
+                    if in_group(p.group.as_deref(), orig) {
+                        p.group = p.group.as_deref().map(moved);
+                    }
+                }
+                if to_end {
+                    let (mine, rest): (Vec<Group>, Vec<Group>) = std::mem::take(&mut cfg.groups).into_iter().partition(|g| in_group(Some(&g.path), &path));
+                    cfg.groups = rest;
+                    cfg.groups.extend(mine);
+                }
+            }
+        }
+        cfg.tidy_groups();
     }
-    // 분석 결과는 남겨 두되, 다른 접속이 '이름이 바뀐 옛 결과' 로 이어 붙이지 않게 표시한다
-    sqls_analyze::mark_deleted(&name);
+    st.save_config()
+}
+
+/// 그룹을 지운다 — `with_connections` 면 안의 접속도 지우고, 아니면 접속은 상위 그룹(맨 위면 그룹 없음)으로 옮긴다
+#[tauri::command]
+pub fn delete_group(st: State<'_, AppState>, path: String, with_connections: bool) -> R<()> {
+    {
+        let mut cfg = st.cfg.wr();
+        let parent = group_parent(&path).map(str::to_string);
+        if with_connections {
+            let names: Vec<String> = cfg.connections.iter().filter(|p| in_group(p.group.as_deref(), &path)).map(|p| p.name.clone()).collect();
+            for n in names {
+                remove_profile(&mut cfg, &n);
+            }
+        } else {
+            for p in cfg.connections.iter_mut() {
+                if in_group(p.group.as_deref(), &path) {
+                    p.group = parent.clone();
+                }
+            }
+        }
+        cfg.groups.retain(|g| !in_group(Some(&g.path), &path));
+        cfg.tidy_groups();
+    }
+    st.save_config()
+}
+
+/// 목록 `idx` 의 `k` 번째를 앞(`up`)이나 뒤의 것과 바꾼다
+fn swap_near<T>(v: &mut [T], idx: &[usize], k: usize, up: bool) {
+    let j = if up { k.checked_sub(1) } else { Some(k + 1).filter(|&j| j < idx.len()) };
+    if let Some(j) = j {
+        v.swap(idx[k], idx[j]);
+    }
+}
+
+/// 그룹을 같은 단계의 앞뒤 그룹과 자리를 바꾼다 (`up` 이면 위로)
+#[tauri::command]
+pub fn move_group(st: State<'_, AppState>, path: String, up: bool) -> R<()> {
+    {
+        let mut cfg = st.cfg.wr();
+        let sib: Vec<usize> = (0..cfg.groups.len()).filter(|&i| same_parent(&cfg.groups[i].path, &path)).collect();
+        let Some(k) = sib.iter().position(|&i| cfg.groups[i].path.eq_ignore_ascii_case(&path)) else {
+            return Err(ErrView::msg("invalid", format!("그룹이 없습니다: {path}")));
+        };
+        swap_near(&mut cfg.groups, &sib, k, up);
+    }
+    st.save_config()
+}
+
+/// 접속을 같은 그룹 안의 앞뒤 접속과 자리를 바꾼다 (`up` 이면 위로)
+#[tauri::command]
+pub fn move_profile(st: State<'_, AppState>, name: String, up: bool) -> R<()> {
+    {
+        let mut cfg = st.cfg.wr();
+        let Some(me) = cfg.connections.iter().position(|p| p.name.eq_ignore_ascii_case(&name)) else {
+            return Err(ErrView::msg("invalid", format!("접속 프로필이 없습니다: {name}")));
+        };
+        let key = |p: &Profile| p.group.as_deref().map(str::to_uppercase);
+        let g = key(&cfg.connections[me]);
+        let sib: Vec<usize> = (0..cfg.connections.len()).filter(|&i| key(&cfg.connections[i]) == g).collect();
+        let k = sib.iter().position(|&i| i == me).unwrap_or(0);
+        swap_near(&mut cfg.connections, &sib, k, up);
+    }
     st.save_config()
 }
 
@@ -335,7 +474,7 @@ pub async fn connect(
         connect_string: info.connect_string,
         server_version: info.server_version,
         read_only: info.read_only,
-        color: p.color.clone(),
+        color: st.cfg.rd().color_of(&p),
         production: p.production,
         sid: info.sid,
     })

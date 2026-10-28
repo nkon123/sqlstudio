@@ -5,18 +5,28 @@ import { type MenuItem } from "./ctxmenu";
 import { showShortcuts } from "./shortcuts";
 import { openPalette, type Command } from "./palette";
 import { toast } from "./ui";
+import { groupLeaf, groupTree, withGroup, type GroupNode } from "./conngroups";
+import type { Profile } from "./api";
 import type { App } from "./main";
 
 /** 접속 메뉴 — 프로필을 고르면 접속 (이미 접속한 탭에서 다른 프로필이면 새 탭), 다시 접속, 끊기, 접속 관리 */
 export function connMenu(app: App): MenuItem[] {
   const c = app.active?.conn;
   const pick = (name: string) => { app.profileSel.value = name; void app.connectActive(); };
+  const item = (p: Profile): MenuItem => ({
+    label: `${c?.profile === p.name ? "● " : ""}${p.name}`, hint: p.read_only ? "읽기 전용" : "",
+    disabled: app.btn.connect.disabled, run: () => pick(p.name),
+  });
+  // 그룹은 하위 메뉴로 — 지금 접속이 들어 있는 그룹에 ● 표시
+  const has = (n: GroupNode): boolean => n.profiles.some((p) => p.name === c?.profile) || n.children.some(has);
+  const group = (n: GroupNode): MenuItem => {
+    const sub = [...n.children.map(group), ...(n.children.length && n.profiles.length ? [{ sep: true } as MenuItem] : []), ...n.profiles.map(item)];
+    return { label: `${has(n) ? "● " : ""}${groupLeaf(n.group.path)}`, sub: sub.length ? sub : [{ label: "접속 없음", disabled: true }] };
+  };
+  const { roots, loose } = groupTree(app.groups, app.profiles);
   return [
     { title: c ? "다른 접속은 새 탭에서 엽니다" : "접속할 프로필" },
-    ...(app.profiles.length ? app.profiles.map((p): MenuItem => ({
-      label: `${c?.profile === p.name ? "● " : ""}${p.name}`, hint: p.read_only ? "읽기 전용" : "",
-      disabled: app.btn.connect.disabled, run: () => pick(p.name),
-    })) : [{ label: "프로필 없음 — 설정에서 추가", disabled: true } as MenuItem]),
+    ...(app.profiles.length ? [...roots.map(group), ...loose.map(item)] : [{ label: "프로필 없음 — 설정에서 추가", disabled: true } as MenuItem]),
     { sep: true },
     { label: "다시 접속", disabled: !c || app.btn.connect.disabled, run: () => { if (c) pick(c.profile); } },
     { label: "끊기", disabled: app.btn.disconnect.disabled, run: () => app.disconnectActive() },
@@ -91,7 +101,7 @@ export function palette(app: App) {
   const connectTo = (name: string) => { app.profileSel.value = name; void app.connectActive(); };
   const cmds: Command[] = [
     ...(c ? [{ group: "접속", label: `${c.profile} 다시 접속`, alias: "reconnect", disabled: off("connect"), run: () => connectTo(c.profile) }] : []),
-    ...app.profiles.map((p): Command => ({ group: "접속", label: `${p.name} 에 접속`, alias: "connect", disabled: off("connect"), run: () => connectTo(p.name) })),
+    ...app.profiles.map((p): Command => ({ group: "접속", label: `${withGroup(p)} 에 접속`, alias: "connect", disabled: off("connect"), run: () => connectTo(p.name) })),
     { group: "접속", label: "접속 끊기", alias: "disconnect", disabled: off("disconnect"), run: () => app.disconnectActive() },
     { group: "접속", label: "접속 관리", alias: "profile 프로필 설정", run: () => void app.settings() },
     { group: "실행", label: "문장 실행", keys: "Ctrl+Enter", alias: "run", disabled: off("run"), run: () => app.runStatement() },

@@ -316,4 +316,24 @@ if (d2.prefs.style !== "left" || d2.prefs.indent !== 4 || d2.prefs.commaBefore !
   throw new Error(`예시 읽기(왼쪽): ${JSON.stringify(d2.prefs)}`);
 }
 
+// MERGE 갈래 키워드 사이의 -- 주석 (THEN 뒤·UPDATE 뒤·DELETE 뒤·제 줄) — 예전에는 왼쪽 정렬로 넘어가 USING·DELETE 가 앞 줄에 붙었다
+eq("MERGE INTO TB_A TAR\nUSING (SELECT A,B,C,D FROM TB_B) SRC\nON (TAR.A = SRC.A AND TAR.B = SRC.B)\nWHEN MATCHED THEN -- 있으면 고친다\nUPDATE -- 값\nSET TAR.C = SRC.C, TAR.D = SRC.D\nDELETE -- 지울 것\nWHERE A = 'DEL'\nWHEN NOT MATCHED THEN\n-- 없으면 넣는다\nINSERT (A,B,C,D)\nVALUES (SRC.A,SRC.B,SRC.C,SRC.D)",
+`MERGE INTO TB_A TAR
+USING (SELECT A
+            , B
+            , C
+            , D
+         FROM TB_B) SRC
+   ON (TAR.A = SRC.A AND TAR.B = SRC.B)
+ WHEN MATCHED THEN -- 있으면 고친다
+      UPDATE -- 값
+         SET TAR.C = SRC.C
+           , TAR.D = SRC.D
+      DELETE -- 지울 것
+       WHERE A = 'DEL'
+ WHEN NOT MATCHED THEN
+      -- 없으면 넣는다
+      INSERT (A, B, C, D)
+      VALUES (SRC.A, SRC.B, SRC.C, SRC.D)`);
+
 console.log(`  포맷 ${n}건`);

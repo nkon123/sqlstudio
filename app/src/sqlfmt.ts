@@ -382,6 +382,13 @@ class Fmt {
     this.pos += n;
     this.prev = null;
   }
+  /** 키워드 사이의 주석 (WHEN MATCHED THEN -- 메모) — 같은 줄 주석은 그 줄 끝에, 제 줄 주석은 col 칸에 */
+  private lead(col: number) {
+    while (this.isComment(this.at())) {
+      if (this.at()!.nl) this.nl(col);
+      this.comment();
+    }
+  }
 
   /** MERGE INTO 대상 USING 원본 ON (조건) WHEN [NOT] MATCHED THEN … — 갈래 안의 UPDATE·INSERT 는 한 칸 들인 문장처럼:
    *
@@ -417,15 +424,18 @@ class Fmt {
       const n = this.up(1) === "NOT" ? 4 : 3;
       if (this.up(n - 2) !== "MATCHED" || this.up(n - 1) !== "THEN") throw new Error("WHEN [NOT] MATCHED THEN");
       this.kwAt(R - 4, n);
+      this.lead(B);
       const what = this.up();
       if (what === "UPDATE") {
         this.kwAt(B);
+        this.lead(BR - 3);
         if (this.up() !== "SET") throw new Error("UPDATE 에 SET 이 없습니다");
         this.kwAt(BR - 3);
         this.list(this.col() + 1, new Set(["WHEN", "WHERE", "DELETE"]));
         if (this.up() === "WHERE") { this.kwAt(BR - 5); this.cond(BR, new Set(["WHEN", "DELETE"])); }
         if (this.up() === "DELETE") {
           this.kwAt(B);
+          this.lead(BR - 5);
           if (this.up() === "WHERE") { this.kwAt(BR - 5); this.cond(BR, WHEN); }
         }
       } else if (what === "INSERT") {

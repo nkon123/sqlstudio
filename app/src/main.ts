@@ -25,6 +25,7 @@ import { aliasMap, showColumns } from "./colpopup";
 import { showMenu, type MenuItem } from "./ctxmenu";
 import { showUsage } from "./usage";
 import { showColumnSource } from "./colsource";
+import { showValueTrace } from "./valuetrace";
 import { showDiff, type Snapshot } from "./resultdiff";
 import { openCopyData } from "./copydata";
 import { openHistory } from "./history";
@@ -1635,6 +1636,9 @@ export class App {
     // 값의 출처 — 이 열이 어느 테이블.열이고, 어디서 그 열에 값을 넣는지 (분석 결과로)
     items.push({ label: "값의 출처 (어디서 오나)", hint: column ? column.name : "", disabled: !q || !t.conn || !column,
       run: () => this.showValueSource(t, col, column!) });
+    // 값 추적 — 이 행(키)의 이 값을 만든 문장을 다시 계산해 거슬러 오른다
+    items.push({ label: "이 값은 어떻게 나왔나 (값 추적)", hint: column ? `${column.name} = ${shown}` : "", disabled: !q || !t.conn || !column || n !== 1 || t.grid.isEditing(),
+      run: () => this.showValueTrace(t, col, column!) });
     // 고른 행만 보기·빼고 보기 — 화면에서만 거른다 (서버 쿼리는 그대로)
     items.push(
       { sep: true },
@@ -1698,6 +1702,23 @@ export class App {
       showUsage: (table, c) => void showUsage(id, table, c, async (owner, name, kind) =>
         this.newTab(true, await api.getDdl(id, kind, `"${owner}"."${name}"`).catch((e) => `-- ${errOf(e).message}`))),
       openAnalysis: () => { t.analysis(); },
+    });
+  }
+
+  private showValueTrace(t: Tab, col: number, column: Column) {
+    const q = t.lastQuery;
+    const r = t.grid.selectedRows()[0];
+    if (!q || !t.conn || !r) return;
+    const id = t.conn.id;
+    const row: [string, string | null][] = r.map((v, i) => [t.grid.columnAt(i)?.name ?? "", v]);
+    void showValueTrace(id, q.sql, col, column, row, {
+      openSource: (owner, name, kind, line) => this.openSource(id, owner, name, kind, line),
+      openAnalysis: () => { t.analysis(); },
+      explain: (text) => {
+        this.layout.toggle("right", true);
+        this.ai.askAbout("아래는 한 행의 값을 거슬러 오른 추적 결과다 (✓ 재현됨 = 그 문장을 이 키로 다시 계산한 값이 지금 값과 같음). " +
+          "이 값이 어떻게 나왔는지 단계별로 짧게 설명하고, 재현되지 않거나 조건에 걸러진 곳이 있으면 그 까닭을 짚어라. 추적에 없는 것은 지어내지 마라.\n\n" + text, true);
+      },
     });
   }
 

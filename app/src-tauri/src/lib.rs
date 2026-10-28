@@ -17,6 +17,7 @@ mod import;
 mod monitor;
 mod schemacmp;
 mod state;
+mod valuetrace;
 
 use state::AppState;
 
@@ -297,6 +298,13 @@ pub fn run() {
             ai::ai_guides_customize,
             ai::ai_guide_select,
             ai::set_ai_guide_select,
+            ai::ai_probe,
+            ai::ai_remember_example,
+            ai::ai_harness_opts,
+            ai::set_ai_harness_opts,
+            ai::ai_examples_clear,
+            valuetrace::value_trace_start,
+            valuetrace::value_trace_step,
             files::read_sql_file,
             files::write_sql_file,
             files::write_binary_file,

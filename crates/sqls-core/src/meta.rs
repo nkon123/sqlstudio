@@ -80,6 +80,73 @@ pub async fn list_objects(
         .collect())
 }
 
+/// 질문의 낱말로 찾은 테이블 후보 (AI 가 SQL 을 만들기 전에 고르게 한다)
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TableHit {
+    pub name: String,
+    pub comment: String,
+    pub score: usize,
+}
+
+/// 접속 사용자의 테이블·뷰에서 낱말과 맞는 것 — 이름·주석에 맞으면 3점, 맞는 컬럼(이름·주석)마다 1점 (5점까지).
+/// 낱말은 8개까지 (`%낱말%` LIKE). 점수 순으로 `limit` 개
+pub async fn find_tables(s: &Session, words: &[String], limit: usize) -> Result<Vec<TableHit>> {
+    let words: Vec<&String> = words.iter().take(8).collect();
+    if words.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut binds = vec![("O".to_string(), Some(s.info().user.clone()))];
+    for (i, w) in words.iter().enumerate() {
+        let esc = w.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        binds.push((format!("W{i}"), Some(format!("%{esc}%"))));
+    }
+    let any = |cols: &[&str]| -> String {
+        (0..words.len())
+            .flat_map(|i| cols.iter().map(move |c| format!("{c} LIKE :w{i} ESCAPE '\\'")))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    // 이름·주석: 맞은 낱말 수를 센다
+    let per_word: Vec<String> = (0..words.len())
+        .map(|i| format!("CASE WHEN UPPER(table_name) LIKE :w{i} ESCAPE '\\' OR comments LIKE :w{i} ESCAPE '\\' THEN 1 ELSE 0 END"))
+        .collect();
+    let tabs = s
+        .query(
+            &format!(
+                "SELECT table_name, comments, {} FROM all_tab_comments \
+                 WHERE owner = :o AND table_type IN ('TABLE','VIEW') AND table_name NOT LIKE 'BIN$%'",
+                per_word.join(" + ")
+            ),
+            binds.clone(),
+            20_000,
+        )
+        .await?;
+    let cols = s
+        .query(
+            &format!(
+                "SELECT table_name, COUNT(*) FROM all_col_comments WHERE owner = :o AND ({}) GROUP BY table_name",
+                any(&["column_name", "comments"])
+            ),
+            binds,
+            20_000,
+        )
+        .await?;
+    let col_hits: std::collections::HashMap<String, usize> =
+        cols.rows.iter().map(|r| (cell(r, 0), cell(r, 1).parse().unwrap_or(0))).collect();
+    let mut out: Vec<TableHit> = tabs
+        .rows
+        .iter()
+        .filter_map(|r| {
+            let name = cell(r, 0);
+            let score = cell(r, 2).parse::<usize>().unwrap_or(0) * 3 + col_hits.get(&name).copied().unwrap_or(0).min(5);
+            (score > 0).then(|| TableHit { name, comment: cell(r, 1), score })
+        })
+        .collect();
+    out.sort_by(|a, b| b.score.cmp(&a.score).then(a.name.cmp(&b.name)));
+    out.truncate(limit);
+    Ok(out)
+}
+
 pub async fn list_schemas(s: &Session) -> Result<Vec<String>> {
     let page = s.query("SELECT username FROM all_users ORDER BY username", vec![], 10_000).await?;
     Ok(page.rows.iter().map(|r| cell(r, 0)).collect())
@@ -433,6 +500,12 @@ pub async fn compile_errors(s: &Session, object_type: &str, qualified: &str) -> 
 ///   INDEX EMP_IX1(DEPTNO, HIREDATE)
 /// ```
 pub fn schema_brief(t: &TableDesc) -> String {
+    schema_brief_some(t, &|_| true)
+}
+
+/// 고른 컬럼만 넣은 요약 — 컬럼이 많은 테이블을 작은 모델 문맥에 맞출 때.
+/// PK 컬럼은 늘 넣고, 뺀 컬럼은 "… 외 N개" 로 적는다. 인덱스는 첫 컬럼이 남은 것만.
+pub fn schema_brief_some(t: &TableDesc, keep: &dyn Fn(&ColumnDesc) -> bool) -> String {
     let mut out = format!("{} {}.{}", t.object_type, t.owner, t.name);
     let mut tail = Vec::new();
     if let Some(c) = &t.comment {
@@ -445,7 +518,12 @@ pub fn schema_brief(t: &TableDesc) -> String {
         out.push_str(&format!("  -- {}", tail.join(" ")));
     }
     out.push('\n');
+    let mut kept: Vec<&str> = Vec::new();
     for c in &t.columns {
+        if !(keep(c) || t.primary_key.contains(&c.name)) {
+            continue;
+        }
+        kept.push(&c.name);
         out.push_str(&format!("  {} {}", c.name, c.data_type));
         if !c.nullable {
             out.push_str(" NOT NULL");
@@ -458,7 +536,13 @@ pub fn schema_brief(t: &TableDesc) -> String {
         }
         out.push('\n');
     }
+    if kept.len() < t.columns.len() {
+        out.push_str(&format!("  … 외 {}개 컬럼\n", t.columns.len() - kept.len()));
+    }
     for i in &t.indexes {
+        if !i.columns.first().is_some_and(|c| kept.contains(&c.as_str())) {
+            continue;
+        }
         out.push_str(&format!(
             "  {}INDEX {}({})\n",
             if i.unique { "UNIQUE " } else { "" },

@@ -42,7 +42,7 @@ fn adopt_old_results(st: &AppState, id: u64, profile: &str) {
     }
 }
 
-fn store_for(st: &AppState, id: u64) -> R<Store> {
+pub(crate) fn store_for(st: &AppState, id: u64) -> R<Store> {
     let p = profile_of(st, id)?;
     adopt_old_results(st, id, &p);
     Store::open(sqls_analyze::default_dir(&p)).map_err(|e| ErrView::msg("io", e.to_string()))
@@ -556,10 +556,10 @@ pub struct ColumnSource {
 }
 
 /// 읽어 둔 문장 목록 (파일과 고친 때가 같으면 다시 읽지 않는다)
-type Stmts = Arc<Vec<sqls_analyze::colwrite::StmtLite>>;
+pub(crate) type Stmts = Arc<Vec<sqls_analyze::colwrite::StmtLite>>;
 static STMTS: std::sync::Mutex<Option<(std::path::PathBuf, std::time::SystemTime, Stmts)>> = std::sync::Mutex::new(None);
 
-fn statements(path: &std::path::Path) -> Option<Stmts> {
+pub(crate) fn statements(path: &std::path::Path) -> Option<Stmts> {
     let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
     if let Some((p, t, v)) = STMTS.lk().as_ref() {
         if p == path && *t == mtime {

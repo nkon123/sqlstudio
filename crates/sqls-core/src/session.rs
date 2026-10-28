@@ -225,6 +225,8 @@ enum Cmd {
     Query { sql: String, binds: Vec<(String, Option<String>)>, max_rows: usize, reply: Reply<RowPage> },
     /// 실행계획 — EXPLAIN PLAN + DBMS_XPLAN.DISPLAY (11g 호환)
     Explain { sql: String, reply: Reply<Vec<String>> },
+    /// 파싱만 — DBMS_SQL.PARSE. 실행하지 않고, 열린 커서와 트랜잭션을 건드리지 않는다
+    Parse { sql: String, reply: Reply<()> },
     Commit { reply: Reply<()> },
     Rollback { reply: Reply<()> },
     Ping { reply: Reply<()> },
@@ -481,6 +483,17 @@ impl Session {
         self.call(|reply| Cmd::Explain { sql, reply }).await
     }
 
+    /// 문장이 서버에서 파싱되는지만 본다 (없는 테이블·컬럼, 문법 오류). 실행하지 않는다.
+    /// SELECT·DML 만 받는다 — DBMS_SQL.PARSE 는 DDL 을 받으면 그 자리에서 실행하기 때문이다.
+    pub async fn parse_only(&self, sql: &str) -> Result<()> {
+        let kind = sql::classify(sql);
+        if !matches!(kind, StmtKind::Query | StmtKind::Dml) {
+            return Err(Error::Invalid(format!("파싱 검사를 할 수 없는 문장입니다 ({kind:?})")));
+        }
+        let sql = sql.to_string();
+        self.call(|reply| Cmd::Parse { sql, reply }).await
+    }
+
     pub async fn commit(&self) -> Result<()> {
         self.call(|reply| Cmd::Commit { reply }).await
     }
@@ -720,6 +733,19 @@ impl Worker {
             }
             Cmd::Ping { reply } => {
                 let _ = reply.send(self.conn.ping().map_err(Error::from));
+            }
+            Cmd::Parse { sql, reply } => {
+                let r = self
+                    .conn
+                    .execute(
+                        "DECLARE c INTEGER := DBMS_SQL.OPEN_CURSOR; \
+                         BEGIN DBMS_SQL.PARSE(c, :1, DBMS_SQL.NATIVE); DBMS_SQL.CLOSE_CURSOR(c); \
+                         EXCEPTION WHEN OTHERS THEN IF DBMS_SQL.IS_OPEN(c) THEN DBMS_SQL.CLOSE_CURSOR(c); END IF; RAISE; END;",
+                        &[&sql],
+                    )
+                    .map(|_| ())
+                    .map_err(Error::from);
+                let _ = reply.send(r);
             }
             Cmd::Call { sql, ins, outs, reply } => {
                 let r = self.call_plsql(&sql, &ins, &outs);
@@ -1231,5 +1257,25 @@ select a.rowid rid, a.ename from emp a -- x
         ));
         let plan = s.explain("select * from dual").await.unwrap();
         assert!(plan.iter().any(|l| l.contains("DUAL")));
+    }
+
+    /// 실제 DB: AI 답 검증(파싱만 — 실행·결과 커서·트랜잭션을 건드리지 않는다)과 테이블 후보 찾기
+    #[tokio::test]
+    #[ignore]
+    async fn live_parse_only_and_find_tables() {
+        let dsn = std::env::var("SQLS_TEST_DSN").expect("SQLS_TEST_DSN");
+        let (cred, cs) = dsn.split_once('@').unwrap();
+        let (u, p) = cred.split_once('/').unwrap();
+        let s = Session::connect(ConnectSpec::new(u, p, cs)).await.unwrap();
+        s.parse_only("select * from dual").await.unwrap();
+        let e = s.parse_only("select no_such_col from dual").await.unwrap_err().to_string();
+        assert!(e.contains("ORA-00904"), "{e}");
+        assert!(s.parse_only("create table sqls_never (a number)").await.is_err(), "DDL 은 보내지 않는다");
+        // 보고 있던 결과는 이어서 읽힌다
+        s.execute("select level n from dual connect by level <= 100", ExecOptions { first_page: 10, ..Default::default() }).await.unwrap();
+        s.parse_only("select 1 from dual").await.unwrap();
+        assert_eq!(s.fetch_more(10).await.unwrap().fetched_total, 20);
+        let hits = crate::meta::find_tables(&s, &["주문".into(), "ORDER".into()], 10).await.unwrap();
+        assert!(hits.windows(2).all(|w| w[0].score >= w[1].score));
     }
 }

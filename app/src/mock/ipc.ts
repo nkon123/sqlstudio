@@ -351,7 +351,57 @@ const LOCAL: Record<string, (a: Args) => unknown> = {
   analyze_sql: analyze,
   app_info: () => ({ version: "가짜 모드 (브라우저)", config_path: "(없음)" }),
   tns_list: () => ({ entries: [] }),
-  list_providers: () => [],
+  list_providers: () => [{ name: "가짜 로컬", kind: "ollama", model: "qwen3.5:4b", remote: false, remote_ok: true, has_key: true,
+    profile: { model: "qwen3.5:4b", tok_per_sec: 74.5, json: true, think: true, context: 262144 } }],
+  ai_probe: async () => { await sleep(600); return { model: "qwen3.5:4b", tok_per_sec: 74.5, json: true, think: true, context: 262144 }; },
+  ai_harness_opts: () => ({ table_pick: "auto", examples: true, examples_count: 3, examples_path: "(가짜)/ai-examples.jsonl" }),
+  set_ai_harness_opts: () => null,
+  ai_examples_clear: () => null,
+  ai_remember_example: () => null,
+  // 값 추적 흉내: MERGE 가 재현되지 않음(0건) → 조건 진단, INSERT … SELECT 는 재현됨 + 원본 행 → 한 단계 더
+  value_trace_start: async () => {
+    await sleep(300);
+    const w = (o: Record<string, unknown>) => ({ notes: [], binds: [["K1", "A123"]], ran: true, values: [], dropped: [], unknown_vars: [], flag_conds: [], flag_rows: [], inputs: [], ...o });
+    return { target: { owner: "APP", table: "ORD_SUM", column: "TOT_AMT", keys: [["ORD_NO", "A123"]], value: "0", known: true, vars: [] }, analyzed: true, notes: [], writers: [
+      w({ node: "APP.PKG_ORD.P_SUMMARY", unit: "APP.PKG_ORD.PACKAGE_BODY", line: 212, kind: "MERGE", label: "MERGE · 있으면 UPDATE", expr: "NVL(S.AMT, 0)",
+        source: "FROM ORD_SUM T, (SELECT D.ORD_NO, SUM(D.AMT) AMT FROM ORD_DTL D WHERE D.STATUS = 'OK' GROUP BY D.ORD_NO) S WHERE T.ORD_NO = S.ORD_NO",
+        sql: "SELECT * FROM (SELECT NVL(S.AMT, 0) AS V__, T.ORD_NO AS K1__ FROM ORD_SUM T, (…) S WHERE (T.ORD_NO = S.ORD_NO)) WHERE K1__ = :K1 AND ROWNUM <= 5",
+        values: [], flag_conds: ["D.STATUS = 'OK'"], flag_rows: [["X"], ["X"], ["X"]] }),
+      w({ node: "APP.PKG_ORD.P_INIT", unit: "APP.PKG_ORD.PACKAGE_BODY", line: 88, kind: "INSERT", label: "INSERT … SELECT", expr: "NVL(SUM(D.AMT), 0)",
+        source: "FROM ORD_DTL D WHERE D.ORD_NO = H.ORD_NO GROUP BY D.ORD_NO", reproduced: true, values: ["0"],
+        sql: "SELECT * FROM (SELECT NVL(SUM(D.AMT), 0) AS V__, D.ORD_NO AS K1__ FROM ORD_DTL D GROUP BY D.ORD_NO) WHERE K1__ = :K1 AND ROWNUM <= 5",
+        inputs: [{ owner: null, table: "ORD_DTL", column: "AMT", alias: "D", key_cols: ["ORD_NO", "SEQ"], rows: [
+          { keys: [["ORD_NO", "A123"], ["SEQ", "1"]], value: null }, { keys: [["ORD_NO", "A123"], ["SEQ", "2"]], value: null }] }] }),
+    ] };
+  },
+  value_trace_step: async (a) => {
+    await sleep(300);
+    const t = (a as { target: Record<string, unknown> }).target;
+    return { target: { ...t, owner: "APP" }, analyzed: true, notes: [], writers: [
+      { node: "APP.PKG_IF.P_LOAD_DTL", unit: "APP.PKG_IF.PACKAGE_BODY", line: 41, kind: "INSERT", label: "INSERT … VALUES ← 커서 C_SRC (12줄)", expr: "(S.AMT_TXT)",
+        source: "FROM IF_ORD_DTL S WHERE S.IF_DT = V_BASE_DT", notes: [], binds: [["K1", "A123"], ["K2", "1"]], ran: true, values: [null], reproduced: true,
+        dropped: ["S.IF_DT = V_BASE_DT"], unknown_vars: ["V_BASE_DT"], flag_conds: [], flag_rows: [], inputs: [],
+        sql: "SELECT * FROM (SELECT (S.AMT_TXT) AS V__, S.ORD_NO AS K1__, S.SEQ AS K2__ FROM IF_ORD_DTL S) WHERE K1__ = :K1 AND K2__ = :K2 AND ROWNUM <= 5" },
+    ] };
+  },
+  ai_guides_info: () => ({ path: "(가짜)/oracle-guides.md", exists: false, builtin: 24, custom: 0 }),
+  ai_guide_select: () => "auto",
+  save_provider: () => null,
+  // 하네스 흉내: 문맥 → 첫 답(없는 컬럼) → 지우고 고친 답 → 서버 파싱 통과
+  ai_ask: async (a) => {
+    const ch = a.onEvent as Channel<unknown>;
+    const say = async (t: string) => { for (const w of t.match(/[\s\S]{1,6}/g) ?? []) { ch.onmessage({ type: "delta", text: w }); await sleep(15); } };
+    ch.onmessage({ type: "context", tables: ["SCOTT.EMP", "SCOTT.DEPT"], plan: false, remote: false, guides: ["ROWNUM 페이징"], tokens: 2140, budget: 8000, trimmed: ["컬럼 많은 테이블은 관련 컬럼만"],
+      picked: "ai", examples: ["부서별 사원 수"] });
+    await say("부서별 급여 합계입니다.\n```sql\nSELECT dept_no, SUM(sal) FROM emp GROUP BY dept_no;\n```");
+    ch.onmessage({ type: "status", text: "확인에서 걸렸습니다 (ORA-00904: \"DEPT_NO\": invalid identifier) — 고쳐 달라고 다시 묻는 중 (1/2)" });
+    await sleep(300);
+    ch.onmessage({ type: "reset" });
+    const text = "DEPT_NO 를 DEPTNO 로 고쳤습니다.\n```sql\nSELECT deptno, SUM(sal) AS total_sal\n  FROM emp\n GROUP BY deptno;\n```";
+    await say(text);
+    return { text, sql: "SELECT deptno, SUM(sal) AS total_sal FROM emp GROUP BY deptno;", model: "qwen3.5:4b", refused: false, truncated: false, output_tokens: 42, user_message: "## 요청\n" + (a.args as { question?: string }).question,
+      verify: { state: "ok", repairs: 1, first_problem: "ORA-00904: \"DEPT_NO\": invalid identifier" }, warnings: [] };
+  },
   get_mcp_settings: () => ({ allowed_connections: [], call_timeout_secs: 30, allow_explain: false }),
   history_search: () => [],
   client_log: () => null,

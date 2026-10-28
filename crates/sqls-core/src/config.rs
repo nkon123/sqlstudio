@@ -45,12 +45,27 @@ pub struct AiConfig {
     /// 카드 고르기 질의의 상한(초) — 넘으면 낱말로 고른 것만 쓴다
     #[serde(default = "default_guide_select_timeout")]
     pub guide_select_timeout_secs: u64,
+    /// SQL 생성에서 테이블을 모를 때 질문 낱말로 찾아 AI 에게 고르게 할지: "auto" | "off"
+    #[serde(default = "default_auto")]
+    pub table_pick: String,
+    /// 내 쿼리 예시 — 서버 파싱을 통과하고 에디터에 넣은 AI 의 SQL 을 쌓아 비슷한 질문에 예시로 (로컬 모델만)
+    #[serde(default = "default_true")]
+    pub examples: bool,
 }
 
 impl Default for AiConfig {
     fn default() -> Self {
-        Self { guide_select: default_guide_select(), guide_select_timeout_secs: default_guide_select_timeout() }
+        Self {
+            guide_select: default_guide_select(),
+            guide_select_timeout_secs: default_guide_select_timeout(),
+            table_pick: default_auto(),
+            examples: true,
+        }
     }
+}
+
+fn default_auto() -> String {
+    "auto".into()
 }
 
 fn default_guide_select() -> String {

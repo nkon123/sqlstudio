@@ -1,0 +1,119 @@
+[
+  {
+    "id": "top-n-11g",
+    "question": "급여가 높은 사원 10명을 이름, 부서명과 함께 보여줘",
+    "version": "11.2.0.4.0",
+    "user": "APP",
+    "schema": [
+      "TABLE APP.EMP  -- 사원\n  EMPNO NUMBER(4) NOT NULL PK  -- 사번\n  ENAME VARCHAR2(10)  -- 이름\n  JOB VARCHAR2(9)  -- 직무\n  MGR NUMBER(4)  -- 상사 사번\n  HIREDATE DATE  -- 입사일\n  SAL NUMBER(7,2)  -- 급여\n  COMM NUMBER(7,2)  -- 수당\n  DEPTNO NUMBER(2)  -- 부서번호\n",
+      "TABLE APP.DEPT  -- 부서\n  DEPTNO NUMBER(2) NOT NULL PK  -- 부서번호\n  DNAME VARCHAR2(14)  -- 부서명\n  LOC VARCHAR2(13)  -- 위치\n"
+    ],
+    "expect": { "must": ["ROWNUM|ROW_NUMBER|RANK|DENSE_RANK", "DNAME"], "must_not": ["FETCH FIRST", "OFFSET"] }
+  },
+  {
+    "id": "top-n-19c",
+    "question": "급여가 높은 사원 10명",
+    "version": "19.3.0.0.0",
+    "user": "APP",
+    "schema": [
+      "TABLE APP.EMP  -- 사원\n  EMPNO NUMBER(4) NOT NULL PK  -- 사번\n  ENAME VARCHAR2(10)  -- 이름\n  SAL NUMBER(7,2)  -- 급여\n  DEPTNO NUMBER(2)  -- 부서번호\n"
+    ],
+    "expect": { "must": ["SAL"] }
+  },
+  {
+    "id": "paging-11g",
+    "question": "주문을 최근 순으로 21번째부터 40번째까지 (2페이지, 페이지당 20건)",
+    "version": "11.2.0.4.0",
+    "user": "APP",
+    "schema": [
+      "TABLE APP.ORDERS  -- 주문\n  ORDER_ID NUMBER NOT NULL PK  -- 주문번호\n  CUST_ID NUMBER NOT NULL  -- 고객번호\n  ORDER_DT DATE NOT NULL  -- 주문일시\n  AMOUNT NUMBER(12,2)  -- 주문금액\n  STATUS VARCHAR2(10)  -- 상태(ORDERED, SHIPPED, CANCELED)\n  INDEX ORDERS_DT(ORDER_DT)\n"
+    ],
+    "expect": { "must": ["ROWNUM|ROW_NUMBER", "ORDER_DT"], "must_not": ["FETCH FIRST", "OFFSET"] }
+  },
+  {
+    "id": "group-join",
+    "question": "최근 7일 주문을 고객 이름별로 건수와 금액 합계, 합계 큰 순",
+    "version": "11.2.0.4.0",
+    "user": "APP",
+    "schema": [
+      "TABLE APP.ORDERS  -- 주문\n  ORDER_ID NUMBER NOT NULL PK  -- 주문번호\n  CUST_ID NUMBER NOT NULL  -- 고객번호\n  ORDER_DT DATE NOT NULL  -- 주문일시\n  AMOUNT NUMBER(12,2)  -- 주문금액\n  STATUS VARCHAR2(10)  -- 상태(ORDERED, SHIPPED, CANCELED)\n",
+      "TABLE APP.CUSTOMERS  -- 고객\n  CUST_ID NUMBER NOT NULL PK  -- 고객번호\n  CUST_NAME VARCHAR2(100)  -- 고객명\n  GRADE VARCHAR2(1)  -- 등급(A,B,C)\n"
+    ],
+    "expect": { "must": ["GROUP BY", "SUM", "COUNT", "CUST_NAME", "ORDER_DT"] }
+  },
+  {
+    "id": "outer-join-missing",
+    "question": "주문이 한 건도 없는 고객 목록",
+    "version": "11.2.0.4.0",
+    "user": "APP",
+    "schema": [
+      "TABLE APP.ORDERS  -- 주문\n  ORDER_ID NUMBER NOT NULL PK  -- 주문번호\n  CUST_ID NUMBER NOT NULL  -- 고객번호\n  ORDER_DT DATE NOT NULL  -- 주문일시\n",
+      "TABLE APP.CUSTOMERS  -- 고객\n  CUST_ID NUMBER NOT NULL PK  -- 고객번호\n  CUST_NAME VARCHAR2(100)  -- 고객명\n"
+    ],
+    "expect": { "must": ["NOT EXISTS|NOT IN|LEFT|MINUS", "CUSTOMERS"] }
+  },
+  {
+    "id": "merge-upsert",
+    "question": "STG_PRICE 의 값으로 PRICE 를 갱신하고, 없는 상품은 새로 넣는 MERGE",
+    "version": "11.2.0.4.0",
+    "user": "APP",
+    "schema": [
+      "TABLE APP.PRICE  -- 상품 가격\n  PROD_ID NUMBER NOT NULL PK  -- 상품번호\n  PRICE NUMBER(12,2)  -- 가격\n  UPD_DT DATE  -- 수정일\n",
+      "TABLE APP.STG_PRICE  -- 가격 적재\n  PROD_ID NUMBER NOT NULL  -- 상품번호\n  PRICE NUMBER(12,2)  -- 가격\n"
+    ],
+    "expect": { "must": ["MERGE INTO", "WHEN MATCHED", "WHEN NOT MATCHED", "STG_PRICE"] }
+  },
+  {
+    "id": "listagg-11g",
+    "question": "부서별로 사원 이름을 쉼표로 이어 한 줄로",
+    "version": "11.2.0.4.0",
+    "user": "APP",
+    "schema": [
+      "TABLE APP.EMP  -- 사원\n  EMPNO NUMBER(4) NOT NULL PK  -- 사번\n  ENAME VARCHAR2(10)  -- 이름\n  DEPTNO NUMBER(2)  -- 부서번호\n"
+    ],
+    "expect": { "must": ["LISTAGG|WM_CONCAT|XMLAGG", "GROUP BY"], "must_not": ["ON OVERFLOW"] }
+  },
+  {
+    "id": "hierarchy",
+    "question": "KING 아래 조직도를 들여쓰기해서 (사원-상사 관계)",
+    "version": "11.2.0.4.0",
+    "user": "APP",
+    "schema": [
+      "TABLE APP.EMP  -- 사원\n  EMPNO NUMBER(4) NOT NULL PK  -- 사번\n  ENAME VARCHAR2(10)  -- 이름\n  MGR NUMBER(4)  -- 상사 사번\n"
+    ],
+    "expect": { "must": ["CONNECT BY|WITH", "MGR"] }
+  },
+  {
+    "id": "date-range",
+    "question": "지난달 1일부터 말일까지 주문 건수를 일자별로",
+    "version": "19.3.0.0.0",
+    "user": "APP",
+    "schema": [
+      "TABLE APP.ORDERS  -- 주문\n  ORDER_ID NUMBER NOT NULL PK  -- 주문번호\n  ORDER_DT DATE NOT NULL  -- 주문일시\n  INDEX ORDERS_DT(ORDER_DT)\n"
+    ],
+    "expect": { "must": ["ORDER_DT", "TRUNC|TO_CHAR", "GROUP BY"] }
+  },
+  {
+    "id": "fix-invalid-column",
+    "task": "fix",
+    "question": "이 오류를 고쳐 줘",
+    "sql": "SELECT e.ename, e.salary FROM emp e WHERE e.deptno = 10",
+    "error": "ORA-00904: \"E\".\"SALARY\": invalid identifier",
+    "version": "11.2.0.4.0",
+    "user": "APP",
+    "schema": [
+      "TABLE APP.EMP  -- 사원\n  EMPNO NUMBER(4) NOT NULL PK  -- 사번\n  ENAME VARCHAR2(10)  -- 이름\n  SAL NUMBER(7,2)  -- 급여\n  DEPTNO NUMBER(2)  -- 부서번호\n"
+    ],
+    "expect": { "must": ["SAL"], "must_not": ["SALARY"] }
+  },
+  {
+    "id": "no-invent",
+    "question": "사원별 휴가 사용일 합계",
+    "version": "11.2.0.4.0",
+    "user": "APP",
+    "schema": [
+      "TABLE APP.EMP  -- 사원\n  EMPNO NUMBER(4) NOT NULL PK  -- 사번\n  ENAME VARCHAR2(10)  -- 이름\n"
+    ],
+    "expect": { "sql": false, "must_not": ["VACATION", "LEAVE"] }
+  }
+]

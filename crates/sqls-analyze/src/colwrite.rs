@@ -19,6 +19,15 @@ pub struct StmtLite {
     #[serde(default)]
     pub writes: Vec<TableUse>,
     pub text: String,
+    /// 커서 선언·커서 루프면 그 커서 이름 (값 추적이 레코드 필드를 거슬러 오를 때)
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// SELECT/FETCH … INTO 로 받는 변수
+    #[serde(default)]
+    pub into: Vec<String>,
+    /// 이 문장에 데이터를 대는 커서 (record R · variable V)
+    #[serde(default)]
+    pub fed_by: Vec<crate::flow::Feed>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -252,6 +261,9 @@ mod tests {
             kind: text.split_whitespace().next().unwrap_or("").to_uppercase(),
             writes: vec![TableUse { name: table.into(), ops: ops.into(), lines: vec![1] }],
             text: text.into(),
+            cursor: None,
+            into: vec![],
+            fed_by: vec![],
         }
     }
 

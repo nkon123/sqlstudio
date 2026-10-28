@@ -61,22 +61,34 @@ export type ProviderKind = "ollama" | "openai_compatible" | "anthropic";
 export interface Provider {
   name: string; kind: ProviderKind; base_url?: string | null; model: string; api_key_env?: string | null;
   max_tokens?: number; temperature?: number | null; num_ctx?: number | null; keep_alive?: string | null;
+  /** 한 번에 넣을 문맥의 상한(토큰). 비우면 로컬은 min(num_ctx×0.6, 8000) */
+  context_budget?: number | null;
   effort?: string | null; fallbacks?: boolean; connect_timeout_secs?: number; idle_timeout_secs?: number;
   /** 생각(thinking) 조절 — Ollama·OpenAI 호환: off | on | low | medium | high. 비우면 모델 기본 */
   think?: string | null;
   remote?: boolean; remote_ok?: boolean; has_key?: boolean;
   /** "auto"(기본) | "none" | "system" */
   proxy?: string | null;
+  /** 모델 측정 결과 (모델을 바꾸면 하네스가 쓰지 않는다) */
+  profile?: ModelProfile | null;
 }
+/** 모델 측정 — 첫 글자 이후 초당 토큰, 형식(JSON) 지정, 생각 모드, 모델 문맥 크기(Ollama) */
+export interface ModelProfile { model: string; tok_per_sec: number; json: boolean; think: boolean; context?: number | null }
+export interface HarnessOpts { table_pick: "auto" | "off"; examples: boolean; examples_count: number; examples_path: string }
 export type Task = "generate" | "explain" | "optimize" | "fix" | "chat";
 export interface ChatMsg { role: "user" | "assistant"; content: string }
 export type AiEvent =
   | { type: "status"; text: string }
-  | { type: "context"; tables: string[]; plan: boolean; remote: boolean; guides?: string[] }
-  | { type: "delta"; text: string };
+  | { type: "context"; tables: string[]; plan: boolean; remote: boolean; guides?: string[]; tokens?: number; budget?: number; trimmed?: string[];
+      /** 테이블을 하네스가 골랐으면 어떻게 */ picked?: "ai" | "keyword" | null; /** 넣은 내 쿼리 예시의 질문 */ examples?: string[] }
+  | { type: "delta"; text: string }
+  | { type: "reset" };
+/** 답의 SQL 확인 — ok: 서버 파싱까지 · static: 앱 안의 검사만 · failed: 고치지 못함 · none: SQL 없음 */
+export interface AiVerify { state: "ok" | "static" | "failed" | "none"; note?: string | null; repairs: number; first_problem?: string | null }
 export interface AiAnswer {
   text: string; sql?: string | null; model?: string | null; stop_reason?: string | null;
   refused: boolean; truncated: boolean; input_tokens?: number | null; output_tokens?: number | null; user_message: string;
+  verify?: AiVerify; warnings?: string[];
 }
 export interface CompletionItem {
   label: string; kind: string; detail?: string | null; info?: string | null; apply?: string | null; boost: number;
@@ -161,6 +173,13 @@ export const api = {
     return invoke<AiAnswer>("ai_ask", { args, onEvent: ch });
   },
   aiCancel: (requestId: number) => invoke<void>("ai_cancel", { requestId }),
+  /** 모델 측정 — 결과를 공급자 설정에 남긴다 */
+  aiProbe: (name: string) => invoke<ModelProfile>("ai_probe", { name }),
+  /** 서버 파싱을 통과한 AI 의 SQL 을 에디터에 넣었을 때 — 내 쿼리 예시로 쌓는다 */
+  aiRememberExample: (sessionId: number, question: string, sql: string) => invoke<void>("ai_remember_example", { sessionId, question, sql }),
+  harnessOpts: () => invoke<HarnessOpts>("ai_harness_opts"),
+  setHarnessOpts: (o: { tablePick?: string; examples?: boolean }) => invoke<void>("set_ai_harness_opts", o),
+  clearExamples: () => invoke<void>("ai_examples_clear"),
   readFile: (path: string) => invoke<{ text: string; encoding: string }>("read_sql_file", { path }),
   writeFile: (path: string, text: string, encoding: string) => invoke<void>("write_sql_file", { path, text, encoding }),
 };

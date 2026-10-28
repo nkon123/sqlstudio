@@ -1,7 +1,7 @@
 // AI 패널 — 공급자 선택, 작업 버튼, 스트리밍 답, "에디터에 넣기".
 
 import { invoke } from "@tauri-apps/api/core";
-import { api, errOf, type ChatMsg, type Provider, type Task } from "./api";
+import { api, errOf, type AiVerify, type ChatMsg, type Provider, type Task } from "./api";
 import { confirmBox, h, toast } from "./ui";
 
 export interface AiHost {
@@ -52,6 +52,14 @@ export class AiPanel {
         this.ask(this.history.length ? "chat" : "generate");
       }
     });
+  }
+
+  /** 다른 화면이 만든 질문 (값 추적 설명 등). 조회한 값이 담겼으면 localOnly — 외부 AI 로는 보내지 않는다 */
+  askAbout(text: string, localOnly: boolean) {
+    const p = this.current();
+    if (localOnly && p?.remote) return toast("조회한 값이 담겨 있어 외부 AI 로는 보내지 않습니다 — AI 패널에서 로컬 공급자를 고르세요", "error", 6000);
+    this.input.value = text;
+    void this.ask("chat");
   }
 
   /** Ctrl+K — 입력칸으로. 이미 쓴 글은 전체 선택해 바로 고쳐 쓰게 */
@@ -150,8 +158,20 @@ export class AiPanel {
       }, (ev) => {
         if (ev.type === "status") this.statusEl.textContent = ev.text;
         else if (ev.type === "context") {
-          meta.textContent = `문맥: ${ev.tables.length ? ev.tables.join(", ") : "테이블 없음"}${ev.plan ? " + 실행계획" : ""}${ev.remote ? " · 외부" : ""}` +
-            (ev.guides?.length ? ` · 참고 문법: ${ev.guides.join(", ")}` : "");
+          const by = ev.picked === "ai" ? " (AI 가 고름)" : ev.picked === "keyword" ? " (낱말로 고름)" : "";
+          meta.textContent = `문맥: ${ev.tables.length ? ev.tables.join(", ") + by : "테이블 없음"}${ev.plan ? " + 실행계획" : ""}${ev.remote ? " · 외부" : ""}` +
+            (ev.guides?.length ? ` · 참고 문법: ${ev.guides.join(", ")}` : "") +
+            (ev.examples?.length ? ` · 내 쿼리 예시 ${ev.examples.length}개` : "") +
+            (ev.tokens ? ` · 약 ${ev.tokens.toLocaleString()}/${(ev.budget ?? 0).toLocaleString()} 토큰` : "");
+          meta.title = [
+            ev.trimmed?.length ? `예산에 맞추느라 줄인 것: ${ev.trimmed.join(" · ")}` : "",
+            ev.examples?.length ? `참고로 넣은 예시: ${ev.examples.join(" / ")}` : "",
+          ].filter(Boolean).join("\n");
+          if (ev.trimmed?.length) meta.textContent += " (줄임)";
+        } else if (ev.type === "reset") {
+          // 다시 묻는 중 — 앞의 답을 지우고 새 답을 받는다
+          text = "";
+          body.replaceChildren();
         } else if (ev.type === "delta") {
           text += ev.text;
           this.statusEl.textContent = "답하는 중…";
@@ -162,7 +182,14 @@ export class AiPanel {
           }
         }
       });
-      render(body, ans.text, this.host);
+      // 서버 파싱을 통과한 SQL 을 에디터에 넣으면 내 쿼리 예시로 쌓는다 (로컬 모델만 — 다음 비슷한 질문에 예시로).
+      // 이어 묻기("조건 추가")는 질문만으로 뜻이 서지 않아 쌓지 않는다
+      const remember = ans.verify?.state === "ok" && !p.remote && ctx.sessionId != null && question && task === "generate"
+        ? (code: string) => { api.aiRememberExample(ctx.sessionId!, question, code).catch(() => {}); }
+        : undefined;
+      render(body, ans.text, this.host, remember);
+      const v = verifyLine(ans.verify, ans.warnings ?? []);
+      if (v) out.append(v);
       out.classList.remove("streaming");
       const secs = ((performance.now() - started) / 1000).toFixed(1);
       const notes: string[] = [`${ans.model ?? p.model} · ${secs}s`];
@@ -191,8 +218,25 @@ export class AiPanel {
   }
 }
 
+/** 답 아래 한 줄 — SQL 을 어디까지 확인했는지, 고쳤으면 무엇을, 하네스가 알릴 것 */
+function verifyLine(v: AiVerify | undefined, warnings: string[]): HTMLElement | null {
+  const parts: [string, string][] = [];
+  const fixed = v?.repairs ? ` · ${v.repairs}번 고침${v.first_problem ? ` (처음 답: ${firstLine(v.first_problem)})` : ""}` : "";
+  if (v?.state === "ok") parts.push(["ok", `✓ 서버에서 파싱 확인${fixed}`]);
+  else if (v?.state === "static") parts.push(["dim", `버전 문법만 확인 — ${v.note ?? ""}${fixed}`]);
+  else if (v?.state === "failed") parts.push(["err", `⚠ 확인에서 걸림${v.repairs ? ` (${v.repairs}번 고쳐도)` : ""}: ${v.note ?? ""}`]);
+  for (const w of warnings) parts.push(["warn", `⚠ ${w}`]);
+  if (!parts.length) return null;
+  return h("div", { class: "ai-verify" }, ...parts.map(([k, t]) => h("div", { class: k }, t)));
+}
+
+function firstLine(s: string) {
+  const l = s.split("\n")[0];
+  return l.length > 80 ? l.slice(0, 80) + "…" : l;
+}
+
 /** 아주 작은 마크다운: 코드 블록만 따로 그리고 나머지는 글자 그대로 */
-function render(el: HTMLElement, text: string, host: AiHost) {
+function render(el: HTMLElement, text: string, host: AiHost, onUse?: (code: string) => void) {
   const parts: Node[] = [];
   const re = /```([\w-]*)\n([\s\S]*?)(```|$)/g;
   let last = 0;
@@ -205,8 +249,8 @@ function render(el: HTMLElement, text: string, host: AiHost) {
     parts.push(h("div", { class: "code" },
       h("pre", {}, code),
       m[3] ? h("div", { class: "code-actions" },
-        isSql ? h("button", { onclick: () => host.insertSql(code) }, "커서에 넣기") : null,
-        isSql ? h("button", { onclick: () => host.replaceSql(code) }, "문장 바꾸기") : null,
+        isSql ? h("button", { onclick: () => { host.insertSql(code); onUse?.(code); } }, "커서에 넣기") : null,
+        isSql ? h("button", { onclick: () => { host.replaceSql(code); onUse?.(code); } }, "문장 바꾸기") : null,
         h("button", { onclick: () => navigator.clipboard.writeText(code).then(() => toast("복사했습니다", "ok")) }, "복사"),
       ) : null,
     ));

@@ -5,7 +5,9 @@
 //! 보여야 멈춘 것과 구분된다. 취소는 반환된 future 를 drop 하면 된다
 //! (HTTP 연결이 끊기고 서버도 생성을 멈춘다).
 
+pub mod eval;
 pub mod guides;
+pub mod harness;
 pub mod prompts;
 pub mod sse;
 
@@ -29,6 +31,8 @@ pub enum Error {
     Config(String),
     #[error("응답 시간이 초과되었습니다 ({0}초 동안 아무것도 오지 않음)")]
     Idle(u64),
+    #[error("모델이 같은 말을 되풀이해 끊었습니다")]
+    Repetition,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -72,6 +76,9 @@ pub struct ProviderConfig {
     /// Ollama: 컨텍스트 길이. 기본값(2048~4096)은 스키마 문맥을 조용히 잘라 버린다.
     #[serde(default)]
     pub num_ctx: Option<u32>,
+    /// 한 번에 넣을 문맥(스키마·문법 안내·대화 기록)의 상한(토큰). 비우면 harness::context_budget 의 기본값
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_budget: Option<u32>,
     /// Ollama: 모델을 메모리에 붙잡아 둘 시간 (예: "30m")
     #[serde(default)]
     pub keep_alive: Option<String>,
@@ -93,6 +100,25 @@ pub struct ProviderConfig {
     /// 프록시: "auto"(기본 — 사내 주소는 직접, 그 밖은 시스템 프록시) | "system" | "none"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// 모델 측정 결과 ([`Client::probe`]). 모델을 바꾸면 쓰지 않는다
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ModelProfile>,
+}
+
+/// 모델이 할 수 있는 것 — 설정 화면의 "모델 측정" 으로 잰다
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelProfile {
+    /// 잰 모델 (공급자의 모델을 바꾸면 이 값은 버린다)
+    pub model: String,
+    /// 첫 글자 이후 초당 토큰
+    pub tok_per_sec: f32,
+    /// 형식(JSON 스키마) 지정을 따르는지
+    pub json: bool,
+    /// 생각 모드가 있는지
+    pub think: bool,
+    /// 모델의 문맥 크기 (Ollama 만)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u32>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -123,12 +149,14 @@ impl ProviderConfig {
             connect_timeout_secs: default_connect_timeout(),
             idle_timeout_secs: default_idle_timeout(),
             num_ctx: None,
+            context_budget: None,
             keep_alive: None,
             effort: None,
             think: None,
             fallbacks: true,
             remote_ack: None,
             proxy: None,
+            profile: None,
         }
     }
 
@@ -228,6 +256,9 @@ pub struct ChatResponse {
     pub model: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    /// 받은 생각(화면에 내지 않음)의 길이(바이트) — 모델이 생각 모드를 쓰는지 가늠한다
+    #[serde(skip)]
+    pub thinking_chars: usize,
 }
 
 impl ChatResponse {
@@ -276,6 +307,7 @@ impl Client {
     }
 
     /// 스트리밍 채팅. 글자가 올 때마다 `on_delta` 가 불린다.
+    /// 본문이나 생각이 같은 말을 되풀이하면 `Error::Repetition` 으로 끊는다.
     pub async fn chat(
         &self,
         cfg: &ProviderConfig,
@@ -283,12 +315,25 @@ impl Client {
         mut on_delta: impl FnMut(&str) + Send,
     ) -> Result<ChatResponse> {
         let (url, body, headers) = build_request(cfg, req)?;
-        let resp = self.send_with_retry(cfg, &url, &body, &headers).await?;
+        let resp = match self.send_with_retry(cfg, &url, &body, &headers).await {
+            // 생각 조절을 모르는 모델 ("does not support thinking") — think 없이 다시
+            Err(Error::Api { status: 400, message }) if body.get("think").is_some() && message.to_lowercase().contains("think") => {
+                tracing::warn!("모델이 생각 조절을 받지 않아 빼고 다시 보냅니다: {message}");
+                let mut c = cfg.clone();
+                c.think = None;
+                let (url, body, headers) = build_request(&c, req)?;
+                self.send_with_retry(&c, &url, &body, &headers).await?
+            }
+            r => r?,
+        };
         let idle = Duration::from_secs(cfg.idle_timeout_secs.max(1));
         let mut stream = resp.bytes_stream();
         let mut out = ChatResponse::default();
         let mut sse = SseParser::new();
         let mut lines = LineParser::default();
+        let mut guard = harness::RepeatGuard::default();
+        let mut think = String::new();
+        let mut seen = 0usize;
 
         loop {
             let chunk = match tokio::time::timeout(idle, stream.next()).await {
@@ -302,34 +347,104 @@ impl Client {
             match cfg.kind {
                 ProviderKind::Ollama => {
                     for line in lines.push(&chunk) {
-                        if handle_ollama(&line, &mut out, &mut on_delta)? {
+                        if handle_ollama(&line, &mut out, &mut think, &mut on_delta)? {
+                            out.thinking_chars += think.len();
                             return Ok(out);
                         }
                     }
                 }
                 _ => {
                     for ev in sse.push(&chunk) {
-                        if handle_sse(cfg.kind, &ev, &mut out, &mut on_delta)? {
+                        if handle_sse(cfg.kind, &ev, &mut out, &mut think, &mut on_delta)? {
+                            out.thinking_chars += think.len();
                             return Ok(out);
                         }
                     }
                 }
+            }
+            let fresh = format!("{}{}", &out.text[seen..], think);
+            seen = out.text.len();
+            out.thinking_chars += think.len();
+            think.clear();
+            if guard.push(&fresh) {
+                return Err(Error::Repetition);
             }
         }
         // 마지막 빈 줄 없이 끝난 서버
         match cfg.kind {
             ProviderKind::Ollama => {
                 if let Some(line) = lines.finish() {
-                    handle_ollama(&line, &mut out, &mut on_delta)?;
+                    handle_ollama(&line, &mut out, &mut think, &mut on_delta)?;
                 }
             }
             _ => {
                 if let Some(ev) = sse.finish() {
-                    handle_sse(cfg.kind, &ev, &mut out, &mut on_delta)?;
+                    handle_sse(cfg.kind, &ev, &mut out, &mut think, &mut on_delta)?;
                 }
             }
         }
+        out.thinking_chars += think.len();
         Ok(out)
+    }
+
+    /// 모델 능력 재기 (설정 화면의 "모델 측정") — 속도, 형식(JSON) 지정, 생각 모드, 문맥 크기.
+    /// 하네스가 이 값으로 단계를 켜고 끈다 ([`harness::Plan`])
+    pub async fn probe(&self, cfg: &ProviderConfig) -> Result<ModelProfile> {
+        let mut c = cfg.clone();
+        c.max_tokens = 200;
+        c.temperature = Some(0.2);
+        c.think = Some("off".into());
+        let ask = |text: &str| ChatRequest { system: "짧게 답한다.".into(), messages: vec![Message::user(text)], json_schema: None };
+        // ① 속도 — 첫 글자 이후 초당 토큰 (모델 로딩·앞부분 읽기 시간은 뺀다)
+        let first: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+        let r = self
+            .chat(&c, &ask("1 부터 40 까지 쉼표로 이어 써라. 다른 말은 하지 마라."), |_| {
+                first.lock().unwrap().get_or_insert_with(std::time::Instant::now);
+            })
+            .await?;
+        let secs = first.lock().unwrap().map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
+        let toks = r.output_tokens.map(|t| t as usize).unwrap_or_else(|| harness::estimate_tokens(&r.text));
+        let tok_per_sec = if secs > 0.05 { toks as f32 / secs } else { 0.0 };
+        // ② 형식 지정 — 서버가 받고(400 이 아니고), 답이 그 형식인지
+        let mut jr = ask("ok 를 true 로 해서 답하라.");
+        jr.json_schema = Some(serde_json::json!({"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}));
+        let json = match self.chat(&c, &jr, |_| {}).await {
+            Ok(r) => {
+                let t = r.text.trim();
+                let body = t.find('{').and_then(|s| t.rfind('}').map(|e| &t[s..=e])).unwrap_or(t);
+                serde_json::from_str::<Value>(body).is_ok_and(|v| v["ok"].is_boolean())
+            }
+            Err(Error::Api { status: 400, .. }) => false,
+            Err(e) => return Err(e),
+        };
+        // ③ 생각 모드 — 켜고 물었을 때 생각이 오는지 (Anthropic 은 effort 로 따로 정한다)
+        let think = match cfg.kind {
+            ProviderKind::Anthropic => false,
+            _ => {
+                let mut t = c.clone();
+                t.think = Some("on".into());
+                t.max_tokens = 512;
+                match self.chat(&t, &ask("17 × 23 은?"), |_| {}).await {
+                    Ok(r) => r.thinking_chars > 0 || r.text.contains("<think>"),
+                    Err(Error::Api { status: 400, .. }) | Err(Error::Repetition) => false,
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+        // ④ 모델의 문맥 크기 (Ollama 만 알려 준다)
+        let context = match cfg.kind {
+            ProviderKind::Ollama => self.ollama_context_length(cfg).await,
+            _ => None,
+        };
+        Ok(ModelProfile { model: cfg.model.clone(), tok_per_sec: (tok_per_sec * 10.0).round() / 10.0, json, think, context })
+    }
+
+    /// Ollama `/api/show` 의 `<arch>.context_length`
+    async fn ollama_context_length(&self, cfg: &ProviderConfig) -> Option<u32> {
+        let url = format!("{}/api/show", cfg.base_url());
+        let resp = self.client_for(cfg).post(&url).json(&serde_json::json!({"model": cfg.model})).timeout(Duration::from_secs(30)).send().await.ok()?;
+        let v: Value = resp.json().await.ok()?;
+        v["model_info"].as_object()?.iter().find(|(k, _)| k.ends_with(".context_length")).and_then(|(_, n)| n.as_u64()).map(|n| n as u32)
     }
 
     /// 접속 확인 + 모델 목록 (설정 화면의 "연결 테스트")
@@ -650,11 +765,12 @@ fn build_request(cfg: &ProviderConfig, req: &ChatRequest) -> Result<Built> {
     }
 }
 
-/// SSE 이벤트 하나 처리. 스트림 끝이면 true.
+/// SSE 이벤트 하나 처리. 스트림 끝이면 true. 생각(화면에 내지 않음)은 `think` 에 더한다 — 반복 감지용
 fn handle_sse(
     kind: ProviderKind,
     ev: &crate::sse::SseEvent,
     out: &mut ChatResponse,
+    think: &mut String,
     on_delta: &mut impl FnMut(&str),
 ) -> Result<bool> {
     if ev.data == "[DONE]" {
@@ -673,6 +789,9 @@ fn handle_sse(
             }
             "content_block_delta" => {
                 // thinking 등 다른 블록은 화면에 내지 않는다
+                if let Some(t) = v["delta"]["thinking"].as_str() {
+                    think.push_str(t);
+                }
                 if v["delta"]["type"] == "text_delta" {
                     if let Some(t) = v["delta"]["text"].as_str() {
                         out.text.push_str(t);
@@ -708,6 +827,12 @@ fn handle_sse(
                 out.model = v["model"].as_str().map(String::from);
             }
             if let Some(ch) = v["choices"].get(0) {
+                // vLLM·LM Studio 는 reasoning_content, OpenRouter·Ollama 호환은 reasoning
+                for k in ["reasoning_content", "reasoning"] {
+                    if let Some(t) = ch["delta"][k].as_str() {
+                        think.push_str(t);
+                    }
+                }
                 if let Some(t) = ch["delta"]["content"].as_str() {
                     if !t.is_empty() {
                         out.text.push_str(t);
@@ -728,7 +853,7 @@ fn handle_sse(
 }
 
 /// Ollama 줄 하나 처리. 끝이면 true.
-fn handle_ollama(line: &str, out: &mut ChatResponse, on_delta: &mut impl FnMut(&str)) -> Result<bool> {
+fn handle_ollama(line: &str, out: &mut ChatResponse, think: &mut String, on_delta: &mut impl FnMut(&str)) -> Result<bool> {
     let v: Value = serde_json::from_str(line)
         .map_err(|e| Error::Protocol(format!("{e}: {}", truncate(line, 200))))?;
     if let Some(err) = v["error"].as_str() {
@@ -736,6 +861,9 @@ fn handle_ollama(line: &str, out: &mut ChatResponse, on_delta: &mut impl FnMut(&
     }
     if out.model.is_none() {
         out.model = v["model"].as_str().map(String::from);
+    }
+    if let Some(t) = v["message"]["thinking"].as_str() {
+        think.push_str(t);
     }
     if let Some(t) = v["message"]["content"].as_str() {
         if !t.is_empty() {

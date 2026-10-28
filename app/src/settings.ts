@@ -2,7 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { api, errOf, type Group, type Profile, type Provider, type TnsEntry, type TnsView } from "./api";
+import { api, errOf, type Group, type ModelProfile, type Profile, type Provider, type TnsEntry, type TnsView } from "./api";
 import { colorOf, countIn, groupLabel, groupLeaf, groupParent, groupTree, isCollapsed, setCollapsed, type GroupNode } from "./conngroups";
 import { DEFAULT_PREFS, STYLE_PRESETS, autoFormat, detectPrefs, formatSql, loadPrefs, savePrefs, setAutoFormat, type AutoFormat, type FormatPrefs } from "./format";
 import { restoreEnabled, setRestoreEnabled } from "./tabsession";
@@ -645,9 +645,10 @@ async function providersPage(app: App) {
     const key = h("input", { type: "password", placeholder: p?.has_key ? "(설정됨)" : "API 키" });
     const keyRemember = h("input", { type: "checkbox" });
     const numCtx = h("input", { type: "number", value: p?.num_ctx ?? "", placeholder: "16384" });
+    const budget = h("input", { type: "number", min: "1000", step: "1000", value: p?.context_budget ?? "", placeholder: "자동" }) as HTMLInputElement;
     const effort = h("select", {}, ...["", "low", "medium", "high", "xhigh", "max"].map((x) => h("option", { value: x, selected: (p?.effort ?? "") === x }, x || "(기본)")));
     // 생각(thinking) — Ollama 는 끄기·켜기·수준, OpenAI 호환은 끄기·수준(reasoning_effort)
-    const thinkOpts: [string, string][] = [["", "(모델 기본)"], ["off", "끄기 — 생각 없이 바로 답 (빠름)"], ["on", "켜기"], ["low", "낮음 (low)"], ["medium", "중간 (medium)"], ["high", "높음 (high)"]];
+    const thinkOpts: [string, string][] = [["", "(자동) — 로컬 모델은 SQL 생성·설명엔 끄고, 튜닝·오류 수정엔 모델 기본"], ["off", "끄기 — 생각 없이 바로 답 (빠름)"], ["on", "켜기"], ["low", "낮음 (low)"], ["medium", "중간 (medium)"], ["high", "높음 (high)"]];
     const think = h("select", {}, ...thinkOpts.map(([v, l]) => h("option", { value: v, selected: (p?.think ?? "") === v }, l))) as HTMLSelectElement;
     const fallbacks = h("input", { type: "checkbox", checked: p?.fallbacks ?? true });
     const maxTokens = h("input", { type: "number", value: p?.max_tokens ?? 8192 });
@@ -657,11 +658,15 @@ async function providersPage(app: App) {
       h("option", { value: "none", selected: p?.proxy === "none" }, "사용 안 함 — 항상 직접 연결"),
       h("option", { value: "system", selected: p?.proxy === "system" }, "시스템 프록시 사용"));
     const result = h("pre", { class: "modal-text" });
+    const profileNote = h("span", { class: "hint" }, p?.profile && p.profile.model === p.model ? profileText(p.profile) : "아직 재지 않음");
     const collect = (): Provider => ({
       name: name.value.trim(), kind: kind.value as Provider["kind"], base_url: base.value.trim() || null,
       model: model.value.trim(), api_key_env: keyEnv.value.trim() || null, num_ctx: numCtx.value ? Number(numCtx.value) : null,
       effort: effort.value || null, fallbacks: fallbacks.checked, max_tokens: Number(maxTokens.value) || 8192,
       proxy: proxy.value || null, think: kind.value === "anthropic" ? null : think.value || null,
+      context_budget: Number(budget.value) > 0 ? Math.floor(Number(budget.value)) : null,
+      // 화면에 칸이 없는 값은 그대로 둔다 (설정 파일에서 직접 정한 것)
+      temperature: p?.temperature ?? null, keep_alive: p?.keep_alive ?? null,
     });
     // 모델 목록 받아 오기 — 저장하지 않은 주소로도 된다. 종류가 Ollama 면 /api/tags
     let listRun = 0;
@@ -710,7 +715,10 @@ async function providersPage(app: App) {
         h("div", { style: "display:flex;gap:6px" }, model, modelBtn), modelPick, modelNote), "직접 쳐도 되고, '목록 받기'로 서버의 모델을 골라도 됩니다 (예: qwen2.5-coder:14b, gemma3:12b)"),
       field("API 키 환경변수", keyEnv), field("API 키", key, "설정 파일에는 쓰지 않습니다"),
       h("label", { class: "check" }, keyRemember, "OS 자격 증명 관리자에 저장 (끄면 이 실행 동안만)"),
-      ctxField, thinkField, effortField,
+      ctxField,
+      field("문맥 예산 (토큰)", budget, "스키마·문법 안내·대화 기록을 합쳐 이만큼까지 넣고, 넘치면 컬럼 많은 테이블은 관련 컬럼만 → 내 쿼리 예시 → 문법 안내 → 테이블 순서로 줄입니다. 비우면 자동: 로컬은 num_ctx 의 60% 와 8000 중 작은 값 (작은 모델은 문맥이 길면 중간을 놓칩니다)"),
+      thinkField, effortField,
+      field("모델 측정", profileNote, "'모델 측정' 버튼으로 잽니다. 모델을 바꾸면 다시 재야 씁니다"),
       h("label", { class: "check" }, fallbacks, "거절 시 대체 모델로 이어서 답하기 (Claude API 직통일 때만)"),
       field("max_tokens", maxTokens),
       h("div", { class: "row" },
@@ -732,6 +740,18 @@ async function providersPage(app: App) {
             result.classList.toggle("warn", !has);
           } catch (err) { result.textContent = errOf(err).message; }
         } }, "연결 테스트"),
+        h("button", { title: "짧은 질문 3개로 속도·형식(JSON) 지정·생각 모드·문맥 크기를 재서 저장합니다. 하네스가 이 값으로 단계를 고릅니다 (느린 모델은 중간 단계를 건너뜀)", onclick: async (e: Event) => {
+          e.preventDefault();
+          try {
+            const np = await persist();
+            result.textContent = "모델 측정 중… (질문 3개 — 모델 로딩까지 1분쯤 걸릴 수 있습니다)";
+            result.classList.remove("warn");
+            const prof = await api.aiProbe(np.name);
+            profileNote.textContent = profileText(prof);
+            result.textContent = `측정했습니다 — ${profileText(prof)}`;
+            await refreshList();
+          } catch (err) { result.textContent = errOf(err).message; }
+        } }, "모델 측정"),
         p ? h("button", { class: "danger", onclick: async (e: Event) => {
           e.preventDefault();
           if (!(await confirmBox("AI 연결 삭제", `'${p.name}' 연결을 지울까요?\n저장해 둔 API 키(OS 자격 증명 관리자)도 함께 지웁니다.`, "삭제"))) return;
@@ -754,6 +774,32 @@ async function providersPage(app: App) {
       h("button", { class: "list-item add", "data-name": "", onclick: (e: Event) => { e.preventDefault(); edit(); } }, "+ 새 공급자"));
   };
   await refreshList();
+  // 하네스 — 테이블 고르기, 내 쿼리 예시
+  const ho = await api.harnessOpts().catch(() => null);
+  const pickSel = h("select", {},
+    h("option", { value: "auto" }, "자동 — 테이블을 모르면 질문 낱말로 찾아 AI 가 고름"),
+    h("option", { value: "off" }, "끔")) as HTMLSelectElement;
+  pickSel.value = ho?.table_pick ?? "auto";
+  pickSel.addEventListener("change", () => {
+    api.setHarnessOpts({ tablePick: pickSel.value }).then(() => toast("저장했습니다", "ok", 1200)).catch((e) => toast(errOf(e).message, "error"));
+  });
+  const exOn = h("input", { type: "checkbox", checked: ho?.examples ?? true }) as HTMLInputElement;
+  exOn.addEventListener("change", () => {
+    api.setHarnessOpts({ examples: exOn.checked }).then(() => toast("저장했습니다", "ok", 1200)).catch((e) => toast(errOf(e).message, "error"));
+  });
+  const exCount = h("span", { class: "hint" }, `쌓인 예시 ${ho?.examples_count ?? 0}개`);
+  const harness = [
+    h("p", { class: "hint" }, "작은 로컬 모델이 덜 틀리게 하는 단계들입니다. 답의 SQL 은 늘 서버에서 파싱해 확인하고(운영 DB 제외), 걸리면 오류를 주고 다시 묻습니다."),
+    field("SQL 생성의 테이블 고르기", pickSel, "에디터 SQL 이나 탐색기에서 고른 테이블이 없을 때, 질문 낱말을 테이블·컬럼 이름과 주석에서 찾아 후보를 만들고 AI 에게 먼저 고르게 합니다 (고르기와 쓰기를 나누면 컬럼을 덜 지어냅니다)"),
+    h("label", { class: "check", title: "AI 가 만든 SQL 이 서버 파싱을 통과하고 '커서에 넣기'·'문장 바꾸기'를 누르면 질문과 함께 이 PC 의 데이터 폴더에 쌓아, 비슷한 질문에 1~2개를 예시로 넣습니다. 로컬 모델에만 씁니다" },
+      exOn, "내 쿼리 예시 — 에디터에 넣은 AI 의 SQL 을 쌓아 비슷한 질문에 예시로 (로컬 모델만)"),
+    h("div", { class: "row" }, exCount,
+      h("button", { title: ho?.examples_path ?? "", onclick: async (e: Event) => {
+        e.preventDefault();
+        if (!(await confirmBox("내 쿼리 예시 지우기", "쌓아 둔 예시를 모두 지울까요?", "지우기"))) return;
+        try { await api.clearExamples(); exCount.textContent = "쌓인 예시 0개"; toast("지웠습니다", "ok"); } catch (err) { toast(errOf(err).message, "error"); }
+      } }, "예시 지우기")),
+  ];
   // Oracle 문법 안내 — 요청에 맞는 카드를 골라 넣는다. 회사 규칙은 사용자 파일에
   const gi = await invoke<{ path: string; exists: boolean; builtin: number; custom: number }>("ai_guides_info").catch(() => null);
   const guideSel = h("select", {},
@@ -777,7 +823,18 @@ async function providersPage(app: App) {
   guideSel.addEventListener("change", () => {
     invoke("set_ai_guide_select", { mode: guideSel.value }).then(() => toast("저장했습니다", "ok", 1200)).catch((e) => toast(errOf(e).message, "error"));
   });
-  return h("div", {}, h("h4", {}, "AI 공급자"), h("div", { class: "split" }, list, form), h("h4", {}, "Oracle 문법 안내"), ...guides);
+  return h("div", {}, h("h4", {}, "AI 공급자"), h("div", { class: "split" }, list, form), h("h4", {}, "하네스"), ...harness, h("h4", {}, "Oracle 문법 안내"), ...guides);
+}
+
+/** 모델 측정 결과 한 줄 — 하네스가 무엇을 바꾸는지까지 */
+function profileText(m: ModelProfile) {
+  const slow = m.tok_per_sec > 0 && m.tok_per_sec < 8;
+  return [
+    m.tok_per_sec > 0 ? `${m.tok_per_sec} tok/s${slow ? " (느림 — 중간 단계를 건너뛰고 고치기는 한 번)" : ""}` : "속도 모름",
+    `JSON 형식 ${m.json ? "따름" : "못 따름 (형식 없이 보냄)"}`,
+    `생각 모드 ${m.think ? "있음" : "없음"}`,
+    m.context ? `모델 문맥 ${m.context.toLocaleString()}` : "",
+  ].filter(Boolean).join(" · ");
 }
 
 async function mcpPage(_app: App) {

@@ -347,3 +347,73 @@ async fn route_live() {
         }
     }
 }
+
+#[tokio::test]
+async fn thinking_loop_is_cut() {
+    // 생각(화면에 안 보임)이 같은 말을 되풀이 — 글자는 계속 오니 유휴 타임아웃으로는 안 잡힌다
+    let line = "{\"message\":{\"thinking\":\"잠깐, 다시 생각해 보면 이 테이블의 컬럼은 무엇일까? 다시 확인하자. \",\"content\":\"\"},\"done\":false}\n";
+    let m = mock(vec![Reply::Stream(200, "application/x-ndjson", (0..60).map(|_| line.to_string()).collect())]).await;
+    let c = cfg(ProviderKind::Ollama, &m.base);
+    let e = Client::new().chat(&c, &req(), |_| {}).await.unwrap_err();
+    assert!(matches!(e, Error::Repetition), "{e}");
+}
+
+#[tokio::test]
+async fn think_unsupported_falls_back() {
+    let m = mock(vec![
+        Reply::Stream(400, "application/json", vec!["{\"error\":\"\\\"m\\\" does not support thinking\"}".into()]),
+        Reply::Stream(200, "application/x-ndjson", vec!["{\"message\":{\"content\":\"ok\"},\"done\":true}\n".into()]),
+    ])
+    .await;
+    let mut c = cfg(ProviderKind::Ollama, &m.base);
+    c.think = Some("off".into());
+    let r = Client::new().chat(&c, &req(), |_| {}).await.unwrap();
+    assert_eq!(r.text, "ok");
+    let seen = m.seen.lock().unwrap();
+    assert!(seen[0].contains("\"think\":false") && !seen[1].contains("\"think\""));
+}
+
+#[tokio::test]
+async fn probe_measures_model() {
+    let nd = "application/x-ndjson";
+    let m = mock(vec![
+        // 속도
+        Reply::Stream(200, nd, vec!["{\"message\":{\"content\":\"1, 2, 3\"}}\n".into(), "{\"message\":{\"content\":\", 4\"},\"done\":true,\"eval_count\":40}\n".into()]),
+        // 형식 지정
+        Reply::Stream(200, nd, vec!["{\"message\":{\"content\":\"{\\\"ok\\\": true}\"},\"done\":true}\n".into()]),
+        // 생각 모드
+        Reply::Stream(200, nd, vec!["{\"message\":{\"content\":\"\",\"thinking\":\"17×23…\"}}\n".into(), "{\"message\":{\"content\":\"391\"},\"done\":true}\n".into()]),
+        // 문맥 크기
+        Reply::Stream(200, "application/json", vec!["{\"model_info\":{\"general.architecture\":\"qwen3\",\"qwen3.context_length\":32768}}".into()]),
+    ])
+    .await;
+    let c = cfg(ProviderKind::Ollama, &m.base);
+    let p = Client::new().probe(&c).await.unwrap();
+    assert!(p.json && p.think && p.context == Some(32768) && p.model == "m", "{p:?}");
+    let seen = m.seen.lock().unwrap();
+    assert!(seen[0].contains("\"think\":false") && seen[1].contains("\"format\"") && seen[2].contains("\"think\":true"));
+    assert!(seen[3].starts_with("POST /api/show"));
+}
+
+#[tokio::test]
+async fn eval_repairs_then_passes() {
+    let nd = "application/x-ndjson";
+    let line = |t: &str| format!("{}\n", serde_json::json!({"message": {"content": t}, "done": true, "eval_count": 30}));
+    let m = mock(vec![
+        Reply::Stream(200, nd, vec![line("```sql\nSELECT ename FROM emp ORDER BY sal DESC FETCH FIRST 10 ROWS ONLY;\n```")]),
+        Reply::Stream(200, nd, vec![line("```sql\nSELECT * FROM (SELECT ename FROM emp ORDER BY sal DESC) WHERE ROWNUM <= 10;\n```")]),
+    ])
+    .await;
+    let case: eval::Case = serde_json::from_value(serde_json::json!({
+        "id": "top10", "question": "급여 상위 10명", "version": "11.2.0.4.0",
+        "schema": ["TABLE APP.EMP\n  ENAME VARCHAR2(10)\n  SAL NUMBER\n"],
+        "expect": { "must": ["ROWNUM"] }
+    }))
+    .unwrap();
+    let c = cfg(ProviderKind::Ollama, &m.base);
+    let r = eval::run_case(&Client::new(), &c, &case, &eval::Options::default()).await.unwrap();
+    assert!(!r.pass_first && r.pass_final && r.repairs == 1 && r.out_tokens == 60, "{r:?}");
+    let seen = m.seen.lock().unwrap();
+    assert!(seen[0].contains("\"think\":false"), "로컬 모델의 SQL 생성은 생각을 끈다");
+    assert!(seen[1].contains("검증 결과") && seen[1].contains("FETCH FIRST"));
+}

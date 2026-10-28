@@ -39,6 +39,10 @@ pub struct CopyArgs {
     columns: Vec<String>,
     #[serde(default)]
     skip_errors: bool,
+    /// 이만큼 넣을 때마다 대상에서 커밋 (0·없음이면 커밋하지 않는다) — 큰 복사가 중간에 끊겨도 앞부분이 남고,
+    /// 대상의 UNDO 가 모자라 실패하지 않게
+    #[serde(default)]
+    commit_every: Option<u64>,
     #[serde(default)]
     confirmed: bool,
 }
@@ -158,6 +162,8 @@ pub struct CopySummary {
     stopped: bool,
     errors: Vec<(u64, String)>,
     txn_pending: bool,
+    /// 중간 커밋으로 확정된 행 수 (커밋 간격을 정했을 때)
+    committed: u64,
     elapsed_ms: u64,
 }
 
@@ -173,6 +179,12 @@ pub async fn copy_run(st: State<'_, AppState>, args: CopyArgs, on_event: Channel
     stop.store(false, Ordering::Relaxed);
     let started = Instant::now();
     let total = p.plan.src_rows;
+    let every = args.commit_every.unwrap_or(0);
+    tracing::info!(
+        "데이터 복사 시작: {} → {} ({}행, {:?}{})",
+        p.plan.src, p.plan.dst, total, args.mode,
+        if every > 0 { format!(", {every}행마다 커밋") } else { String::new() }
+    );
     let mut deleted = 0u64;
     if let Some(del) = &p.plan.delete_sql {
         let r = dst.execute(del, sqls_core::session::ExecOptions::default()).await?;
@@ -183,6 +195,8 @@ pub async fn copy_run(st: State<'_, AppState>, args: CopyArgs, on_event: Channel
     }
     src.open_side(&p.plan.select_sql, vec![]).await?;
     let (mut read, mut written, mut failed, mut stopped) = (0u64, 0u64, 0u64, false);
+    // 마지막 커밋 때까지 넣은 행
+    let mut committed = 0u64;
     let mut errors: Vec<(u64, String)> = Vec::new();
     let mut next = src.fetch_side(CHUNK).await;
     loop {
@@ -235,6 +249,16 @@ pub async fn copy_run(st: State<'_, AppState>, args: CopyArgs, on_event: Channel
         if written > 0 {
             txn.store(true, Ordering::Relaxed);
         }
+        if every > 0 && written - committed >= every {
+            if let Err(e) = dst.commit().await {
+                let ev: ErrView = e.into();
+                errors.push((read, format!("{written}행까지 넣고 커밋하다가 실패: {}", ev.message)));
+                stopped = true;
+                break;
+            }
+            committed = written;
+            txn.store(false, Ordering::Relaxed);
+        }
         let _ = on_event.send(CopyEvent::Progress { read, written, failed, total: total.max(read) });
         match fetched {
             Some(f) => next = f,
@@ -242,5 +266,16 @@ pub async fn copy_run(st: State<'_, AppState>, args: CopyArgs, on_event: Channel
         }
     }
     src.close_side();
-    Ok(CopySummary { read, written, failed, deleted, stopped, errors, txn_pending: txn.load(Ordering::Relaxed), elapsed_ms: started.elapsed().as_millis() as u64 })
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    // 큰 복사가 중간에 멈추면 무엇 때문인지 나중에 로그에서 본다
+    if stopped || failed > 0 {
+        tracing::warn!(
+            "데이터 복사 {}: 읽음 {read} · 넣음 {written} · 실패 {failed} · 커밋 {committed} · {}초 — {}",
+            if stopped { "멈춤" } else { "끝(실패 있음)" }, elapsed_ms / 1000,
+            errors.iter().take(3).map(|(n, m)| format!("{n}행: {m}")).collect::<Vec<_>>().join(" / ")
+        );
+    } else {
+        tracing::info!("데이터 복사 끝: 넣음 {written} · 커밋 {committed} · {}초", elapsed_ms / 1000);
+    }
+    Ok(CopySummary { read, written, failed, deleted, stopped, errors, txn_pending: txn.load(Ordering::Relaxed), committed, elapsed_ms })
 }

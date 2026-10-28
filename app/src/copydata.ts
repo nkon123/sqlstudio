@@ -12,7 +12,7 @@ interface CopyPlan {
   src_rows: number; dst_rows: number | null; select_sql: string; write_sql: string; delete_sql: string | null;
   warnings: string[]; production: boolean;
 }
-interface Summary { read: number; written: number; failed: number; deleted: number; stopped: boolean; errors: [number, string][]; txn_pending: boolean; elapsed_ms: number }
+interface Summary { read: number; written: number; failed: number; deleted: number; stopped: boolean; errors: [number, string][]; txn_pending: boolean; committed: number; elapsed_ms: number }
 type Ev = { type: "progress"; read: number; written: number; failed: number; total: number };
 
 /** 고를 수 있는 접속 (접속한 탭마다) */
@@ -54,6 +54,9 @@ export function openCopyData(hk: CopyHooks) {
   const mode = () => (radios.find((r) => r.checked)?.value ?? "append") as Mode;
   const skipErr = h("input", { type: "checkbox" }) as HTMLInputElement;
   skipErr.checked = true;
+  // 큰 복사는 중간에 커밋 — 끊겨도 앞부분이 남고 대상의 UNDO 가 모자라지 않게 (비우면 커밋하지 않는다)
+  const commitEvery = h("input", { type: "number", min: "0", step: "10000", placeholder: "안 함", style: "width:90px",
+    title: "이만큼 넣을 때마다 대상에서 커밋합니다. 비우면 커밋하지 않고 끝난 뒤 대상 탭에서 커밋·롤백합니다.\n중간에 커밋하면 멈췄을 때 롤백으로 전부 되돌릴 수 없습니다." }) as HTMLInputElement;
   const planBox = h("div", { class: "copy-plan" });
   const runBox = h("div", { class: "copy-run" });
   const previewBtn = h("button", { class: "small primary" }, "미리 보기") as HTMLButtonElement;
@@ -68,6 +71,7 @@ export function openCopyData(hk: CopyHooks) {
     dst_id: Number(dstSel.value), dst_table: (dstTable.value.trim() || (srcTable.value.trim().split(".").pop() ?? "")),
     cond: cond.value.trim() || null, mode: mode(), keys: mode() === "merge" ? keys : [],
     columns: plan ? [...picked] : [], skip_errors: skipErr.checked, confirmed,
+    commit_every: Number(commitEvery.value) > 0 ? Math.floor(Number(commitEvery.value)) : null,
   });
 
   const renderPlan = () => {
@@ -129,9 +133,10 @@ export function openCopyData(hk: CopyHooks) {
     if (!p) return;
     const dst = hk.conns.find((c) => c.id === Number(dstSel.value));
     const m = mode();
+    const every = args().commit_every;
     const what = m === "replace" ? `대상에서 ${p.dst_rows?.toLocaleString() ?? "?"}행을 지우고 ${p.src_rows.toLocaleString()}행을 넣습니다` :
       m === "merge" ? `${p.src_rows.toLocaleString()}행을 키(${keys.join(", ")})로 MERGE 합니다` : `${p.src_rows.toLocaleString()}행을 넣습니다`;
-    if (!(await confirmBox("데이터 복사", `${p.src} → ${dst?.label ?? ""} ${p.dst}\n\n${what}.\n커밋하지 않습니다 — 대상 탭에서 커밋하거나 롤백하세요.${p.production ? "\n\n⚠ 대상이 운영 DB 입니다." : ""}`, "복사"))) return;
+    if (!(await confirmBox("데이터 복사", `${p.src} → ${dst?.label ?? ""} ${p.dst}\n\n${what}.\n${every ? `${every.toLocaleString()}행마다 커밋합니다 — 멈추면 커밋한 데까지는 남습니다 (롤백으로 되돌릴 수 없음).` : "커밋하지 않습니다 — 대상 탭에서 커밋하거나 롤백하세요."}${p.production ? "\n\n⚠ 대상이 운영 DB 입니다." : ""}`, "복사"))) return;
     runBtn.disabled = previewBtn.disabled = true;
     stopBtn.hidden = false;
     const bar = h("progress", { max: Math.max(1, p.src_rows), value: 0, style: "width:100%" }) as HTMLProgressElement;
@@ -153,7 +158,8 @@ export function openCopyData(hk: CopyHooks) {
       runBox.replaceChildren(bar,
         h("div", { class: s.failed || s.stopped ? "warn-text" : "" },
           `${s.stopped ? "멈춤" : "끝"} · ${secs}초 · 읽음 ${s.read.toLocaleString()} · ${m === "merge" ? "넣거나 고침" : "넣음"} ${s.written.toLocaleString()}` +
-          `${s.deleted ? ` · 지움 ${s.deleted.toLocaleString()}` : ""}${s.failed ? ` · 실패 ${s.failed.toLocaleString()}` : ""}`),
+          `${s.deleted ? ` · 지움 ${s.deleted.toLocaleString()}` : ""}${s.failed ? ` · 실패 ${s.failed.toLocaleString()}` : ""}${s.committed ? ` · 커밋 ${s.committed.toLocaleString()}` : ""}`),
+        s.stopped && s.committed ? h("div", {}, `${s.committed.toLocaleString()}행까지 커밋되어 있습니다 — 이어서 옮기려면 방식을 MERGE 로 하거나, 조건으로 남은 행만 고르세요.`) : "",
         s.txn_pending ? h("div", {}, h("b", {}, "아직 커밋하지 않았습니다"), " — 대상 탭에서 결과를 확인하고 커밋하거나 롤백하세요.") : "",
         s.errors.length ? h("details", { open: true }, h("summary", {}, `오류 ${s.errors.length}건${s.errors.length >= 200 ? " (앞 200건)" : ""}`),
           h("pre", { class: "ob-src" }, s.errors.map(([n, m]) => `${n}행: ${m}`).join("\n"))) : "");
@@ -175,7 +181,8 @@ export function openCopyData(hk: CopyHooks) {
       radio("append", "추가", "INSERT 만 — 키가 겹치면 그 행은 실패"),
       radio("replace", "지우고 넣기", "대상에서 같은 조건의 행을 지우고 넣는다 (조건이 없으면 전체)"),
       radio("merge", "MERGE", "키가 같으면 고치고 없으면 넣는다 (키: 대상의 기본 키, 미리 보기에서 바꿀 수 있다)"),
-      h("label", { class: "rdiff-key", style: "margin-left:16px" }, skipErr, "오류 행은 건너뛰고 계속")),
+      h("label", { class: "rdiff-key", style: "margin-left:16px" }, skipErr, "오류 행은 건너뛰고 계속"),
+      h("label", { class: "rdiff-key", style: "margin-left:16px" }, "커밋 간격", commitEvery, "행")),
     h("div", { class: "row", style: "margin:6px 0" }, previewBtn, runBtn, stopBtn,
       h("span", { class: "dim", style: "font-size:12px" }, "원본 탭의 결과는 그대로 둡니다. 대상 탭에서 실행 중인 일이 있으면 끝난 뒤 시작합니다.")),
     planBox, runBox);

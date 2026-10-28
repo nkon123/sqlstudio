@@ -23,6 +23,8 @@ pub enum Task {
     Fix,
     /// 자유 대화
     Chat,
+    /// 값 추적 결과로 "이 값이 어디서 왔나" 를 풀어 준다 (고치지 않는다)
+    Trace,
 }
 
 /// 요청에 들어갈 재료
@@ -101,6 +103,14 @@ fn task_line(task: Task) -> &'static str {
         }
         Task::Fix => "할 일: 오류의 원인을 한 줄로 밝히고, 고친 SQL 을 낸다. 바꾼 부분을 짚는다.",
         Task::Chat => "할 일: 질문에 답한다.",
+        Task::Trace => {
+            "할 일: 위 '값 추적' 결과만 근거로, 이 값이 어디서 왔는지(출처)를 밝힌다. 고치는 방법·새 SQL 은 내지 않는다 (SQL 코드 블록을 쓰지 마라).
+             형식:
+             1) 출처 경로 — `대상 열 ← 넣은 문장(객체·줄) ← 원본 열 ← …` 을 한 줄로
+             2) 단계마다 한 줄: 원본 값이 어떤 식·조건을 거쳐 이 값이 되었는지 (원본 값 → 식 → 결과 값)
+             3) 확실하지 않은 곳: 재현되지 않은 문장, 추적이 끊긴 곳(분석하지 않은 소스·동적 SQL·값을 모르는 변수)
+             '재현됨' 인 문장이 이 행을 만든 길이다. 추적에 없는 테이블·문장은 지어내지 않는다."
+        }
     }
 }
 
@@ -140,7 +150,7 @@ pub fn user_message(task: Task, ctx: &Context) -> String {
             Task::Explain => "이 SQL 을 설명해 줘.",
             Task::Optimize => "이 SQL 을 튜닝해 줘.",
             Task::Fix => "이 오류를 고쳐 줘.",
-            Task::Chat => "",
+            Task::Chat | Task::Trace => "",
         }
         .to_string()
     });
@@ -292,6 +302,16 @@ mod tests {
         assert_eq!(parse_pick("```json\n{\"tables\": [\"orders\", \"NOPE\", \"CUSTOMERS\"]}\n```", &cands, 4), vec!["ORDERS", "CUSTOMERS"]);
         assert_eq!(parse_pick("[\"CUSTOMERS\", \"ORDERS\"]", &cands, 1), vec!["CUSTOMERS"]);
         assert!(parse_pick("모르겠다", &cands, 4).is_empty());
+    }
+
+    #[test]
+    fn trace_explains_origin_not_fix() {
+        let ctx = Context { question: Some("ORD_SUM(ORD_NO=A123).TOT_AMT = 0
+  ← MERGE …".into()), ..Default::default() };
+        let m = user_message(Task::Trace, &ctx);
+        assert!(m.contains("어디서 왔는지") && m.contains("새 SQL 은 내지 않는다") && m.contains("출처 경로"), "{m}");
+        assert!(m.ends_with("← MERGE …
+"));
     }
 
     #[test]

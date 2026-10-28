@@ -241,6 +241,7 @@ pub fn route_request(all: &[Guide], task: Task, text: &str, major: Option<u32>) 
         Task::Optimize => "튜닝",
         Task::Fix => "오류 고치기",
         Task::Chat => "대화",
+        Task::Trace => "값 출처 설명",
     };
     // 요청이 길면 앞부분만 (주제를 가늠하는 데는 충분하다)
     let req: String = text.chars().take(2000).collect();

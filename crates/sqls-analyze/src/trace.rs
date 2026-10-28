@@ -16,7 +16,7 @@ use crate::colwrite::StmtLite;
 use crate::plsql::{lex, Kind, Tok};
 
 /// 원본 쿼리 조각
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Source {
     /// 앞에 붙일 WITH … (없으면 빈칸)
     pub with: Vec<Tok>,
@@ -30,12 +30,28 @@ pub struct Source {
     pub group: Vec<Tok>,
     /// 별칭 → 테이블 이름 (테이블만, 인라인 뷰는 빼고)
     pub tables: Vec<(String, String)>,
+    /// 별칭 → 인라인 뷰(서브쿼리) 본문 (괄호 안)
+    pub views: Vec<(String, Vec<Tok>)>,
+}
+
+/// 값이 거쳐 온 층 하나 — 문장 자체, 커서, SELECT INTO, 서브쿼리 (대상 쪽에서 원본 쪽 순서)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Via {
+    /// 문장 · 커서 · SELECT INTO · 서브쿼리
+    pub kind: String,
+    /// 커서 이름·변수 이름·서브쿼리 별칭 (문장이면 빈칸)
+    pub name: String,
+    pub line: Option<u32>,
+    /// 이 층에서 그 값을 만드는 식
+    pub expr: String,
 }
 
 /// 문장 하나가 그 열을 채우는 길 하나 (MERGE 는 UPDATE·INSERT 두 갈래)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Path {
     pub label: String,
+    /// 거쳐 온 층 (대상 쪽 → 원본 쪽). 마지막 층의 식이 `expr` 이다
+    pub via: Vec<Via>,
     /// 그 열에 들어간 식 (원본 쪽)
     pub expr: Vec<Tok>,
     /// (대상 키 열, 원본 쪽 식) — 비면 키로 거르지 못한다
@@ -424,6 +440,83 @@ fn from_tables(from: &[Tok]) -> Vec<(String, String)> {
     out
 }
 
+/// FROM 의 인라인 뷰 (별칭 → 괄호 안 토큰)
+fn from_views(from: &[Tok]) -> Vec<(String, Vec<Tok>)> {
+    let d = depths(from);
+    let mut out = Vec::new();
+    let mut starts = vec![0];
+    for (i, x) in from.iter().enumerate() {
+        if d[i] == 0 && (sym(x, ",") || word(x) == Some("JOIN")) {
+            starts.push(i + 1);
+        }
+    }
+    for s0 in starts {
+        if !from.get(s0).is_some_and(|x| sym(x, "(")) {
+            continue;
+        }
+        let Some(e) = close_of(from, s0) else { continue };
+        let alias = from.get(e + 1).and_then(|x| match &x.kind {
+            Kind::Word(w) if !matches!(w.as_str(), "ON" | "JOIN" | "LEFT" | "RIGHT" | "INNER" | "FULL" | "CROSS" | "WHERE") => Some(w.clone()),
+            Kind::Quoted(w) => Some(w.clone()),
+            _ => None,
+        });
+        if let Some(a) = alias {
+            out.push((a, from[s0 + 1..e].to_vec()));
+        }
+    }
+    out
+}
+
+/// 식이 인라인 뷰(서브쿼리)의 열(`S.AMT`)이면 그 서브쿼리 안으로 한 층 내려간 길 —
+/// 식은 서브쿼리 항목으로, 키는 `대상키 = S.열` 조건을 따라 서브쿼리 항목으로 옮긴다. 못 내려가면 None
+pub fn unwrap_view(p: &Path) -> Option<Path> {
+    let src = p.src.as_ref()?;
+    // 식이 쓰는 인라인 뷰 별칭 — 하나여야 하고, 다른 별칭은 쓰지 않아야 한다
+    let used: Vec<&(String, Vec<Tok>)> = src.views.iter().filter(|(a, _)| uses_name(&p.expr, a)).collect();
+    let [(alias, body)] = used.as_slice() else { return None };
+    if src.tables.iter().any(|(a, _)| uses_name(&p.expr, a)) {
+        return None;
+    }
+    let sel = parse_select(body)?;
+    if sel.set_op {
+        return None;
+    }
+    let expr = replace_record(&p.expr, alias, &sel.items)?;
+    let mut keys = Vec::new();
+    for (kc, ke) in &p.keys {
+        // 키 식이 뷰를 쓰면 바로, 아니면 조건 `키식 = 뷰.열` 을 찾는다
+        if uses_name(ke, alias) {
+            if let Some(r) = replace_record(ke, alias, &sel.items) {
+                keys.push((kc.clone(), r));
+            }
+            continue;
+        }
+        let kt = sql_text(ke);
+        let mapped = src.conds.iter().find_map(|c| {
+            let eq = c.iter().position(|x| sym(x, "="))?;
+            let (l, r) = (&c[..eq], &c[eq + 1..]);
+            let other = if sql_text(l) == kt { r } else if sql_text(r) == kt { l } else { return None };
+            if !uses_name(other, alias) || other.len() != 3 {
+                return None;
+            }
+            replace_record(other, alias, &sel.items)
+        });
+        if let Some(m) = mapped {
+            keys.push((kc.clone(), m));
+        }
+    }
+    let mut via = p.via.clone();
+    if via.is_empty() {
+        via.push(Via { kind: "문장".into(), name: String::new(), line: None, expr: sql_text(&p.expr) });
+    }
+    via.push(Via { kind: "서브쿼리".into(), name: alias.clone(), line: None, expr: sql_text(&expr) });
+    let mut notes = Vec::new();
+    if keys.len() < p.keys.len() {
+        notes.push(format!("서브쿼리 {alias} 안으로 키를 잇지 못했습니다"));
+    }
+    Some(Path { via, label: format!("서브쿼리 {alias}"), expr, keys, src: Some(source_of(&sel)), key_vars: p.key_vars.clone(), notes })
+}
+
 fn source_of(sel: &Sel) -> Source {
     Source {
         with: sel.with.clone(),
@@ -432,6 +525,7 @@ fn source_of(sel: &Sel) -> Source {
         hier: sel.hier.clone(),
         group: sel.group.clone(),
         tables: from_tables(&sel.from),
+        views: from_views(&sel.from),
     }
 }
 
@@ -483,7 +577,7 @@ pub fn paths(stmt: &StmtLite, node_stmts: &[StmtLite], text: &str, table: &str, 
 }
 
 fn note_path(label: &str, note: impl Into<String>) -> Path {
-    Path { label: label.into(), expr: vec![], keys: vec![], src: None, key_vars: vec![], notes: vec![note.into()] }
+    Path { via: vec![], label: label.into(), expr: vec![], keys: vec![], src: None, key_vars: vec![], notes: vec![note.into()] }
 }
 
 fn insert_paths(stmt: &StmtLite, node_stmts: &[StmtLite], t: &[Tok], table: &str, col: &str, key_cols: &[String], table_cols: &[String]) -> Vec<Path> {
@@ -540,7 +634,11 @@ fn insert_paths(stmt: &StmtLite, node_stmts: &[StmtLite], t: &[Tok], table: &str
             if keys.len() < key_cols.len() {
                 notes.push("키 열 일부를 커서 쿼리와 잇지 못했습니다".into());
             }
-            return vec![Path { label: format!("INSERT … VALUES ← 커서 {} ({}줄)", f.0, cur.line), expr: e2, keys, src: Some(source_of(&sel)), key_vars, notes }];
+            let via = vec![
+                Via { kind: "문장".into(), name: String::new(), line: Some(stmt.line), expr: sql_text(&expr) },
+                Via { kind: "커서".into(), name: f.0.clone(), line: Some(cur.line), expr: sql_text(&e2) },
+            ];
+            return vec![Path { via, label: format!("INSERT … VALUES ← 커서 {} ({}줄)", f.0, cur.line), expr: e2, keys, src: Some(source_of(&sel)), key_vars, notes }];
         }
         // ② SELECT INTO 로 받은 변수
         if let Some(v) = bare_name(&expr) {
@@ -553,6 +651,10 @@ fn insert_paths(stmt: &StmtLite, node_stmts: &[StmtLite], t: &[Tok], table: &str
                     if let Some(p) = sel.into.iter().position(|x| x.eq_ignore_ascii_case(&v)) {
                         if let Some((e2, _)) = sel.items.get(p) {
                             return vec![Path {
+                                via: vec![
+                                    Via { kind: "문장".into(), name: String::new(), line: Some(stmt.line), expr: v.clone() },
+                                    Via { kind: "SELECT INTO".into(), name: v.clone(), line: Some(s.line), expr: sql_text(e2) },
+                                ],
                                 label: format!("INSERT … VALUES ← 변수 {v} (SELECT INTO {}줄)", s.line),
                                 expr: e2.clone(),
                                 keys: vec![],
@@ -565,7 +667,7 @@ fn insert_paths(stmt: &StmtLite, node_stmts: &[StmtLite], t: &[Tok], table: &str
                 }
             }
         }
-        return vec![Path { label: "INSERT … VALUES".into(), expr, keys: vec![], src: None, key_vars, notes: vec!["변수·상수·함수 값이라 다시 계산할 원본 쿼리가 없습니다".into()] }];
+        return vec![Path { via: vec![], label: "INSERT … VALUES".into(), expr, keys: vec![], src: None, key_vars, notes: vec!["변수·상수·함수 값이라 다시 계산할 원본 쿼리가 없습니다".into()] }];
     }
     let Some(sel) = parse_select(&t[i..]) else { return vec![] };
     if sel.set_op {
@@ -578,7 +680,7 @@ fn insert_paths(stmt: &StmtLite, node_stmts: &[StmtLite], t: &[Tok], table: &str
     if keys.len() < key_cols.len() {
         notes.push("키 열 일부가 INSERT 열에 없어 키로 거르지 못합니다".into());
     }
-    vec![Path { label: "INSERT … SELECT".into(), expr: sel.items[pos].0.clone(), keys, src: Some(source_of(&sel)), key_vars: vec![], notes }]
+    vec![Path { via: vec![], label: "INSERT … SELECT".into(), expr: sel.items[pos].0.clone(), keys, src: Some(source_of(&sel)), key_vars: vec![], notes }]
 }
 
 fn stmt_feeds(s: &StmtLite) -> Vec<(String, String)> {
@@ -626,12 +728,13 @@ fn merge_paths(t: &[Tok], table: &str, col: &str, key_cols: &[String]) -> Vec<Pa
     }
     let Some(on_end) = close_of(t, k + 1) else { return vec![] };
     let on = t[k + 2..on_end].to_vec();
-    // FROM 대상 별칭, (원본) 별칭 WHERE ON 조건 — 지금은 대상 행이 있으니 INSERT 갈래도 이렇게 다시 계산한다
+    // UPDATE 갈래: FROM 대상 별칭, (원본) 별칭 WHERE ON 조건 — 대상 행과 짝지어 다시 계산한다
+    let using_only = using.clone();
     let mut from: Vec<Tok> = t[2..table_at(t, 2).unwrap().1].to_vec();
     from.push(Tok { kind: Kind::Word(talias.clone()), line: 0 });
     from.push(Tok { kind: Kind::Sym(","), line: 0 });
     from.extend(using);
-    let base = Source { with: vec![], from: from.clone(), conds: split_and(&on), hier: vec![], group: vec![], tables: from_tables(&from) };
+    let base = Source { with: vec![], from: from.clone(), conds: split_and(&on), hier: vec![], group: vec![], tables: from_tables(&from), views: from_views(&from) };
     let keys: Vec<(String, Vec<Tok>)> = key_cols.iter().map(|kc| (kc.clone(), toks(&format!("{talias}.{}", kc.to_uppercase())))).collect();
     let d = depths(t);
     let mut out = Vec::new();
@@ -653,7 +756,7 @@ fn merge_paths(t: &[Tok], table: &str, col: &str, key_cols: &[String]) -> Vec<Pa
                     if uses_name(&expr, &talias) {
                         notes.push("대상의 이전 값을 써서 계산합니다 — 지금 값으로 다시 계산하면 다를 수 있습니다".into());
                     }
-                    out.push(Path { label: "MERGE · 있으면 UPDATE".into(), expr, keys: keys.clone(), src: Some(src), key_vars: vec![], notes });
+                    out.push(Path { via: vec![], label: "MERGE · 있으면 UPDATE".into(), expr, keys: keys.clone(), src: Some(src), key_vars: vec![], notes });
                 }
             }
             i = e;
@@ -672,7 +775,15 @@ fn merge_paths(t: &[Tok], table: &str, col: &str, key_cols: &[String]) -> Vec<Pa
                 let vals = split_commas(&t[j + 2..e]);
                 if let Some(p) = cols.iter().position(|c| c == col) {
                     if let Some(v) = vals.get(p) {
-                        out.push(Path { label: "MERGE · 없으면 INSERT".into(), expr: v.clone(), keys: keys.clone(), src: Some(base.clone()), key_vars: vec![], notes: vec![] });
+                        // INSERT 갈래는 대상 행이 없을 때 돈다 — 대상과 짝짓지 않고 원본(USING)만, 키는 INSERT 값 목록의 그 열
+                        let ikeys: Vec<(String, Vec<Tok>)> = key_cols.iter().filter_map(|kc| cols.iter().position(|c| c == &kc.to_uppercase()).and_then(|i| vals.get(i)).map(|e| (kc.clone(), e.clone()))).collect();
+                        let (src, keys2, notes) = if ikeys.len() == key_cols.len() {
+                            let src = Source { from: using_only.clone(), tables: from_tables(&using_only), views: from_views(&using_only), ..Default::default() };
+                            (src, ikeys, vec![])
+                        } else {
+                            (base.clone(), keys.clone(), vec!["키 열이 INSERT 값 목록에 없어 대상 행과 짝지어 계산합니다 (대상 행이 없으면 0건)".to_string()])
+                        };
+                        out.push(Path { via: vec![], label: "MERGE · 없으면 INSERT".into(), expr: v.clone(), keys: keys2, src: Some(src), key_vars: vec![], notes });
                     }
                 } else if cols.is_empty() {
                     out.push(note_path("MERGE · 없으면 INSERT", "열 목록 없는 INSERT 갈래는 위치를 모릅니다"));
@@ -717,7 +828,7 @@ fn update_paths(t: &[Tok], table: &str, col: &str, key_cols: &[String]) -> Vec<P
     }
     let mut from: Vec<Tok> = t[1..table_at(t, 1).unwrap().1].to_vec();
     from.push(Tok { kind: Kind::Word(alias.clone()), line: 0 });
-    let src = Source { with: vec![], from: from.clone(), conds, hier: vec![], group: vec![], tables: from_tables(&from) };
+    let src = Source { with: vec![], from: from.clone(), conds, hier: vec![], group: vec![], tables: from_tables(&from), views: from_views(&from) };
     let keys: Vec<(String, Vec<Tok>)> = key_cols.iter().map(|kc| (kc.clone(), toks(&format!("{alias}.{}", kc.to_uppercase())))).collect();
     for item in split_commas(&t[s..e]) {
         let Some(eq) = item.iter().position(|x| sym(x, "=")) else { continue };
@@ -745,14 +856,14 @@ fn update_paths(t: &[Tok], table: &str, col: &str, key_cols: &[String]) -> Vec<P
                 }
             }
             sub.push(')');
-            return vec![Path { label: "UPDATE … SET (…) = (SELECT …)".into(), expr: toks(&sub), keys, src: Some(src), key_vars: vec![], notes }];
+            return vec![Path { via: vec![], label: "UPDATE … SET (…) = (SELECT …)".into(), expr: toks(&sub), keys, src: Some(src), key_vars: vec![], notes }];
         }
         if set_target(lhs).as_deref() == Some(col) {
             let expr = rhs.to_vec();
             if uses_name(&expr, col) || uses_name(&expr, &alias) {
                 notes.push("이전 값을 써서 계산합니다 (예: 열 = 열 + 1) — 지금 값으로 다시 계산하면 다릅니다".into());
             }
-            return vec![Path { label: "UPDATE … SET".into(), expr, keys, src: Some(src), key_vars: vec![], notes }];
+            return vec![Path { via: vec![], label: "UPDATE … SET".into(), expr, keys, src: Some(src), key_vars: vec![], notes }];
         }
     }
     vec![]
@@ -917,6 +1028,88 @@ pub fn build(p: &Path, key_vals: &[(String, String)], vars: &[(String, String)],
     Ok(Queries { value, rows, row_cols, flags, flag_conds, binds, dropped })
 }
 
+/// 조인 단계 진단 하나 — 이 별칭까지 이었을 때 이 키로 남는 행 수를 세는 SELECT (열 N__)
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct JoinStep {
+    pub alias: String,
+    pub table: String,
+    /// 이 단계에서 더한 조인 조건 (첫 단계는 빈칸 — 키 조건만)
+    pub on: Vec<String>,
+    pub sql: String,
+}
+
+/// 식에 쓰인 원본 별칭 (`별칭.열` 의 별칭 중 FROM 의 테이블인 것)
+fn aliases_in(t: &[Tok], tables: &[(String, String)]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (i, x) in t.iter().enumerate() {
+        let Some(n) = name(x) else { continue };
+        if t.get(i + 1).is_some_and(|y| sym(y, ".")) && !(i > 0 && sym(&t[i - 1], ".")) && tables.iter().any(|(a, _)| *a == n) && !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// 이 키의 행이 어느 조인에서 사라지는지 — 키를 쥔 테이블에서 시작해 조인 조건으로 이어지는 테이블을 하나씩 더하며 센다.
+/// 쉼표로 이은 FROM 만 다룬다 (ANSI JOIN·인라인 뷰가 있으면 빈칸). 거르는 조건은 넣지 않는다 (조건 진단이 따로 본다).
+/// 바인드 이름은 [`build`] 와 같다 (K1… · 변수)
+pub fn join_steps(p: &Path, key_vals: &[(String, String)], vars: &[(String, String)], unknown: &[String]) -> Vec<JoinStep> {
+    let Some(src) = &p.src else { return vec![] };
+    if src.tables.len() < 2 || !src.views.is_empty() || src.from.iter().any(|t| word(t) == Some("JOIN")) {
+        return vec![];
+    }
+    let mut vars: Vec<(String, String)> = vars.to_vec();
+    for (v, kc) in &p.key_vars {
+        if let Some((_, val)) = key_vals.iter().find(|(k, _)| k.eq_ignore_ascii_case(kc)) {
+            vars.push((v.clone(), val.clone()));
+        }
+    }
+    let j = |t: &[Tok]| sql_text(&subst(t, &vars));
+    let joins: Vec<(&Vec<Tok>, Vec<String>)> = src
+        .conds
+        .iter()
+        .filter(|c| !unknown.iter().any(|u| uses_name(c, u)) && is_join(c, &src.tables))
+        .map(|c| (c, aliases_in(c, &src.tables)))
+        .collect();
+    let keyf: Vec<(String, Vec<String>)> = p
+        .keys
+        .iter()
+        .enumerate()
+        .filter(|(_, (kc, _))| key_vals.iter().any(|(k, _)| k.eq_ignore_ascii_case(kc)))
+        .map(|(n, (_, ke))| (format!("({}) = :K{}", j(ke), n + 1), aliases_in(ke, &src.tables)))
+        .collect();
+    let Some(start) = keyf.iter().find_map(|(_, a)| (a.len() == 1).then(|| a[0].clone())) else { return vec![] };
+    let table_of = |a: &str| src.tables.iter().find(|(x, _)| x == a).map(|(_, t)| t.clone()).unwrap_or_default();
+    let mut have = vec![start.clone()];
+    let mut used = vec![false; joins.len()];
+    let mut steps = Vec::new();
+    let count = |have: &[String], used: &[bool]| {
+        let from: Vec<String> = have.iter().map(|a| format!("{} {a}", table_of(a))).collect();
+        let mut w: Vec<String> = keyf.iter().filter(|(_, a)| !a.is_empty() && a.iter().all(|x| have.contains(x))).map(|(c, _)| c.clone()).collect();
+        w.extend(joins.iter().zip(used).filter(|(_, u)| **u).map(|((c, _), _)| format!("({})", j(c))));
+        format!("SELECT COUNT(*) AS N__ FROM {}{}", from.join(", "), if w.is_empty() { String::new() } else { format!(" WHERE {}", w.join(" AND ")) })
+    };
+    steps.push(JoinStep { alias: start.clone(), table: table_of(&start), on: vec![], sql: count(&have, &used) });
+    // 지금까지 이은 테이블과 닿는 조인 하나씩 — 그 조인의 다른 테이블을 더한다
+    while let Some(k) = (0..joins.len()).find(|&k| !used[k] && joins[k].1.iter().any(|a| have.contains(a)) && joins[k].1.iter().any(|a| !have.contains(a))) {
+        for a in &joins[k].1 {
+            if !have.contains(a) {
+                have.push(a.clone());
+            }
+        }
+        let mut on = Vec::new();
+        for (m, (c, al)) in joins.iter().enumerate() {
+            if !used[m] && al.iter().all(|a| have.contains(a)) {
+                used[m] = true;
+                on.push(sql_text(c));
+            }
+        }
+        let added = have.last().cloned().unwrap_or_default();
+        steps.push(JoinStep { alias: added.clone(), table: table_of(&added), on, sql: count(&have, &used) });
+    }
+    steps
+}
+
 /// 같은 값인지 — 앞뒤 공백, 숫자 표기(1 · 1.0 · .5)를 맞춰 본다
 pub fn same_value(a: Option<&str>, b: Option<&str>) -> bool {
     match (a.map(str::trim), b.map(str::trim)) {
@@ -964,6 +1157,12 @@ mod tests {
         let s = st("MERGE", 212, "MERGE INTO ORD_SUM T USING (SELECT D.ORD_NO, SUM(D.AMT) AMT FROM ORD_DTL D WHERE D.STATUS = 'OK' GROUP BY D.ORD_NO) S ON (T.ORD_NO = S.ORD_NO) WHEN MATCHED THEN UPDATE SET T.TOT_AMT = NVL(S.AMT, 0), T.UPD_DT = SYSDATE WHEN NOT MATCHED THEN INSERT (ORD_NO, TOT_AMT) VALUES (S.ORD_NO, NVL(S.AMT, 0))");
         let ps = paths(&s, &[], &s.text, "APP.ORD_SUM", "tot_amt", &["ORD_NO".into()], &[]);
         assert_eq!(ps.len(), 2, "{ps:?}");
+        // INSERT 갈래는 대상과 짝짓지 않는다 — 원본(USING)만, 키는 INSERT 값의 S.ORD_NO
+        let ins = &ps[1];
+        assert!(!ins.source_text().unwrap().contains("ORD_SUM T"), "{:?}", ins.source_text());
+        assert_eq!(sql_text(&ins.keys[0].1), "S.ORD_NO");
+        let inner = unwrap_view(ins).unwrap();
+        assert_eq!(sql_text(&inner.keys[0].1), "(D.ORD_NO)");
         assert_eq!(ps[0].label, "MERGE · 있으면 UPDATE");
         assert_eq!(ps[0].expr_text(), "NVL(S.AMT, 0)");
         assert_eq!(ps[1].expr_text(), "NVL(S.AMT, 0)");
@@ -973,6 +1172,40 @@ mod tests {
         assert_eq!(q.binds, keys(&[("K1", "A123")]));
         // 원본 열: S 는 인라인 뷰라 테이블 입력이 아니다
         assert!(ps[0].inputs().0.is_empty());
+    }
+
+    #[test]
+    fn merge_unwraps_using_subquery() {
+        let s = st("MERGE", 212, "MERGE INTO ORD_SUM T USING (SELECT D.ORD_NO, SUM(D.AMT) AMT FROM ORD_DTL D WHERE D.STATUS = 'OK' GROUP BY D.ORD_NO) S ON (T.ORD_NO = S.ORD_NO) WHEN MATCHED THEN UPDATE SET T.TOT_AMT = NVL(S.AMT, 0)");
+        let ps = paths(&s, &[], &s.text, "ORD_SUM", "TOT_AMT", &["ORD_NO".into()], &[]);
+        let inner = unwrap_view(&ps[0]).unwrap();
+        assert_eq!(inner.expr_text(), "NVL((SUM(D.AMT)), 0)");
+        assert_eq!(sql_text(&inner.keys[0].1), "(D.ORD_NO)");
+        assert_eq!(inner.via.iter().map(|v| v.kind.as_str()).collect::<Vec<_>>(), vec!["문장", "서브쿼리"]);
+        // 안쪽에서는 원본 테이블 열이 보인다 — 조건 진단도 안쪽 조건(STATUS)으로
+        assert_eq!(inner.inputs().0, vec![Input { alias: "D".into(), table: "ORD_DTL".into(), column: "AMT".into() }]);
+        let q = build(&inner, &keys(&[("ORD_NO", "A123")]), &[], &[], &[], &[]).unwrap();
+        assert_eq!(q.flag_conds, vec!["D.STATUS = 'OK'"]);
+        assert!(q.value.contains("GROUP BY D.ORD_NO) WHERE K1__ = :K1"), "{}", q.value);
+        // 더 내려갈 뷰가 없다
+        assert!(unwrap_view(&inner).is_none());
+    }
+
+    #[test]
+    fn join_steps_find_where_key_disappears() {
+        let s = st("INSERT", 10, "INSERT INTO ORD_SUM (ORD_NO, TOT_AMT) SELECT D.ORD_NO, SUM(D.AMT) FROM ORD_DTL D, ORD_HDR H, CUST C WHERE H.ORD_NO = D.ORD_NO AND C.CUST_ID = H.CUST_ID AND D.STATUS = 'OK' GROUP BY D.ORD_NO");
+        let ps = paths(&s, &[], &s.text, "ORD_SUM", "ORD_NO", &["ORD_NO".into()], &[]);
+        let js = join_steps(&ps[0], &keys(&[("ORD_NO", "A999")]), &[], &[]);
+        assert_eq!(js.iter().map(|x| x.alias.as_str()).collect::<Vec<_>>(), vec!["D", "H", "C"]);
+        assert_eq!(js[0].sql, "SELECT COUNT(*) AS N__ FROM ORD_DTL D WHERE (D.ORD_NO) = :K1");
+        assert_eq!(js[1].on, vec!["H.ORD_NO = D.ORD_NO"]);
+        assert!(js[2].sql.ends_with("FROM ORD_DTL D, ORD_HDR H, CUST C WHERE (D.ORD_NO) = :K1 AND (H.ORD_NO = D.ORD_NO) AND (C.CUST_ID = H.CUST_ID)"), "{}", js[2].sql);
+        // 거르는 조건(STATUS)은 넣지 않는다
+        assert!(!js[2].sql.contains("STATUS"));
+        // ANSI JOIN 은 다루지 않는다
+        let s = st("INSERT", 10, "INSERT INTO T (ID) SELECT A.ID FROM A JOIN B ON B.ID = A.ID");
+        let ps = paths(&s, &[], &s.text, "T", "ID", &["ID".into()], &[]);
+        assert!(join_steps(&ps[0], &keys(&[("ID", "1")]), &[], &[]).is_empty());
     }
 
     #[test]

@@ -75,7 +75,7 @@ export interface Provider {
 /** 모델 측정 — 첫 글자 이후 초당 토큰, 형식(JSON) 지정, 생각 모드, 모델 문맥 크기(Ollama) */
 export interface ModelProfile { model: string; tok_per_sec: number; json: boolean; think: boolean; context?: number | null }
 export interface HarnessOpts { table_pick: "auto" | "off"; examples: boolean; examples_count: number; examples_path: string }
-export type Task = "generate" | "explain" | "optimize" | "fix" | "chat";
+export type Task = "generate" | "explain" | "optimize" | "fix" | "chat" | "trace";
 export interface ChatMsg { role: "user" | "assistant"; content: string }
 export type AiEvent =
   | { type: "status"; text: string }

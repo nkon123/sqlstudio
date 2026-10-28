@@ -338,7 +338,7 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
     let all = sqls_llm::guides::load(Some(&guides_file()));
     let major = ctx.server_version.as_deref().and_then(prompts::major_version);
     // 낱말로 고르고, 설정에 따라 AI 에게도 고르게 한다 (자동: 낱말로 약할 때만 — 느린 모델이면 건너뜀). 실패·시간 초과면 낱말만
-    let route = match sel.guide_select.as_str() {
+    let route = args.task != Task::Trace && match sel.guide_select.as_str() {
         "always" => true,
         "off" => false,
         _ => plan.routing && !sqls_llm::guides::keyword_strong(&all, args.task, &text, major),
@@ -363,7 +363,8 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
             ctx.examples = examples().search(&example_db(s), q, 2).into_iter().map(|e| (e.q, e.sql)).collect();
         }
     }
-    let picked = sqls_llm::guides::pick_with(&all, args.task, &text, major, &ai_ids);
+    // 출처 설명은 문법 안내가 필요 없다 (SQL 을 쓰지 않는다)
+    let picked = if args.task == Task::Trace { vec![] } else { sqls_llm::guides::pick_with(&all, args.task, &text, major, &ai_ids) };
     let mut cards: Vec<&sqls_llm::guides::Guide> = picked.iter().map(|(g, _)| *g).collect();
 
     // ── 예산 맞추기 ──────────────────────────────────
@@ -403,7 +404,7 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
     // 작은 로컬 모델: SQL 을 쓰거나 설명할 때는 생각을 끈다 (빠르고, 되풀이에 빠지지 않는다 — 틀리면 검사가 잡는다).
     // 튜닝·오류 수정은 모델 기본값. 사용자가 생각·temperature 를 정했으면 그대로
     let mut mp = p.clone();
-    if local && p.think.is_none() && plan.think && matches!(args.task, Task::Generate | Task::Explain | Task::Chat) {
+    if local && p.think.is_none() && plan.think && matches!(args.task, Task::Generate | Task::Explain | Task::Chat | Task::Trace) {
         mp.think = Some("off".into());
     }
     if local && p.temperature.is_none() {
@@ -429,7 +430,8 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
     // ── 검증·수리 ────────────────────────────────────
     // 답의 SQL 을 앱 안에서(버전 문법) → 서버에서(파싱만) 확인하고, 걸리면 오류와 전체 컬럼을 주고 다시 묻는다
     let mut verify = Verify { state: "none", ..Default::default() };
-    if args.task != Task::Explain {
+    // 설명·출처 설명은 SQL 을 내지 않는다 — 검증하지 않는다
+    if !matches!(args.task, Task::Explain | Task::Trace) {
         let mut msgs = req.messages.clone();
         let mut known: Vec<meta::TableDesc> = descs.clone();
         while let Some(sql) = prompts::extract_sql(&resp.text) {

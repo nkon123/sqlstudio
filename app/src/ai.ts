@@ -2,6 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { api, errOf, type AiVerify, type ChatMsg, type Provider, type Task } from "./api";
+import { glowProgress } from "./glow";
 import { confirmBox, h, toast } from "./ui";
 
 export interface AiHost {
@@ -54,12 +55,45 @@ export class AiPanel {
     });
   }
 
-  /** 다른 화면이 만든 질문 (값 추적 설명 등). 조회한 값이 담겼으면 localOnly — 외부 AI 로는 보내지 않는다 */
-  askAbout(text: string, localOnly: boolean) {
+  /** 다른 화면 안에서 답을 받는다 (값 추적 설명). 조회한 값이 담겨 로컬 공급자에만 보내고, 대화 기록에는 넣지 않는다 */
+  async explainInto(text: string, out: HTMLElement): Promise<void> {
     const p = this.current();
-    if (localOnly && p?.remote) return toast("조회한 값이 담겨 있어 외부 AI 로는 보내지 않습니다 — AI 패널에서 로컬 공급자를 고르세요", "error", 6000);
-    this.input.value = text;
-    void this.ask("chat");
+    if (!p) throw new Error("AI 공급자를 먼저 설정하세요 (설정 → AI)");
+    if (p.remote) throw new Error("조회한 값이 담겨 있어 외부 AI 로는 보내지 않습니다 — AI 패널에서 로컬 공급자를 고르세요");
+    if (this.running != null) throw new Error("AI 패널이 다른 질문에 답하는 중입니다 — 끝난 뒤 다시 누르세요");
+    const id = reqSeq++;
+    this.running = id;
+    this.stopBtn.disabled = false;
+    const glow = glowProgress(`${p.model} 이(가) 추적을 읽는 중…`);
+    const body = h("div", { class: "md" });
+    out.replaceChildren(glow.el, body);
+    let acc = "";
+    let pending = false;
+    try {
+      const ctx = this.host.context();
+      const ans = await api.aiAsk({ request_id: id, provider: p.name, task: "trace", session_id: ctx.sessionId, question: text }, (ev) => {
+        if (ev.type === "status") glow.label(ev.text);
+        else if (ev.type === "reset") { acc = ""; body.replaceChildren(); }
+        else if (ev.type === "delta") {
+          acc += ev.text;
+          glow.label("답하는 중…");
+          if (!pending) {
+            pending = true;
+            requestAnimationFrame(() => { pending = false; render(body, acc, this.host); });
+          }
+        }
+      });
+      render(body, ans.text, this.host);
+    } finally {
+      glow.done();
+      this.running = null;
+      this.stopBtn.disabled = true;
+    }
+  }
+
+  /** 지금 질문 멈추기 (다른 화면에서) */
+  cancelCurrent() {
+    this.stop();
   }
 
   /** Ctrl+K — 입력칸으로. 이미 쓴 글은 전체 선택해 바로 고쳐 쓰게 */
@@ -134,7 +168,7 @@ export class AiPanel {
     const id = reqSeq++;
     this.running = id;
     this.stopBtn.disabled = false;
-    const label = { generate: "SQL 생성", explain: "설명", optimize: "튜닝", fix: "오류 수정", chat: "질문" }[task];
+    const label = { generate: "SQL 생성", explain: "설명", optimize: "튜닝", fix: "오류 수정", chat: "질문", trace: "출처 설명" }[task];
     this.log.append(h("div", { class: "msg user" }, h("small", {}, label), question || (ctx.sql ?? "").slice(0, 300)));
     const out = h("div", { class: "msg assistant streaming" });
     const meta = h("small", {});
@@ -148,6 +182,9 @@ export class AiPanel {
     const tick = setInterval(() => {
       this.statusEl.dataset.elapsed = `${Math.round((performance.now() - started) / 1000)}s`;
     }, 500);
+    // 기다리는 동안 은은한 진행 막대 (글자가 오기 시작하면 '답하는 중')
+    const glow = glowProgress("", { compact: true });
+    this.statusEl.before(glow.el);
 
     try {
       const ans = await api.aiAsk({
@@ -175,6 +212,7 @@ export class AiPanel {
         } else if (ev.type === "delta") {
           text += ev.text;
           this.statusEl.textContent = "답하는 중…";
+          glow.label("");
           // 글자마다 다시 그리지 않고 프레임마다 한 번
           if (!pending) {
             pending = true;
@@ -210,6 +248,7 @@ export class AiPanel {
       this.statusEl.textContent = err.kind === "cancelled" ? "취소했습니다" : "실패";
     } finally {
       clearInterval(tick);
+      glow.done();
       delete this.statusEl.dataset.elapsed;
       this.running = null;
       this.stopBtn.disabled = true;

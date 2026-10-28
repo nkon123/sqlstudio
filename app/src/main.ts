@@ -25,7 +25,7 @@ import { aliasMap, showColumns } from "./colpopup";
 import { showMenu, type MenuItem } from "./ctxmenu";
 import { showUsage } from "./usage";
 import { showColumnSource } from "./colsource";
-import { showValueTrace } from "./valuetrace";
+import { showRowTrace, showValueTrace, type TraceHooks } from "./valuetrace";
 import { showDiff, type Snapshot } from "./resultdiff";
 import { openCopyData } from "./copydata";
 import { openHistory } from "./history";
@@ -1639,6 +1639,8 @@ export class App {
     // 값 추적 — 이 행(키)의 이 값을 만든 문장을 다시 계산해 거슬러 오른다
     items.push({ label: "이 값은 어떻게 나왔나 (값 추적)", hint: column ? `${column.name} = ${shown}` : "", disabled: !q || !t.conn || !column || n !== 1 || t.grid.isEditing(),
       run: () => this.showValueTrace(t, col, column!) });
+    items.push({ label: "이 키의 행 추적 (왜 없나)", hint: "행이 없을 때·NULL 일 때", disabled: !q || !t.conn,
+      run: () => void this.rowTrace(q?.sql) });
     // 고른 행만 보기·빼고 보기 — 화면에서만 거른다 (서버 쿼리는 그대로)
     items.push(
       { sep: true },
@@ -1705,21 +1707,35 @@ export class App {
     });
   }
 
+  private traceHooks(t: Tab, id: number): TraceHooks {
+    return {
+      openSource: (owner, name, kind, line) => this.openSource(id, owner, name, kind, line),
+      openAnalysis: () => { t.analysis(); },
+      explain: (text, out) => this.ai.explainInto(text, out),
+      cancelExplain: () => this.ai.cancelCurrent(),
+    };
+  }
+
   private showValueTrace(t: Tab, col: number, column: Column) {
     const q = t.lastQuery;
     const r = t.grid.selectedRows()[0];
     if (!q || !t.conn || !r) return;
     const id = t.conn.id;
     const row: [string, string | null][] = r.map((v, i) => [t.grid.columnAt(i)?.name ?? "", v]);
-    void showValueTrace(id, q.sql, col, column, row, {
-      openSource: (owner, name, kind, line) => this.openSource(id, owner, name, kind, line),
-      openAnalysis: () => { t.analysis(); },
-      explain: (text) => {
-        this.layout.toggle("right", true);
-        this.ai.askAbout("아래는 한 행의 값을 거슬러 오른 추적 결과다 (✓ 재현됨 = 그 문장을 이 키로 다시 계산한 값이 지금 값과 같음). " +
-          "이 값이 어떻게 나왔는지 단계별로 짧게 설명하고, 재현되지 않거나 조건에 걸러진 곳이 있으면 그 까닭을 짚어라. 추적에 없는 것은 지어내지 마라.\n\n" + text, true);
-      },
-    });
+    void showValueTrace(id, q.sql, col, column, row, this.traceHooks(t, id));
+  }
+
+  /** 행 추적 — 이 키의 행은 왜 없나. sql 의 첫 테이블과 WHERE 의 `키 = 값` 으로 미리 채운다 (없으면 에디터의 지금 문장) */
+  async rowTrace(sql?: string) {
+    const t = this.active;
+    if (!t?.conn) return toast("먼저 접속하세요", "error");
+    const id = t.conn.id;
+    let q = sql ?? null;
+    if (q == null) {
+      const cur = await this.currentStatement(t).catch(() => null);
+      q = cur ? t.editor.view.state.doc.sliceString(cur.from, cur.to) : null;
+    }
+    void showRowTrace(id, q, null, this.traceHooks(t, id));
   }
 
   /** 셀 값을 조회 조건으로 */

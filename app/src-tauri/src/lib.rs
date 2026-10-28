@@ -305,6 +305,8 @@ pub fn run() {
             ai::ai_examples_clear,
             valuetrace::value_trace_start,
             valuetrace::value_trace_step,
+            valuetrace::row_trace_prepare,
+            valuetrace::row_trace,
             files::read_sql_file,
             files::write_sql_file,
             files::write_binary_file,

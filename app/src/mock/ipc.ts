@@ -346,6 +346,38 @@ for (const cmd of ["column_source", "column_usage", "object_section", "object_se
   "copy_plan", "copy_run", "schema_compare_start", "import_run"]) DB[cmd] ??= () => fail(NOT_HERE);
 for (const cmd of Object.keys(DB)) if (cmd.startsWith("debug_")) DB[cmd] = () => fail(NOT_HERE);
 
+// 탐색 기록 흉내 — [at, purpose, sql?, result?, ms?, error?]
+const mockLog = (rows: [string, string, string?, string?, number?, string?][]) => rows.map(([at, purpose, sql, result, ms, error], i) =>
+  ({ seq: i + 1, at, purpose, sql: sql ?? null, binds: sql ? [["K1", "A123"]] : [], sent: !!sql, result: result ?? null, ms: ms ?? 0, error: error ?? null }));
+const VT_LOG = mockLog([
+  ["APP.ORD_SUM(ORD_NO=A123).TOT_AMT", "분석 결과에서 ORD_SUM.TOT_AMT 에 값을 넣는 문장 2개를 찾음"],
+  ["APP.PKG_ORD.P_SUMMARY 212줄 MERGE", "문장 원문 읽기 (저장된 본문이 잘림)", "SELECT text FROM all_source WHERE owner = :o AND name = :n AND type = :t AND line BETWEEN :a AND :b ORDER BY line", "38행", 41],
+  ["APP.PKG_ORD.P_SUMMARY 212줄 MERGE · MERGE · 있으면 UPDATE", "길: TOT_AMT = S.AMT ← 서브쿼리 S"],
+  ["APP.PKG_ORD.P_SUMMARY 212줄 MERGE · MERGE · 있으면 UPDATE", "이 키로 다시 계산", "SELECT * FROM (SELECT S.AMT AS V__, T.ORD_NO AS K1__ FROM ORD_SUM T, (…) S WHERE T.ORD_NO = S.ORD_NO) WHERE K1__ = :K1 AND ROWNUM <= 5", "1행", 128],
+  ["APP.PKG_ORD.P_SUMMARY 212줄 MERGE · MERGE · 있으면 UPDATE", "값을 만든 원본 행과 그 키", "SELECT … FROM ORD_SUM T, (…) S WHERE … AND ROWNUM <= 20", "2행", 96],
+  ["APP.PKG_ORD.P_SUMMARY 212줄 MERGE · MERGE · 있으면 UPDATE › 서브쿼리 S", "서브쿼리 안으로: TOT_AMT = NVL((SUM(D.AMT)), 0)"],
+  ["APP.PKG_ORD.P_SUMMARY 212줄 MERGE · MERGE · 있으면 UPDATE › 서브쿼리 S", "이 키로 다시 계산", "SELECT * FROM (SELECT NVL((SUM(D.AMT)), 0) AS V__, (D.ORD_NO) AS K1__ FROM ORD_DTL D WHERE (D.STATUS = 'OK') GROUP BY D.ORD_NO) WHERE K1__ = :K1 AND ROWNUM <= 5", "0행", 77],
+  ["APP.PKG_ORD.P_SUMMARY 212줄 MERGE · MERGE · 있으면 UPDATE › 서브쿼리 S", "0건 — 거르는 조건마다 통과 여부", "SELECT CASE WHEN (D.STATUS = 'OK') THEN 'O' ELSE 'X' END F1__ FROM ORD_DTL D WHERE (D.ORD_NO) = :K1", "3행", 52],
+  ["APP.PKG_ORD.P_INIT 88줄 INSERT · INSERT … SELECT", "이 키로 다시 계산", "SELECT * FROM (SELECT 0 AS V__, D.ORD_NO AS K1__ FROM ORD_DTL D) WHERE K1__ = :K1 AND ROWNUM <= 5", "1행", 33],
+  ["ORD_SUM.TOT_AMT", "ORD_SUM 에 행을 넣지만 TOT_AMT 은(는) 넣지 않는 문장 1개 — 이 키의 행을 만드는지 키 열로 다시 계산"],
+  ["APP.PKG_IF.P_REG_ORD 30줄 INSERT · INSERT … VALUES", "이 키로 다시 계산", "SELECT * FROM (SELECT :P_ORD_NO AS V__ FROM DUAL) WHERE ROWNUM <= 5", "오류", 12, "ORA-01008: not all variables bound"],
+]);
+const RT_LOG = mockLog([
+  ["APP.ORD_SUM(ORD_NO=A999)", "지금 이 키의 행이 있는지", "SELECT COUNT(*) AS N__ FROM APP.ORD_SUM WHERE ORD_NO = :K1", "0건", 18],
+  ["APP.ORD_SUM(ORD_NO=A999)", "분석 결과에서 ORD_SUM 에 행을 넣는 문장 2개를 찾음"],
+  ["APP.PKG_ORD.P_INIT 88줄 INSERT · INSERT … SELECT", "길: ORD_NO = D.ORD_NO"],
+  ["APP.PKG_ORD.P_INIT 88줄 INSERT · INSERT … SELECT", "이 키로 다시 계산", "SELECT * FROM (SELECT D.ORD_NO AS V__, D.ORD_NO AS K1__ FROM ORD_DTL D, ORD_HDR H WHERE …) WHERE K1__ = :K1 AND ROWNUM <= 5", "0행", 64],
+  ["APP.PKG_ORD.P_INIT 88줄 INSERT · INSERT … SELECT", "0건 — 거르는 조건마다 통과 여부", "SELECT CASE WHEN (H.ORD_DT >= TRUNC(SYSDATE) - 1) THEN 'O' ELSE 'X' END F1__ FROM ORD_DTL D, ORD_HDR H WHERE …", "0행", 40],
+  ["APP.PKG_ORD.P_INIT 88줄 INSERT · INSERT … SELECT", "조인 단계: ORD_DTL D 에서 이 키", "SELECT COUNT(*) AS N__ FROM ORD_DTL D WHERE (D.ORD_NO) = :K1", "3건", 9],
+  ["APP.PKG_ORD.P_INIT 88줄 INSERT · INSERT … SELECT", "조인 단계: + ORD_HDR H", "SELECT COUNT(*) AS N__ FROM ORD_DTL D, ORD_HDR H WHERE (D.ORD_NO) = :K1 AND (H.ORD_NO = D.ORD_NO)", "0건", 11],
+  ["APP.PKG_ORD.P_INIT 88줄 INSERT · INSERT … SELECT", "ORD_HDR 에서 0건 — 여기서 끊김, 조인 단계 멈춤"],
+  ["APP.PKG_ORD.P_SUMMARY 212줄 MERGE · MERGE · 없으면 INSERT", "이 키로 다시 계산", "SELECT * FROM (SELECT S.ORD_NO AS V__, S.ORD_NO AS K1__ FROM (…) S) WHERE K1__ = :K1 AND ROWNUM <= 5", "0행", 70],
+  ["APP.PKG_ORD.P_SUMMARY 212줄 MERGE · MERGE · 없으면 INSERT › 서브쿼리 S", "서브쿼리 안으로: ORD_NO = (D.ORD_NO)"],
+  ["APP.PKG_ORD.P_SUMMARY 212줄 MERGE · MERGE · 없으면 INSERT › 서브쿼리 S", "이 키로 다시 계산", "SELECT * FROM (SELECT (D.ORD_NO) AS V__ … WHERE (D.STATUS = 'OK') GROUP BY D.ORD_NO) WHERE K1__ = :K1 AND ROWNUM <= 5", "0행", 58],
+  ["APP.PKG_ORD.P_SUMMARY 212줄 MERGE · MERGE · 없으면 INSERT › 서브쿼리 S", "0건 — 거르는 조건마다 통과 여부", "SELECT CASE WHEN (D.STATUS = 'OK') THEN 'O' ELSE 'X' END F1__ FROM ORD_DTL D WHERE (D.ORD_NO) = :K1", "3행", 21],
+  ["ORD_SUM", "분석 결과에서 ORD_SUM 의 행을 지우는 문장 1개를 찾음"],
+]);
+
 /** 브라우저에서만 — 진짜 백엔드가 맡던 것 */
 const LOCAL: Record<string, (a: Args) => unknown> = {
   analyze_sql: analyze,
@@ -358,31 +390,75 @@ const LOCAL: Record<string, (a: Args) => unknown> = {
   set_ai_harness_opts: () => null,
   ai_examples_clear: () => null,
   ai_remember_example: () => null,
-  // 값 추적 흉내: MERGE 가 재현되지 않음(0건) → 조건 진단, INSERT … SELECT 는 재현됨 + 원본 행 → 한 단계 더
+  // 값 추적 흉내: MERGE 는 USING 서브쿼리 안에서 STATUS 조건에 걸려 값이 안 나옴, INSERT … SELECT 는 재현됨 + 원본 행 → 커서로 한 단계 더
   value_trace_start: async () => {
-    await sleep(300);
-    const w = (o: Record<string, unknown>) => ({ notes: [], binds: [["K1", "A123"]], ran: true, values: [], dropped: [], unknown_vars: [], flag_conds: [], flag_rows: [], inputs: [], ...o });
-    return { target: { owner: "APP", table: "ORD_SUM", column: "TOT_AMT", keys: [["ORD_NO", "A123"]], value: "0", known: true, vars: [] }, analyzed: true, notes: [], writers: [
+    await sleep(1800);
+    const w = (o: Record<string, unknown>) => ({ notes: [], binds: [["K1", "A123"]], ran: true, values: [], dropped: [], unknown_vars: [], flag_conds: [], flag_rows: [], inputs: [], via: [], layers: [], keys: [], join_steps: [], ...o });
+    return { target: { owner: "APP", table: "ORD_SUM", column: "TOT_AMT", keys: [["ORD_NO", "A123"]], value: "0", known: true, vars: [] }, analyzed: true, notes: [], default: null, log: VT_LOG,
+      lacking: [{ node: "APP.PKG_IF.P_REG_ORD", unit: "APP.PKG_IF.PACKAGE_BODY", line: 30, kind: "INSERT", produces: false, binds: [] }],
+      writers: [
+      w({ node: "APP.PKG_ORD.P_INIT", unit: "APP.PKG_ORD.PACKAGE_BODY", line: 88, kind: "INSERT", label: "INSERT … SELECT", expr: "NVL(SUM(D.AMT), 0)",
+        source: "FROM ORD_DTL D GROUP BY D.ORD_NO", reproduced: true, values: ["0"], keys: [["ORD_NO", "D.ORD_NO", "A123"]],
+        sql: "SELECT * FROM (SELECT NVL(SUM(D.AMT), 0) AS V__, D.ORD_NO AS K1__ FROM ORD_DTL D GROUP BY D.ORD_NO) WHERE K1__ = :K1 AND ROWNUM <= 5",
+        inputs: [{ owner: null, table: "ORD_DTL", column: "AMT", alias: "D", key_cols: ["ORD_NO", "SEQ"], missing: 0, rows: [
+          { keys: [["ORD_NO", "A123"], ["SEQ", "1"]], value: null }, { keys: [["ORD_NO", "A123"], ["SEQ", "2"]], value: null }] }] }),
       w({ node: "APP.PKG_ORD.P_SUMMARY", unit: "APP.PKG_ORD.PACKAGE_BODY", line: 212, kind: "MERGE", label: "MERGE · 있으면 UPDATE", expr: "NVL(S.AMT, 0)",
         source: "FROM ORD_SUM T, (SELECT D.ORD_NO, SUM(D.AMT) AMT FROM ORD_DTL D WHERE D.STATUS = 'OK' GROUP BY D.ORD_NO) S WHERE T.ORD_NO = S.ORD_NO",
+        keys: [["ORD_NO", "T.ORD_NO", "A123"]],
         sql: "SELECT * FROM (SELECT NVL(S.AMT, 0) AS V__, T.ORD_NO AS K1__ FROM ORD_SUM T, (…) S WHERE (T.ORD_NO = S.ORD_NO)) WHERE K1__ = :K1 AND ROWNUM <= 5",
-        values: [], flag_conds: ["D.STATUS = 'OK'"], flag_rows: [["X"], ["X"], ["X"]] }),
-      w({ node: "APP.PKG_ORD.P_INIT", unit: "APP.PKG_ORD.PACKAGE_BODY", line: 88, kind: "INSERT", label: "INSERT … SELECT", expr: "NVL(SUM(D.AMT), 0)",
-        source: "FROM ORD_DTL D WHERE D.ORD_NO = H.ORD_NO GROUP BY D.ORD_NO", reproduced: true, values: ["0"],
-        sql: "SELECT * FROM (SELECT NVL(SUM(D.AMT), 0) AS V__, D.ORD_NO AS K1__ FROM ORD_DTL D GROUP BY D.ORD_NO) WHERE K1__ = :K1 AND ROWNUM <= 5",
-        inputs: [{ owner: null, table: "ORD_DTL", column: "AMT", alias: "D", key_cols: ["ORD_NO", "SEQ"], rows: [
-          { keys: [["ORD_NO", "A123"], ["SEQ", "1"]], value: null }, { keys: [["ORD_NO", "A123"], ["SEQ", "2"]], value: null }] }] }),
+        via: [{ kind: "문장", name: "", expr: "NVL(S.AMT, 0)" }, { kind: "서브쿼리", name: "S", expr: "NVL((SUM(D.AMT)), 0)" }],
+        layers: [w({ label: "서브쿼리 S", via: [{ kind: "서브쿼리", name: "S", expr: "NVL((SUM(D.AMT)), 0)" }], expr: "NVL((SUM(D.AMT)), 0)",
+          keys: [["ORD_NO", "(D.ORD_NO)", "A123"]], source: "FROM ORD_DTL D WHERE D.STATUS = 'OK' GROUP BY D.ORD_NO",
+          sql: "SELECT * FROM (SELECT NVL((SUM(D.AMT)), 0) AS V__, (D.ORD_NO) AS K1__ FROM ORD_DTL D WHERE (D.STATUS = 'OK') GROUP BY D.ORD_NO) WHERE K1__ = :K1 AND ROWNUM <= 5",
+          flag_conds: ["D.STATUS = 'OK'"], flag_rows: [["X"], ["X"], ["X"]] })] }),
     ] };
   },
   value_trace_step: async (a) => {
-    await sleep(300);
+    await sleep(1200);
     const t = (a as { target: Record<string, unknown> }).target;
-    return { target: { ...t, owner: "APP" }, analyzed: true, notes: [], writers: [
+    return { target: { ...t, owner: "APP" }, analyzed: true, notes: [], log: mockLog([
+      ["APP.ORD_DTL(ORD_NO=A123, SEQ=1).AMT", "분석 결과에서 ORD_DTL.AMT 에 값을 넣는 문장 1개를 찾음"],
+      ["APP.PKG_IF.P_LOAD_DTL 41줄 INSERT · INSERT … VALUES ← 커서 C_SRC (12줄)", "길: AMT = R.AMT ← 커서 C_SRC (12줄)"],
+      ["APP.PKG_IF.P_LOAD_DTL 41줄 INSERT · INSERT … VALUES ← 커서 C_SRC (12줄)", "이 키로 다시 계산", "SELECT * FROM (SELECT (S.AMT_TXT) AS V__ … FROM IF_ORD_DTL S WHERE S.IF_DT = V_BASE_DT) WHERE …", "오류", 15, "ORA-00904: \"V_BASE_DT\": invalid identifier"],
+      ["APP.PKG_IF.P_LOAD_DTL 41줄 INSERT · INSERT … VALUES ← 커서 C_SRC (12줄)", "V_BASE_DT 은(는) 값을 모르는 PL/SQL 변수 — 이 변수를 쓰는 조건을 빼고 다시"],
+      ["APP.PKG_IF.P_LOAD_DTL 41줄 INSERT · INSERT … VALUES ← 커서 C_SRC (12줄)", "이 키로 다시 계산 (모르는 변수 V_BASE_DT 의 조건을 빼고)", "SELECT * FROM (SELECT (S.AMT_TXT) AS V__, (S.ORD_NO) AS K1__, (S.SEQ) AS K2__ FROM IF_ORD_DTL S) WHERE K1__ = :K1 AND K2__ = :K2 AND ROWNUM <= 5", "1행", 210],
+      ["APP.PKG_IF.P_LOAD_DTL 41줄 INSERT · INSERT … VALUES ← 커서 C_SRC (12줄)", "값을 만든 원본 행과 그 키", "SELECT … FROM IF_ORD_DTL S WHERE … AND ROWNUM <= 20", "1행", 180],
+    ]), writers: [
       { node: "APP.PKG_IF.P_LOAD_DTL", unit: "APP.PKG_IF.PACKAGE_BODY", line: 41, kind: "INSERT", label: "INSERT … VALUES ← 커서 C_SRC (12줄)", expr: "(S.AMT_TXT)",
         source: "FROM IF_ORD_DTL S WHERE S.IF_DT = V_BASE_DT", notes: [], binds: [["K1", "A123"], ["K2", "1"]], ran: true, values: [null], reproduced: true,
-        dropped: ["S.IF_DT = V_BASE_DT"], unknown_vars: ["V_BASE_DT"], flag_conds: [], flag_rows: [], inputs: [],
-        sql: "SELECT * FROM (SELECT (S.AMT_TXT) AS V__, S.ORD_NO AS K1__, S.SEQ AS K2__ FROM IF_ORD_DTL S) WHERE K1__ = :K1 AND K2__ = :K2 AND ROWNUM <= 5" },
+        dropped: ["S.IF_DT = V_BASE_DT"], unknown_vars: ["V_BASE_DT"], flag_conds: [], flag_rows: [], layers: [],
+        keys: [["ORD_NO", "(S.ORD_NO)", "A123"], ["SEQ", "(S.SEQ)", "1"]],
+        via: [{ kind: "문장", name: "", line: 41, expr: "R.AMT" }, { kind: "커서", name: "C_SRC", line: 12, expr: "(S.AMT_TXT)" }],
+        inputs: [{ owner: null, table: "IF_ORD_DTL", column: "AMT_TXT", alias: "S", key_cols: ["IF_SEQ"], missing: 0, rows: [{ keys: [["IF_SEQ", "90017"]], value: null }] }], join_steps: [],
+        sql: "SELECT * FROM (SELECT (S.AMT_TXT) AS V__, (S.ORD_NO) AS K1__, (S.SEQ) AS K2__ FROM IF_ORD_DTL S) WHERE K1__ = :K1 AND K2__ = :K2 AND ROWNUM <= 5" },
     ] };
+  },
+  // 행 추적 흉내: A999 는 ORD_DTL 엔 있지만 ORD_HDR 과 조인하면 끊기고, MERGE 는 서브쿼리 안 STATUS 조건에 걸림
+  row_trace_prepare: (a) => ({ owner: "APP", table: String((a.table as string) || "ORD_SUM").toUpperCase(), key_cols: ["ORD_NO"],
+    values: [/ORD_NO\s*=\s*'([^']*)'/i.exec(String(a.sql ?? ""))?.[1] ?? null] }),
+  row_trace: async (a) => {
+    await sleep(1500);
+    const keys = a.keys as [string, string][];
+    const v = keys[0]?.[1] ?? "";
+    const w = (o: Record<string, unknown>) => ({ notes: [], binds: [["K1", v]], ran: true, values: [], dropped: [], unknown_vars: [], flag_conds: [], flag_rows: [], inputs: [], via: [], layers: [], keys: [], join_steps: [], ...o });
+    return { target: { owner: "APP", table: a.table, column: "ORD_NO", keys, value: null, known: false, vars: [] }, analyzed: true, exists: false, log: RT_LOG,
+      exists_sql: "SELECT COUNT(*) AS N__ FROM APP.ORD_SUM WHERE ORD_NO = :K1",
+      writers: [
+        w({ node: "APP.PKG_ORD.P_INIT", unit: "APP.PKG_ORD.PACKAGE_BODY", line: 88, kind: "INSERT", label: "INSERT … SELECT", expr: "D.ORD_NO",
+          source: "FROM ORD_DTL D, ORD_HDR H WHERE H.ORD_NO = D.ORD_NO AND H.ORD_DT >= TRUNC(SYSDATE) - 1 GROUP BY D.ORD_NO", keys: [["ORD_NO", "D.ORD_NO", v]],
+          sql: "SELECT * FROM (SELECT D.ORD_NO AS V__, D.ORD_NO AS K1__ FROM ORD_DTL D, ORD_HDR H WHERE (H.ORD_NO = D.ORD_NO) AND (H.ORD_DT >= TRUNC(SYSDATE) - 1) GROUP BY D.ORD_NO) WHERE K1__ = :K1 AND ROWNUM <= 5",
+          flag_conds: ["H.ORD_DT >= TRUNC(SYSDATE) - 1"],
+          join_steps: [{ alias: "D", table: "ORD_DTL", on: [], rows: 3, sql: "SELECT COUNT(*) AS N__ FROM ORD_DTL D WHERE (D.ORD_NO) = :K1" },
+            { alias: "H", table: "ORD_HDR", on: ["H.ORD_NO = D.ORD_NO"], rows: 0, sql: "SELECT COUNT(*) AS N__ FROM ORD_DTL D, ORD_HDR H WHERE (D.ORD_NO) = :K1 AND (H.ORD_NO = D.ORD_NO)" }] }),
+        w({ node: "APP.PKG_ORD.P_SUMMARY", unit: "APP.PKG_ORD.PACKAGE_BODY", line: 212, kind: "MERGE", label: "MERGE · 없으면 INSERT", expr: "S.ORD_NO",
+          source: "FROM (SELECT D.ORD_NO, SUM(D.AMT) AMT FROM ORD_DTL D WHERE D.STATUS = 'OK' GROUP BY D.ORD_NO) S", keys: [["ORD_NO", "S.ORD_NO", v]],
+          sql: "SELECT * FROM (SELECT S.ORD_NO AS V__, S.ORD_NO AS K1__ FROM (…) S) WHERE K1__ = :K1 AND ROWNUM <= 5",
+          via: [{ kind: "문장", name: "", expr: "S.ORD_NO" }, { kind: "서브쿼리", name: "S", expr: "(D.ORD_NO)" }],
+          layers: [w({ label: "서브쿼리 S", via: [{ kind: "서브쿼리", name: "S", expr: "(D.ORD_NO)" }], expr: "(D.ORD_NO)", keys: [["ORD_NO", "(D.ORD_NO)", v]],
+            sql: "SELECT * FROM (SELECT (D.ORD_NO) AS V__, (D.ORD_NO) AS K1__ FROM ORD_DTL D WHERE (D.STATUS = 'OK') GROUP BY D.ORD_NO) WHERE K1__ = :K1 AND ROWNUM <= 5",
+            flag_conds: ["D.STATUS = 'OK'"], flag_rows: [["X"], ["X"], ["X"]] })] }),
+      ],
+      deleters: [{ node: "APP.PKG_ORD.P_PURGE", unit: "APP.PKG_ORD.PACKAGE_BODY", line: 301, kind: "DELETE", text: "DELETE FROM ORD_SUM WHERE UPD_DT < ADD_MONTHS(SYSDATE, -6)" }] };
   },
   ai_guides_info: () => ({ path: "(가짜)/oracle-guides.md", exists: false, builtin: 24, custom: 0 }),
   ai_guide_select: () => "auto",
@@ -391,6 +467,15 @@ const LOCAL: Record<string, (a: Args) => unknown> = {
   ai_ask: async (a) => {
     const ch = a.onEvent as Channel<unknown>;
     const say = async (t: string) => { for (const w of t.match(/[\s\S]{1,6}/g) ?? []) { ch.onmessage({ type: "delta", text: w }); await sleep(15); } };
+    if ((a.args as { task?: string }).task === "trace") {
+      ch.onmessage({ type: "context", tables: [], plan: false, remote: false, guides: [], tokens: 640, budget: 8000, trimmed: [] });
+      await sleep(900);
+      const text = "1) 출처 경로: ORD_SUM.TOT_AMT(ORD_NO=A123) = 0 ← PKG_ORD.P_INIT 88줄 INSERT … SELECT [NVL(SUM(D.AMT), 0)] ← ORD_DTL.AMT(A123, 1·2) = NULL ← PKG_IF.P_LOAD_DTL 41줄 ← IF_ORD_DTL.AMT_TXT\n" +
+        "2) IF_ORD_DTL.AMT_TXT 가 NULL 로 적재되어 ORD_DTL.AMT 두 행이 모두 NULL → SUM 이 NULL → NVL 로 0 이 되어 TOT_AMT 에 들어갔습니다.\n" +
+        "3) MERGE(P_SUMMARY 212줄)는 STATUS = 'OK' 조건에 세 행이 모두 걸려 이 행을 만들지 않았습니다. P_LOAD_DTL 의 V_BASE_DT 조건은 값을 몰라 빼고 봤습니다.";
+      await say(text);
+      return { text, model: "qwen3.5:4b", refused: false, truncated: false, user_message: "", verify: { state: "none", repairs: 0 }, warnings: [] };
+    }
     ch.onmessage({ type: "context", tables: ["SCOTT.EMP", "SCOTT.DEPT"], plan: false, remote: false, guides: ["ROWNUM 페이징"], tokens: 2140, budget: 8000, trimmed: ["컬럼 많은 테이블은 관련 컬럼만"],
       picked: "ai", examples: ["부서별 사원 수"] });
     await say("부서별 급여 합계입니다.\n```sql\nSELECT dept_no, SUM(sal) FROM emp GROUP BY dept_no;\n```");

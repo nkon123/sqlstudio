@@ -8,7 +8,8 @@
 //! 한 질의는 10초까지 — 넘으면 취소한다.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sqls_analyze::colwrite::StmtLite;
@@ -59,6 +60,118 @@ pub struct TraceStep {
     writers: Vec<WriterTrace>,
     /// 결과 열이 식이었으면 어떤 식이었는지 등
     notes: Vec<String>,
+    /// 이 열을 넣지 않는 INSERT — 이 문장으로 들어온 행이면 이 열은 기본값·NULL
+    lacking: Vec<Lacking>,
+    /// 이 열의 기본값 (DEFAULT)
+    default: Option<String>,
+    /// 탐색 기록 — 어떻게 타고 들어가 어떤 쿼리를 몇 번 돌렸는지
+    log: Vec<LogEntry>,
+}
+
+/// 그 테이블에 행을 넣지만 이 열은 넣지 않는 문장
+#[derive(Serialize, Default)]
+pub struct Lacking {
+    node: String,
+    unit: String,
+    line: u32,
+    kind: String,
+    /// 이 키의 행을 이 문장이 만드는지 (원본을 이 키로 다시 돌려 봄). 모르면 None
+    produces: Option<bool>,
+    sql: Option<String>,
+    binds: Vec<(String, String)>,
+    error: Option<String>,
+}
+
+/// 탐색 기록 한 줄 — 어디를 거치며(at) 무엇을 하려고(purpose) 어떤 쿼리를 보냈고 결과가 몇 건·몇 ms 였는지.
+/// sql 이 없으면 쿼리 없이 길을 고른 것 (문장을 찾음, 서브쿼리 안으로 등)
+#[derive(Serialize, Clone)]
+pub struct LogEntry {
+    seq: usize,
+    at: String,
+    purpose: String,
+    sql: Option<String>,
+    binds: Vec<(String, String)>,
+    /// 보냈는지 (운영 DB·실행 중이면 만들기만 하고 안 보냄)
+    sent: bool,
+    /// "3건", "0행", "5행 이상" 등
+    result: Option<String>,
+    ms: u64,
+    error: Option<String>,
+}
+
+/// 탐색 기록 — 쿼리를 보낼 때마다 쌓는다 (await 너머로 잠그지 않는다)
+#[derive(Default)]
+struct Log {
+    at: Mutex<String>,
+    list: Mutex<Vec<LogEntry>>,
+}
+
+impl Log {
+    fn at(&self, at: impl Into<String>) {
+        *self.at.lock().unwrap() = at.into();
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn push(&self, purpose: impl Into<String>, sql: Option<&str>, binds: &[(String, String)], sent: bool, result: Option<String>, ms: u64, error: Option<String>) {
+        let at = self.at.lock().unwrap().clone();
+        let mut l = self.list.lock().unwrap();
+        let seq = l.len() + 1;
+        l.push(LogEntry { seq, at, purpose: purpose.into(), sql: sql.map(str::to_string), binds: binds.to_vec(), sent, result, ms, error });
+    }
+    /// 쿼리 없이 길을 고른 것
+    fn note(&self, purpose: impl Into<String>) {
+        self.push(purpose, None, &[], false, None, 0, None);
+    }
+    /// 만들었지만 보내지 않은 쿼리
+    fn unsent(&self, purpose: impl Into<String>, sql: &str, binds: &[(String, String)]) {
+        self.push(purpose, Some(sql), binds, false, None, 0, None);
+    }
+    fn take(self) -> Vec<LogEntry> {
+        self.list.into_inner().unwrap()
+    }
+}
+
+/// 조인 단계 하나를 센 결과
+#[derive(Serialize)]
+pub struct JoinRun {
+    alias: String,
+    table: String,
+    on: Vec<String>,
+    rows: Option<i64>,
+    sql: String,
+}
+
+/// 행 추적 — "이 키의 행은 왜 없나"
+#[derive(Serialize)]
+pub struct RowTrace {
+    target: TraceTarget,
+    analyzed: bool,
+    not_run: Option<String>,
+    /// 지금 이 키의 행이 있는지 (돌리지 않았으면 None)
+    exists: Option<bool>,
+    exists_sql: String,
+    /// 이 테이블에 행을 넣는 문장마다 — 원본에 이 키가 있는지, 없으면 어디서 끊겼는지
+    writers: Vec<WriterTrace>,
+    /// 이 테이블에서 행을 지우는 문장
+    deleters: Vec<Deleter>,
+    log: Vec<LogEntry>,
+}
+
+#[derive(Serialize)]
+pub struct Deleter {
+    node: String,
+    unit: String,
+    line: u32,
+    kind: String,
+    text: String,
+}
+
+/// 행 추적을 열 때 미리 채울 것 — 테이블, 키 열, (지금 SQL 의 WHERE 에서 찾은) 키 값
+#[derive(Serialize)]
+pub struct RowPrep {
+    owner: String,
+    table: String,
+    key_cols: Vec<String>,
+    values: Vec<Option<String>>,
 }
 
 #[derive(Serialize, Default)]
@@ -90,6 +203,14 @@ pub struct WriterTrace {
     /// 값을 만든 원본 행 — 다음 단계로
     inputs: Vec<InputRows>,
     rows_sql: Option<String>,
+    /// 대상 키가 원본 쪽 무엇과 이어지는지 (키 열, 원본 쪽 식, 값)
+    keys: Vec<(String, String, String)>,
+    /// 거쳐 온 층 (대상 쪽 → 원본 쪽): 문장, 커서, SELECT INTO, 서브쿼리
+    via: Vec<trace::Via>,
+    /// 서브쿼리 안으로 내려가 다시 계산한 층들 (via 의 서브쿼리 층마다 하나, 바깥 → 안쪽)
+    layers: Vec<WriterTrace>,
+    /// 이 키로 값이 안 나왔을 때 — 키를 쥔 테이블부터 조인을 하나씩 더하며 남는 행 수
+    join_steps: Vec<JoinRun>,
 }
 
 #[derive(Serialize)]
@@ -100,6 +221,8 @@ pub struct InputRows {
     alias: String,
     key_cols: Vec<String>,
     rows: Vec<InputRow>,
+    /// 키가 모두 NULL 인 원본 행 수 — 아우터 조인에서 이 테이블에 짝이 없었다 (그래서 이 값은 NULL)
+    missing: usize,
 }
 
 #[derive(Serialize, PartialEq)]
@@ -201,49 +324,50 @@ async fn trace_step(st: &AppState, id: u64, s: &Session, mut target: TraceTarget
     } else {
         None
     };
+    let log = Log::default();
+    log.at(format!("{}.{}({}).{}", desc.owner, desc.name, key_line(&target.keys), target.column));
+    if let Some(n) = &not_run {
+        log.note(n.clone());
+    }
     let path = crate::analyze::store_for(st, id)?.root().join("integrated").join("statements.json");
     let stmts = tauri::async_runtime::spawn_blocking(move || crate::analyze::statements(&path)).await.map_err(|e| ErrView::msg("io", e.to_string()))?;
     let Some(stmts) = stmts else {
-        return Ok(TraceStep { target, analyzed: false, not_run, writers: vec![], notes: vec![] });
+        log.note("분석 결과(statements.json) 없음 — 여기서 멈춤");
+        return Ok(TraceStep { target, analyzed: false, not_run, writers: vec![], notes: vec![], lacking: vec![], default: None, log: log.take() });
     };
     let writes = sqls_analyze::colwrite::column_writes(&stmts, Some(&desc.owner), &desc.name, &target.column);
-    let key_cols: Vec<String> = target.keys.iter().map(|(k, _)| k.clone()).collect();
-    let table_cols: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
-    let mut writers = Vec::new();
-    for w in writes.iter().take(12) {
-        let Some(stmt) = stmts.iter().find(|x| x.node == w.node && x.line == w.line && x.kind == w.kind) else { continue };
-        let text = if stmt.text.ends_with('…') { full_text(s, stmt).await.unwrap_or_else(|| stmt.text.clone()) } else { stmt.text.clone() };
-        let node_stmts: Vec<StmtLite> = stmts.iter().filter(|x| x.node == stmt.node).cloned().collect();
-        let paths = trace::paths(stmt, &node_stmts, &text, &desc.name, &target.column, &key_cols, &table_cols);
-        if paths.is_empty() {
-            writers.push(WriterTrace {
-                node: w.node.clone(),
-                unit: w.unit.clone(),
-                line: w.line,
-                kind: w.kind.clone(),
-                label: w.kind.clone(),
-                notes: vec!["이 문장에서 그 열의 식을 찾지 못했습니다".into()],
-                sql: None,
-                ..Default::default()
-            });
-            continue;
-        }
-        for p in paths {
-            let mut wt = WriterTrace {
-                node: w.node.clone(),
-                unit: w.unit.clone(),
-                line: w.line,
-                kind: w.kind.clone(),
-                label: p.label.clone(),
-                expr: p.expr_text(),
-                source: p.source_text(),
-                notes: p.notes.clone(),
-                ..Default::default()
-            };
-            run_path(s, &p, &target, &mut descs, not_run.is_none(), &mut wt).await;
-            writers.push(wt);
-        }
+    log.note(format!("분석 결과에서 {}.{} 에 값을 넣는 문장 {}개를 찾음{}", desc.name, target.column, writes.len(), if writes.len() > 12 { " (앞 12개만)" } else { "" }));
+    let list: Vec<(String, u32, String)> = writes.iter().take(12).map(|w| (w.node.clone(), w.line, w.kind.clone())).collect();
+    let mut writers = trace_writes(s, &log, &stmts, &list, &desc, &target, &mut descs, not_run.is_none()).await;
+    // 이 열을 넣지 않는 INSERT·MERGE — 이 키의 행을 만들면 이 열은 기본값·NULL 로 들어간다
+    let mut lacking = Vec::new();
+    let key0 = target.keys.first().map(|(k, _)| k.clone());
+    let lack: Vec<&StmtLite> = stmts.iter().filter(|x| matches!(x.kind.as_str(), "INSERT" | "MERGE") && inserts_into(x, &desc) && !writes.iter().any(|w| w.node == x.node && w.line == x.line)).take(8).collect();
+    if !lack.is_empty() {
+        log.at(format!("{}.{}", desc.name, target.column));
+        log.note(format!("{} 에 행을 넣지만 {} 은(는) 넣지 않는 문장 {}개 — 이 키의 행을 만드는지 키 열로 다시 계산", desc.name, target.column, lack.len()));
     }
+    for st0 in lack {
+        let mut l = Lacking { node: st0.node.clone(), unit: st0.unit.clone(), line: st0.line, kind: st0.kind.clone(), ..Default::default() };
+        if let Some(k0) = &key0 {
+            let kt = TraceTarget { column: k0.clone(), known: false, value: None, ..target.clone() };
+            let w = trace_writes(s, &log, &stmts, &[(st0.node.clone(), st0.line, st0.kind.clone())], &desc, &kt, &mut descs, not_run.is_none()).await;
+            if let Some(w) = w.into_iter().find(|w| w.sql.is_some()) {
+                l.produces = w.ran.then_some(!w.values.is_empty());
+                l.sql = w.sql;
+                l.binds = w.binds;
+                l.error = w.error;
+            }
+        }
+        lacking.push(l);
+    }
+    // 이 키의 행을 만든다고 확인된 것을 위로
+    lacking.sort_by_key(|l| match l.produces {
+        Some(true) => 0,
+        None => 1,
+        Some(false) => 2,
+    });
+    let default = desc.columns.iter().find(|c| c.name == target.column).and_then(|c| c.default.clone());
     // 재현된 길을 위로
     writers.sort_by_key(|w| match w.reproduced {
         Some(true) => 0,
@@ -251,27 +375,194 @@ async fn trace_step(st: &AppState, id: u64, s: &Session, mut target: TraceTarget
         Some(false) => 2,
         None => 3,
     });
-    Ok(TraceStep { target, analyzed: true, not_run, writers, notes: vec![] })
+    Ok(TraceStep { target, analyzed: true, not_run, writers, notes: vec![], lacking, default, log: log.take() })
+}
+
+/// 문장이 이 테이블에 행을 넣는지 (C)
+fn inserts_into(x: &StmtLite, desc: &meta::TableDesc) -> bool {
+    x.writes.iter().any(|w| {
+        let base = w.name.split('@').next().unwrap_or(&w.name);
+        let (o, t) = base.rsplit_once('.').map(|(o, t)| (Some(o), t)).unwrap_or((None, base));
+        w.ops.contains('C') && t == desc.name && o.is_none_or(|o| o == desc.owner)
+    })
+}
+
+/// 넣는 문장들(노드·줄·종류)마다 길을 풀어 다시 계산한다 — 서브쿼리면 층마다
+#[allow(clippy::too_many_arguments)]
+async fn trace_writes(s: &Session, log: &Log, stmts: &[StmtLite], list: &[(String, u32, String)], desc: &meta::TableDesc, target: &TraceTarget, descs: &mut HashMap<String, Option<meta::TableDesc>>, run: bool) -> Vec<WriterTrace> {
+    let key_cols: Vec<String> = target.keys.iter().map(|(k, _)| k.clone()).collect();
+    let table_cols: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
+    let mut writers = Vec::new();
+    for (node, line, kind) in list {
+        let Some(stmt) = stmts.iter().find(|x| x.node == *node && x.line == *line && x.kind == *kind) else { continue };
+        let here = format!("{} {}줄 {}", stmt.node, stmt.line, stmt.kind);
+        log.at(here.clone());
+        let text = if stmt.text.ends_with('…') { full_text(s, log, stmt).await.unwrap_or_else(|| stmt.text.clone()) } else { stmt.text.clone() };
+        let node_stmts: Vec<StmtLite> = stmts.iter().filter(|x| x.node == stmt.node).cloned().collect();
+        let paths = trace::paths(stmt, &node_stmts, &text, &desc.name, &target.column, &key_cols, &table_cols);
+        if paths.is_empty() {
+            log.note(format!("문장에서 {} 의 식을 찾지 못함", target.column));
+            writers.push(WriterTrace {
+                node: stmt.node.clone(),
+                unit: stmt.unit.clone(),
+                line: stmt.line,
+                kind: stmt.kind.clone(),
+                label: stmt.kind.clone(),
+                notes: vec!["이 문장에서 그 열의 식을 찾지 못했습니다".into()],
+                ..Default::default()
+            });
+            continue;
+        }
+        for p in paths {
+            let at = format!("{here} · {}", p.label);
+            log.at(at.clone());
+            let vias: Vec<String> = p.via.iter().filter(|v| v.kind != "문장").map(|v| format!("{} {}{}", v.kind, v.name, v.line.map(|l| format!(" ({l}줄)")).unwrap_or_default())).collect();
+            log.note(format!("길: {} = {}{}", target.column, p.expr_text(), if vias.is_empty() { String::new() } else { format!(" ← {}", vias.join(" ← ")) }));
+            let mut wt = WriterTrace {
+                node: stmt.node.clone(),
+                unit: stmt.unit.clone(),
+                line: stmt.line,
+                kind: stmt.kind.clone(),
+                label: p.label.clone(),
+                expr: p.expr_text(),
+                source: p.source_text(),
+                notes: p.notes.clone(),
+                ..Default::default()
+            };
+            run_path(s, log, &p, target, descs, run, &mut wt).await;
+            wt.keys = key_map(&p, target);
+            wt.via = p.via.clone();
+            // 식이 서브쿼리(인라인 뷰)의 열이면 그 안으로 내려가 층마다 다시 계산한다 (값이 어느 층에서 어떻게 되었는지)
+            let mut cur = p.clone();
+            let mut at = at;
+            for _ in 0..3 {
+                let Some(inner) = trace::unwrap_view(&cur) else { break };
+                at = format!("{at} › {}", inner.label);
+                log.at(at.clone());
+                log.note(format!("서브쿼리 안으로: {} = {}", target.column, inner.expr_text()));
+                let mut lt = WriterTrace { label: inner.label.clone(), expr: inner.expr_text(), source: inner.source_text(), notes: inner.notes.clone(), ..Default::default() };
+                run_path(s, log, &inner, target, descs, run, &mut lt).await;
+                lt.reproduced = None;
+                lt.keys = key_map(&inner, target);
+                lt.via = inner.via.last().cloned().into_iter().collect();
+                if !lt.inputs.is_empty() {
+                    wt.inputs = std::mem::take(&mut lt.inputs);
+                }
+                wt.via = inner.via.clone();
+                wt.layers.push(lt);
+                cur = inner;
+            }
+            writers.push(wt);
+        }
+    }
+    writers
+}
+
+/// 행 추적을 열 때 — 테이블(없으면 SQL 의 첫 테이블), 키 열, SQL 의 WHERE 에서 찾은 `키 = 값`
+#[tauri::command]
+pub async fn row_trace_prepare(st: State<'_, AppState>, id: u64, sql: Option<String>, table: Option<String>) -> R<RowPrep> {
+    let (s, _, _) = st.session(id)?;
+    let name = table
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| sql.as_deref().and_then(|q| meta::referenced_tables(q).into_iter().next()))
+        .ok_or_else(|| ErrView::msg("invalid", "추적할 테이블을 정하세요"))?;
+    let desc = meta::describe(&s, &name).await?;
+    let key_cols = key_of(&desc);
+    if key_cols.is_empty() {
+        return Err(ErrView::msg("invalid", format!("{}.{} 에 PK·고유 인덱스가 없어 행을 집을 수 없습니다", desc.owner, desc.name)));
+    }
+    let values = key_cols.iter().map(|k| sql.as_deref().and_then(|q| literal_for(q, k))).collect();
+    Ok(RowPrep { owner: desc.owner, table: desc.name, key_cols, values })
+}
+
+/// SQL 에서 `[별칭.]열 = '값'` · `= 123` 의 값
+fn literal_for(sql: &str, col: &str) -> Option<String> {
+    use sqls_analyze::plsql::{lex, Kind};
+    let t = lex(sql);
+    (0..t.len()).find_map(|i| {
+        let is_col = matches!(&t[i].kind, Kind::Word(w) if w.eq_ignore_ascii_case(col)) && !t.get(i + 1).is_some_and(|x| matches!(x.kind, Kind::Sym(".")));
+        if !is_col || !t.get(i + 1).is_some_and(|x| matches!(x.kind, Kind::Sym("="))) {
+            return None;
+        }
+        match &t.get(i + 2)?.kind {
+            Kind::Str(v) | Kind::Num(v) => Some(v.clone()),
+            _ => None,
+        }
+    })
+}
+
+/// 행 추적 — 이 테이블에 행을 넣는 문장마다 원본을 이 키로 다시 돌려, 원본에 있는지·어디서 끊겼는지
+#[tauri::command]
+pub async fn row_trace(st: State<'_, AppState>, id: u64, owner: Option<String>, table: String, keys: Vec<(String, String)>, #[allow(unused)] vars: Option<Vec<(String, String)>>) -> R<RowTrace> {
+    let (s, _, _) = st.session(id)?;
+    let qualified = match &owner {
+        Some(o) => format!("{o}.{table}"),
+        None => table.clone(),
+    };
+    let desc = meta::describe(&s, &qualified).await?;
+    let keys: Vec<(String, String)> = keys.into_iter().filter(|(_, v)| !v.trim().is_empty()).map(|(k, v)| (k.to_uppercase(), v)).collect();
+    if keys.is_empty() {
+        return Err(ErrView::msg("invalid", "키 값을 넣으세요"));
+    }
+    if let Some((k, _)) = keys.iter().find(|(k, _)| !desc.columns.iter().any(|c| c.name == *k)) {
+        return Err(ErrView::msg("invalid", format!("{} 에 {k} 열이 없습니다", desc.name)));
+    }
+    let target = TraceTarget { owner: Some(desc.owner.clone()), table: desc.name.clone(), column: keys[0].0.clone(), keys: keys.clone(), value: None, known: false, vars: vars.unwrap_or_default() };
+    let not_run = if crate::db::is_production(&st, id) {
+        Some("운영 DB 라 다시 계산은 돌리지 않았습니다 — SQL 을 복사해 확인하세요".to_string())
+    } else if s.is_busy() {
+        Some("세션이 실행 중이라 돌리지 않았습니다".to_string())
+    } else {
+        None
+    };
+    let cond: Vec<String> = keys.iter().enumerate().map(|(n, (k, _))| format!("{k} = :K{}", n + 1)).collect();
+    let exists_sql = format!("SELECT COUNT(*) AS N__ FROM {}.{} WHERE {}", desc.owner, desc.name, cond.join(" AND "));
+    let binds: Vec<(String, String)> = keys.iter().enumerate().map(|(n, (_, v))| (format!("K{}", n + 1), v.clone())).collect();
+    let log = Log::default();
+    log.at(format!("{}.{}({})", desc.owner, desc.name, key_line(&keys)));
+    let exists = if let Some(n) = &not_run {
+        log.note(n.clone());
+        log.unsent("지금 이 키의 행이 있는지", &exists_sql, &binds);
+        None
+    } else {
+        select(&s, &log, "지금 이 키의 행이 있는지", &exists_sql, &binds, 1).await.ok().and_then(|p| p.rows.first().and_then(|r| r.first().cloned().flatten())).map(|n| n != "0")
+    };
+    let path = crate::analyze::store_for(&st, id)?.root().join("integrated").join("statements.json");
+    let stmts = tauri::async_runtime::spawn_blocking(move || crate::analyze::statements(&path)).await.map_err(|e| ErrView::msg("io", e.to_string()))?;
+    let Some(stmts) = stmts else {
+        log.note("분석 결과(statements.json) 없음 — 여기서 멈춤");
+        return Ok(RowTrace { target, analyzed: false, not_run, exists, exists_sql, writers: vec![], deleters: vec![], log: log.take() });
+    };
+    let mut descs: HashMap<String, Option<meta::TableDesc>> = HashMap::new();
+    descs.insert(desc.name.clone(), Some(desc.clone()));
+    let all: Vec<&StmtLite> = stmts.iter().filter(|x| matches!(x.kind.as_str(), "INSERT" | "MERGE") && inserts_into(x, &desc)).collect();
+    log.note(format!("분석 결과에서 {} 에 행을 넣는 문장 {}개를 찾음{}", desc.name, all.len(), if all.len() > 12 { " (앞 12개만)" } else { "" }));
+    let list: Vec<(String, u32, String)> = all.iter().take(12).map(|x| (x.node.clone(), x.line, x.kind.clone())).collect();
+    let mut writers = trace_writes(&s, &log, &stmts, &list, &desc, &target, &mut descs, not_run.is_none()).await;
+    // 원본에 이 키가 있는 문장을 위로
+    writers.sort_by_key(|w| if !w.values.is_empty() { 0 } else if w.ran { 1 } else { 2 });
+    let deleters = stmts
+        .iter()
+        .filter(|x| {
+            x.writes.iter().any(|w| {
+                let base = w.name.split('@').next().unwrap_or(&w.name);
+                w.ops.contains('D') && base.rsplit('.').next() == Some(desc.name.as_str())
+            })
+        })
+        .take(12)
+        .map(|x| Deleter { node: x.node.clone(), unit: x.unit.clone(), line: x.line, kind: x.kind.clone(), text: x.text.clone() })
+        .collect::<Vec<_>>();
+    log.at(desc.name.clone());
+    log.note(format!("분석 결과에서 {} 의 행을 지우는 문장 {}개를 찾음", desc.name, deleters.len()));
+    Ok(RowTrace { target, analyzed: true, not_run, exists, exists_sql, writers, deleters, log: log.take() })
 }
 
 /// 저장된 본문이 잘렸을 때 — DB 객체면 ALL_SOURCE 에서 그 줄들을 읽어 문장을 다시 자른다
-async fn full_text(s: &Session, st: &StmtLite) -> Option<String> {
+async fn full_text(s: &Session, log: &Log, st: &StmtLite) -> Option<String> {
     let mut parts = st.unit.splitn(3, '.');
     let (owner, name, kind) = (parts.next()?, parts.next()?, parts.next()?.replace('_', " "));
-    let page = s
-        .query(
-            "SELECT text FROM all_source WHERE owner = :o AND name = :n AND type = :t AND line BETWEEN :a AND :b ORDER BY line",
-            vec![
-                ("O".into(), Some(owner.into())),
-                ("N".into(), Some(name.into())),
-                ("T".into(), Some(kind)),
-                ("A".into(), Some(st.line.to_string())),
-                ("B".into(), Some(st.end_line.to_string())),
-            ],
-            5000,
-        )
-        .await
-        .ok()?;
+    let binds = [("O".to_string(), owner.to_string()), ("N".into(), name.into()), ("T".into(), kind), ("A".into(), st.line.to_string()), ("B".into(), st.end_line.to_string())];
+    let page = select(s, log, "문장 원문 읽기 (저장된 본문이 잘림)", "SELECT text FROM all_source WHERE owner = :o AND name = :n AND type = :t AND line BETWEEN :a AND :b ORDER BY line", &binds, 5000).await.ok()?;
     let src: String = page.rows.iter().filter_map(|r| r.first().cloned().flatten()).collect();
     trace::cut_statement(&src, &st.kind)
 }
@@ -284,24 +575,47 @@ async fn describe_cached<'a>(s: &Session, descs: &'a mut HashMap<String, Option<
     descs.get(table).and_then(|d| d.as_ref())
 }
 
-/// SELECT 만 보낸다 — 10초를 넘으면 취소
-async fn select(s: &Session, sql: &str, binds: &[(String, String)], max: usize) -> Result<sqls_core::session::RowPage, String> {
+/// SELECT 만 보낸다 — 10초를 넘으면 취소. 보낸 것은 모두 기록에 남는다
+async fn select(s: &Session, log: &Log, purpose: &str, sql: &str, binds: &[(String, String)], max: usize) -> Result<sqls_core::session::RowPage, String> {
     let stmts = sqls_core::sql::split_script(sql);
     if stmts.len() != 1 || stmts[0].kind != sqls_core::sql::StmtKind::Query {
-        return Err("만든 문장이 SELECT 하나가 아니라 보내지 않았습니다".into());
+        let e = "만든 문장이 SELECT 하나가 아니라 보내지 않았습니다".to_string();
+        log.push(purpose, Some(sql), binds, false, None, 0, Some(e.clone()));
+        return Err(e);
     }
     let b: Vec<(String, Option<String>)> = binds.iter().map(|(k, v)| (k.clone(), Some(v.clone()))).collect();
-    match tokio::time::timeout(Duration::from_secs(QUERY_SECS), s.query(sql, b, max)).await {
+    let t0 = Instant::now();
+    let r = match tokio::time::timeout(Duration::from_secs(QUERY_SECS), s.query(sql, b, max)).await {
         Ok(Ok(p)) => Ok(p),
         Ok(Err(e)) => Err(e.to_string().lines().filter(|l| !l.contains("ORA-06512")).collect::<Vec<_>>().join("\n")),
         Err(_) => {
             let _ = s.cancel();
             Err(format!("{QUERY_SECS}초를 넘겨 멈췄습니다 (원본 쪽 키에 인덱스가 없을 수 있습니다)"))
         }
+    };
+    let ms = t0.elapsed().as_millis() as u64;
+    match &r {
+        Ok(p) => log.push(purpose, Some(sql), binds, true, Some(page_result(p)), ms, None),
+        Err(e) => log.push(purpose, Some(sql), binds, true, None, ms, Some(first_line(e).to_string())),
     }
+    r
 }
 
-async fn run_path(s: &Session, p: &Path, target: &TraceTarget, descs: &mut HashMap<String, Option<meta::TableDesc>>, run: bool, wt: &mut WriterTrace) {
+/// 결과 한 마디 — COUNT(*) AS N__ 면 그 수, 아니면 행 수
+fn page_result(p: &sqls_core::session::RowPage) -> String {
+    if p.columns.len() == 1 && p.columns[0].name.eq_ignore_ascii_case("N__") {
+        if let Some(n) = p.rows.first().and_then(|r| r.first().cloned().flatten()) {
+            return format!("{n}건");
+        }
+    }
+    format!("{}행{}", p.rows.len(), if p.has_more { " 이상" } else { "" })
+}
+
+fn key_line(keys: &[(String, String)]) -> String {
+    keys.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")
+}
+
+async fn run_path(s: &Session, log: &Log, p: &Path, target: &TraceTarget, descs: &mut HashMap<String, Option<meta::TableDesc>>, run: bool, wt: &mut WriterTrace) {
     // 값에 쓰인 원본 열 — 테이블이 하나면 맨 이름도 (그 테이블의 열인 것만)
     let (mut inputs, bare) = p.inputs();
     if let Some(src) = &p.src {
@@ -342,15 +656,19 @@ async fn run_path(s: &Session, p: &Path, target: &TraceTarget, descs: &mut HashM
         wt.unknown_vars = unknown.clone();
         if p.keys.len() < target.keys.len() && p.key_vars.is_empty() {
             wt.notes.push("키로 거르지 못해 이 행의 값인지 알 수 없습니다 — 돌리지 않았습니다".into());
+            log.note("키로 거르지 못해 돌리지 않음");
             break;
         }
+        let purpose = if unknown.is_empty() { "이 키로 다시 계산".to_string() } else { format!("이 키로 다시 계산 (모르는 변수 {} 의 조건을 빼고)", unknown.join(", ")) };
         if !run {
+            log.unsent(purpose, &q.value, &q.binds);
             break;
         }
-        match select(s, &q.value, &q.binds, 5).await {
+        match select(s, log, &purpose, &q.value, &q.binds, 5).await {
             Err(e) => {
                 if let Some(v) = trace::unknown_identifier(&e).filter(|v| !unknown.contains(v)) {
                     if unknown.len() < MAX_UNKNOWN {
+                        log.note(format!("{v} 은(는) 값을 모르는 PL/SQL 변수 — 이 변수를 쓰는 조건을 빼고 다시"));
                         unknown.push(v);
                         continue;
                     }
@@ -365,13 +683,24 @@ async fn run_path(s: &Session, p: &Path, target: &TraceTarget, descs: &mut HashM
                 }
                 if wt.values.is_empty() {
                     if let Some(f) = &q.flags {
-                        match select(s, f, &q.binds, 20).await {
+                        match select(s, log, "0건 — 거르는 조건마다 통과 여부", f, &q.binds, 20).await {
                             Ok(fp) => wt.flag_rows = fp.rows.iter().map(|r| r[..q.flag_conds.len().min(r.len())].to_vec()).collect(),
                             Err(e) => wt.notes.push(format!("조건 진단 실패: {}", first_line(&e))),
                         }
                     }
+                    // 어느 조인에서 이 키의 행이 사라지나
+                    for js in trace::join_steps(p, &target.keys, &target.vars, &unknown) {
+                        let what = if js.on.is_empty() { format!("조인 단계: {} {} 에서 이 키", js.table, js.alias) } else { format!("조인 단계: + {} {}", js.table, js.alias) };
+                        let rows = select(s, log, &what, &js.sql, &q.binds, 1).await.ok().and_then(|pg| pg.rows.first().and_then(|r| r.first().cloned().flatten())).and_then(|n| n.parse().ok());
+                        let stop = rows == Some(0);
+                        wt.join_steps.push(JoinRun { alias: js.alias, table: js.table, on: js.on, rows, sql: js.sql });
+                        if stop {
+                            log.note(format!("{} 에서 0건 — 여기서 끊김, 조인 단계 멈춤", js_table_last(&wt.join_steps)));
+                            break;
+                        }
+                    }
                 } else if let Some(rs) = &q.rows {
-                    match select(s, rs, &q.binds, 20).await {
+                    match select(s, log, "값을 만든 원본 행과 그 키", rs, &q.binds, 20).await {
                         Ok(rp) => wt.inputs = input_rows(&q.row_cols, &rp.rows, &pks, &inputs),
                         Err(e) => wt.notes.push(format!("원본 행 읽기 실패: {}", first_line(&e))),
                     }
@@ -380,6 +709,25 @@ async fn run_path(s: &Session, p: &Path, target: &TraceTarget, descs: &mut HashM
         }
         break;
     }
+}
+
+fn js_table_last(j: &[JoinRun]) -> String {
+    j.last().map(|x| x.table.clone()).unwrap_or_default()
+}
+
+/// (키 열, 원본 쪽 식, 이 행의 값)
+fn key_map(p: &Path, target: &TraceTarget) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = p
+        .keys
+        .iter()
+        .filter_map(|(kc, ke)| target.keys.iter().find(|(k, _)| k.eq_ignore_ascii_case(kc)).map(|(_, v)| (kc.clone(), trace::sql_text(ke), v.clone())))
+        .collect();
+    for (var, kc) in &p.key_vars {
+        if let Some((_, v)) = target.keys.iter().find(|(k, _)| k.eq_ignore_ascii_case(kc)) {
+            out.push((kc.clone(), var.clone(), v.clone()));
+        }
+    }
+    out
 }
 
 fn first_line(s: &str) -> &str {
@@ -393,7 +741,13 @@ fn input_rows(cols: &[trace::RowCol], rows: &[Vec<Option<String>>], pks: &[(Stri
         let Some(ci) = cols.iter().position(|c| c.kind == "I" && c.alias == inp.alias && c.column == inp.column) else { continue };
         let key_cols = pks.iter().find(|(a, _)| *a == inp.alias).map(|(_, k)| k.clone()).unwrap_or_default();
         let mut list: Vec<InputRow> = Vec::new();
+        let mut missing = 0;
         for r in rows {
+            // 키가 모두 NULL — 아우터 조인에서 짝이 없었다
+            if !key_cols.is_empty() && key_cols.iter().all(|k| cols.iter().position(|c| c.alias == inp.alias && c.column == *k).is_none_or(|i| r.get(i).cloned().flatten().is_none())) {
+                missing += 1;
+                continue;
+            }
             let keys: Option<Vec<(String, String)>> = key_cols
                 .iter()
                 .map(|k| {
@@ -414,7 +768,7 @@ fn input_rows(cols: &[trace::RowCol], rows: &[Vec<Option<String>>], pks: &[(Stri
             Some((o, t)) => (Some(o.to_string()), t.to_string()),
             None => (None, inp.table.clone()),
         };
-        out.push(InputRows { owner, table, column: inp.column.clone(), alias: inp.alias.clone(), key_cols, rows: list });
+        out.push(InputRows { owner, table, column: inp.column.clone(), alias: inp.alias.clone(), key_cols, rows: list, missing });
     }
     out
 }

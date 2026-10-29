@@ -1,7 +1,7 @@
-//! 결과 편집 (실제 Oracle): ROWID 를 붙여 다시 조회 → 고친 값을 UPDATE/DELETE 로 → 형식이 그대로 돌아가는지.
+//! 결과 편집 (실제 Oracle): ROWID 를 붙여 다시 조회 → 고친 값을 UPDATE/DELETE 로, 새 행을 INSERT 로 → 형식이 그대로 돌아가는지.
 //!   SQLS_TEST_DSN=system/oracle@host:1521/XE cargo test -p sqls-core --test edit_live -- --ignored
 
-use sqls_core::edit::{changes, editable, CellEdit, RowEdit};
+use sqls_core::edit::{changes, editable, CellEdit, RowEdit, RowInsert};
 use sqls_core::{ConnectSpec, ExecOptions, ExecOutcome, Session};
 
 fn spec() -> ConnectSpec {
@@ -44,7 +44,17 @@ async fn edit_roundtrip() {
         ],
     }];
     let rid2 = page.rows[1][0].clone().unwrap();
-    let ch = changes("SQLS_EDIT_T", &edits, &[rid2]).unwrap();
+    // 새 행 — 값을 넣은 열만 (TS 는 빼서 NULL)
+    let ins = vec![RowInsert {
+        cells: vec![
+            CellEdit { column: "ID".into(), type_name: ty(1), value: Some("3".into()) },
+            CellEdit { column: "AMT".into(), type_name: ty(2), value: Some("7.25".into()) },
+            CellEdit { column: "D".into(), type_name: ty(3), value: Some("2026-10-29 08:00:00".into()) },
+            CellEdit { column: "TS".into(), type_name: ty(4), value: None },
+            CellEdit { column: "NAME".into(), type_name: ty(5), value: Some("새 행".into()) },
+        ],
+    }];
+    let ch = changes("SQLS_EDIT_T", &edits, &[rid2], &ins).unwrap();
     for c in &ch {
         let r = s.execute(&c.sql, opts(c.binds.clone())).await.unwrap();
         assert!(matches!(r.outcome, ExecOutcome::Affected { rows: 1 }), "{}", c.preview);
@@ -62,7 +72,13 @@ async fn edit_roundtrip() {
     assert_eq!(r[1].as_deref(), Some("2026-10-07 13:14:15"));
     assert_eq!(r[2].as_deref(), Some("2026-01-02 03:04:05.123456"), "타임스탬프를 그대로 돌려 넣어도 바뀌지 않는다");
     assert_eq!(r[3].as_deref(), Some("O'NEIL 한글"));
-    assert_eq!(r[4].as_deref(), Some("1"), "2번 행은 지웠다");
+    assert_eq!(r[4].as_deref(), Some("2"), "2번 행은 지우고 3번 행을 넣었다");
+    let q = s.query("SELECT TO_CHAR(amt), TO_CHAR(d, 'YYYY-MM-DD HH24:MI:SS'), ts, name FROM sqls_edit_t WHERE id = 3", vec![], 1).await.unwrap();
+    let r = &q.rows[0];
+    assert_eq!(r[0].as_deref(), Some("7.25"));
+    assert_eq!(r[1].as_deref(), Some("2026-10-29 08:00:00"));
+    assert_eq!(r[2], None);
+    assert_eq!(r[3].as_deref(), Some("새 행"));
     s.rollback().await.unwrap();
     s.execute("DROP TABLE sqls_edit_t", opts(vec![])).await.unwrap();
     s.close();

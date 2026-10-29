@@ -307,6 +307,7 @@ pub fn run() {
             valuetrace::value_trace_step,
             valuetrace::row_trace_prepare,
             valuetrace::row_trace,
+            valuetrace::trace_source,
             files::read_sql_file,
             files::write_sql_file,
             files::write_binary_file,

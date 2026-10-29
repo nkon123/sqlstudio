@@ -74,6 +74,7 @@ pub struct Lacking {
     node: String,
     unit: String,
     line: u32,
+    end_line: u32,
     kind: String,
     /// 이 키의 행을 이 문장이 만드는지 (원본을 이 키로 다시 돌려 봄). 모르면 None
     produces: Option<bool>,
@@ -97,25 +98,59 @@ pub struct LogEntry {
     result: Option<String>,
     ms: u64,
     error: Option<String>,
+    /// 소스 위치 — 이 쿼리가 다시 계산한 문장 (분석 단위 키, 첫 줄, 끝 줄)
+    unit: Option<String>,
+    line: Option<u32>,
+    end_line: Option<u32>,
+    /// 거쳐 온 커서·SELECT INTO 의 줄
+    marks: Vec<u32>,
+    /// 소스에서 짚을 낱말 — 조인 단계면 그 테이블, 모르는 변수면 그 변수
+    hint: Option<String>,
+}
+
+/// 소스 위치 (분석 단위, 첫 줄, 끝 줄, 거쳐 온 줄)
+#[derive(Clone, Default)]
+struct Loc {
+    unit: String,
+    line: u32,
+    end_line: u32,
+    marks: Vec<u32>,
+    /// 이 자리의 쿼리마다 짚을 낱말 — 서브쿼리 층이면 그 안의 첫 테이블
+    hint: Option<String>,
 }
 
 /// 탐색 기록 — 쿼리를 보낼 때마다 쌓는다 (await 너머로 잠그지 않는다)
 #[derive(Default)]
 struct Log {
     at: Mutex<String>,
+    loc: Mutex<Option<Loc>>,
+    hint: Mutex<Option<String>>,
     list: Mutex<Vec<LogEntry>>,
 }
 
 impl Log {
+    /// 지금 보는 곳 — 소스 위치는 지운다 (place 로 다시)
     fn at(&self, at: impl Into<String>) {
         *self.at.lock().unwrap() = at.into();
+        *self.loc.lock().unwrap() = None;
+    }
+    fn place(&self, unit: &str, line: u32, end_line: u32, marks: Vec<u32>, hint: Option<String>) {
+        *self.loc.lock().unwrap() = Some(Loc { unit: unit.to_string(), line, end_line: end_line.max(line), marks, hint });
+    }
+    /// 다음 한 줄에만 붙는 짚을 낱말
+    fn hint(&self, h: impl Into<String>) {
+        *self.hint.lock().unwrap() = Some(h.into());
     }
     #[allow(clippy::too_many_arguments)]
     fn push(&self, purpose: impl Into<String>, sql: Option<&str>, binds: &[(String, String)], sent: bool, result: Option<String>, ms: u64, error: Option<String>) {
         let at = self.at.lock().unwrap().clone();
+        let loc = self.loc.lock().unwrap().clone().unwrap_or_default();
+        let hint = self.hint.lock().unwrap().take().or(loc.hint);
         let mut l = self.list.lock().unwrap();
         let seq = l.len() + 1;
-        l.push(LogEntry { seq, at, purpose: purpose.into(), sql: sql.map(str::to_string), binds: binds.to_vec(), sent, result, ms, error });
+        let unit = (!loc.unit.is_empty()).then_some(loc.unit);
+        let (line, end_line) = if unit.is_some() { (Some(loc.line), Some(loc.end_line)) } else { (None, None) };
+        l.push(LogEntry { seq, at, purpose: purpose.into(), sql: sql.map(str::to_string), binds: binds.to_vec(), sent, result, ms, error, unit, line, end_line, marks: loc.marks, hint });
     }
     /// 쿼리 없이 길을 고른 것
     fn note(&self, purpose: impl Into<String>) {
@@ -161,6 +196,7 @@ pub struct Deleter {
     node: String,
     unit: String,
     line: u32,
+    end_line: u32,
     kind: String,
     text: String,
 }
@@ -172,6 +208,10 @@ pub struct RowPrep {
     table: String,
     key_cols: Vec<String>,
     values: Vec<Option<String>>,
+    /// PK·고유 인덱스 (없으면 빈 것)
+    pk: Vec<String>,
+    /// 테이블의 모든 열 — 키 열을 고를 때
+    columns: Vec<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -179,6 +219,7 @@ pub struct WriterTrace {
     node: String,
     unit: String,
     line: u32,
+    end_line: u32,
     kind: String,
     label: String,
     expr: String,
@@ -241,7 +282,7 @@ fn key_of(d: &meta::TableDesc) -> Vec<String> {
 
 /// 결과 그리드의 셀에서 시작 — 열을 테이블 열로 풀고, 행에서 키 값을 찾는다
 #[tauri::command]
-pub async fn value_trace_start(st: State<'_, AppState>, id: u64, sql: String, pos: Option<usize>, column: String, row: Vec<(String, Option<String>)>) -> R<TraceStep> {
+pub async fn value_trace_start(st: State<'_, AppState>, id: u64, sql: String, pos: Option<usize>, column: String, row: Vec<(String, Option<String>)>, key_cols: Option<Vec<String>>) -> R<TraceStep> {
     let lineage = crate::complete::column_lineage(&st, id, &sql, pos, &column).await?;
     let Some(src) = lineage.sources().into_iter().next().cloned() else {
         return Err(ErrView::msg("invalid", format!("{column} 은(는) 테이블 열에서 오지 않았습니다 (식·상수이거나 찾지 못함)")));
@@ -256,9 +297,19 @@ pub async fn value_trace_start(st: State<'_, AppState>, id: u64, sql: String, po
         None => src.table.clone(),
     };
     let desc = meta::describe(&s, &qualified).await?;
-    let kc = key_of(&desc);
+    // 키: 사용자가 고른 열, 없으면 PK·고유 인덱스
+    let kc: Vec<String> = match key_cols.filter(|k| !k.is_empty()) {
+        Some(k) => {
+            let k: Vec<String> = k.into_iter().map(|c| c.to_uppercase()).collect();
+            if let Some(bad) = k.iter().find(|c| !desc.columns.iter().any(|d| d.name == **c)) {
+                return Err(ErrView::msg("invalid", format!("{} 에 {bad} 열이 없습니다", desc.name)));
+            }
+            k
+        }
+        None => key_of(&desc),
+    };
     if kc.is_empty() {
-        return Err(ErrView::msg("invalid", format!("{}.{} 에 PK·고유 인덱스가 없어 행을 집어 거슬러 오를 수 없습니다", desc.owner, desc.name)));
+        return Err(ErrView::msg("nokey", format!("{}.{} 에 PK·고유 인덱스가 없습니다 — 이 행을 집을 열을 골라 주세요", desc.owner, desc.name)));
     }
     // 키 값: 같은 이름의 결과 열, 없으면 결과 열마다 계보를 풀어 그 키 열에서 온 것
     let mut keys = Vec::new();
@@ -348,7 +399,7 @@ async fn trace_step(st: &AppState, id: u64, s: &Session, mut target: TraceTarget
         log.note(format!("{} 에 행을 넣지만 {} 은(는) 넣지 않는 문장 {}개 — 이 키의 행을 만드는지 키 열로 다시 계산", desc.name, target.column, lack.len()));
     }
     for st0 in lack {
-        let mut l = Lacking { node: st0.node.clone(), unit: st0.unit.clone(), line: st0.line, kind: st0.kind.clone(), ..Default::default() };
+        let mut l = Lacking { node: st0.node.clone(), unit: st0.unit.clone(), line: st0.line, end_line: st0.end_line, kind: st0.kind.clone(), ..Default::default() };
         if let Some(k0) = &key0 {
             let kt = TraceTarget { column: k0.clone(), known: false, value: None, ..target.clone() };
             let w = trace_writes(s, &log, &stmts, &[(st0.node.clone(), st0.line, st0.kind.clone())], &desc, &kt, &mut descs, not_run.is_none()).await;
@@ -397,6 +448,7 @@ async fn trace_writes(s: &Session, log: &Log, stmts: &[StmtLite], list: &[(Strin
         let Some(stmt) = stmts.iter().find(|x| x.node == *node && x.line == *line && x.kind == *kind) else { continue };
         let here = format!("{} {}줄 {}", stmt.node, stmt.line, stmt.kind);
         log.at(here.clone());
+        log.place(&stmt.unit, stmt.line, stmt.end_line, vec![], None);
         let text = if stmt.text.ends_with('…') { full_text(s, log, stmt).await.unwrap_or_else(|| stmt.text.clone()) } else { stmt.text.clone() };
         let node_stmts: Vec<StmtLite> = stmts.iter().filter(|x| x.node == stmt.node).cloned().collect();
         let paths = trace::paths(stmt, &node_stmts, &text, &desc.name, &target.column, &key_cols, &table_cols);
@@ -406,6 +458,7 @@ async fn trace_writes(s: &Session, log: &Log, stmts: &[StmtLite], list: &[(Strin
                 node: stmt.node.clone(),
                 unit: stmt.unit.clone(),
                 line: stmt.line,
+                end_line: stmt.end_line,
                 kind: stmt.kind.clone(),
                 label: stmt.kind.clone(),
                 notes: vec!["이 문장에서 그 열의 식을 찾지 못했습니다".into()],
@@ -416,12 +469,15 @@ async fn trace_writes(s: &Session, log: &Log, stmts: &[StmtLite], list: &[(Strin
         for p in paths {
             let at = format!("{here} · {}", p.label);
             log.at(at.clone());
+            let marks: Vec<u32> = p.via.iter().filter_map(|v| v.line).filter(|l| *l != stmt.line).collect();
+            log.place(&stmt.unit, stmt.line, stmt.end_line, marks.clone(), None);
             let vias: Vec<String> = p.via.iter().filter(|v| v.kind != "문장").map(|v| format!("{} {}{}", v.kind, v.name, v.line.map(|l| format!(" ({l}줄)")).unwrap_or_default())).collect();
             log.note(format!("길: {} = {}{}", target.column, p.expr_text(), if vias.is_empty() { String::new() } else { format!(" ← {}", vias.join(" ← ")) }));
             let mut wt = WriterTrace {
                 node: stmt.node.clone(),
                 unit: stmt.unit.clone(),
                 line: stmt.line,
+                end_line: stmt.end_line,
                 kind: stmt.kind.clone(),
                 label: p.label.clone(),
                 expr: p.expr_text(),
@@ -439,6 +495,7 @@ async fn trace_writes(s: &Session, log: &Log, stmts: &[StmtLite], list: &[(Strin
                 let Some(inner) = trace::unwrap_view(&cur) else { break };
                 at = format!("{at} › {}", inner.label);
                 log.at(at.clone());
+                log.place(&stmt.unit, stmt.line, stmt.end_line, marks.clone(), inner.src.as_ref().and_then(|x| x.tables.first()).map(|(_, t)| t.clone()));
                 log.note(format!("서브쿼리 안으로: {} = {}", target.column, inner.expr_text()));
                 let mut lt = WriterTrace { label: inner.label.clone(), expr: inner.expr_text(), source: inner.source_text(), notes: inner.notes.clone(), ..Default::default() };
                 run_path(s, log, &inner, target, descs, run, &mut lt).await;
@@ -467,12 +524,20 @@ pub async fn row_trace_prepare(st: State<'_, AppState>, id: u64, sql: Option<Str
         .or_else(|| sql.as_deref().and_then(|q| meta::referenced_tables(q).into_iter().next()))
         .ok_or_else(|| ErrView::msg("invalid", "추적할 테이블을 정하세요"))?;
     let desc = meta::describe(&s, &name).await?;
-    let key_cols = key_of(&desc);
-    if key_cols.is_empty() {
-        return Err(ErrView::msg("invalid", format!("{}.{} 에 PK·고유 인덱스가 없어 행을 집을 수 없습니다", desc.owner, desc.name)));
+    let pk = key_of(&desc);
+    let lit = |k: &str| sql.as_deref().and_then(|q| literal_for(q, k));
+    // PK 값을 SQL 에서 다 찾으면 PK 만, 아니면 PK + SQL 에서 `열 = 값` 으로 쓴 열
+    let mut key_cols = pk.clone();
+    if pk.is_empty() || pk.iter().any(|k| lit(k).is_none()) {
+        for c in &desc.columns {
+            if !key_cols.contains(&c.name) && lit(&c.name).is_some() {
+                key_cols.push(c.name.clone());
+            }
+        }
     }
-    let values = key_cols.iter().map(|k| sql.as_deref().and_then(|q| literal_for(q, k))).collect();
-    Ok(RowPrep { owner: desc.owner, table: desc.name, key_cols, values })
+    let values = key_cols.iter().map(|k| lit(k)).collect();
+    let columns = desc.columns.iter().map(|c| c.name.clone()).collect();
+    Ok(RowPrep { owner: desc.owner, table: desc.name, key_cols, values, pk, columns })
 }
 
 /// SQL 에서 `[별칭.]열 = '값'` · `= 123` 의 값
@@ -550,11 +615,26 @@ pub async fn row_trace(st: State<'_, AppState>, id: u64, owner: Option<String>, 
             })
         })
         .take(12)
-        .map(|x| Deleter { node: x.node.clone(), unit: x.unit.clone(), line: x.line, kind: x.kind.clone(), text: x.text.clone() })
+        .map(|x| Deleter { node: x.node.clone(), unit: x.unit.clone(), line: x.line, end_line: x.end_line, kind: x.kind.clone(), text: x.text.clone() })
         .collect::<Vec<_>>();
     log.at(desc.name.clone());
     log.note(format!("분석 결과에서 {} 의 행을 지우는 문장 {}개를 찾음", desc.name, deleters.len()));
     Ok(RowTrace { target, analyzed: true, not_run, exists, exists_sql, writers, deleters, log: log.take() })
+}
+
+/// 추적 화면 왼쪽에 보일 소스 전체 — 분석 단위 키(OWNER.NAME.PACKAGE_BODY) 의 ALL_SOURCE 줄들
+#[tauri::command]
+pub async fn trace_source(st: State<'_, AppState>, id: u64, unit: String) -> R<Vec<String>> {
+    let (s, _, _) = st.session(id)?;
+    let mut parts = unit.splitn(3, '.');
+    let (Some(owner), Some(name), Some(kind)) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(ErrView::msg("invalid", format!("{unit} 은(는) DB 객체가 아닙니다")));
+    };
+    let lines = sqls_core::debug::source(&s, owner, name, &kind.replace('_', " ")).await?;
+    if lines.is_empty() {
+        return Err(ErrView::msg("invalid", format!("{owner}.{name} 의 소스를 ALL_SOURCE 에서 찾지 못했습니다")));
+    }
+    Ok(lines)
 }
 
 /// 저장된 본문이 잘렸을 때 — DB 객체면 ALL_SOURCE 에서 그 줄들을 읽어 문장을 다시 자른다
@@ -668,6 +748,7 @@ async fn run_path(s: &Session, log: &Log, p: &Path, target: &TraceTarget, descs:
             Err(e) => {
                 if let Some(v) = trace::unknown_identifier(&e).filter(|v| !unknown.contains(v)) {
                     if unknown.len() < MAX_UNKNOWN {
+                        log.hint(v.clone());
                         log.note(format!("{v} 은(는) 값을 모르는 PL/SQL 변수 — 이 변수를 쓰는 조건을 빼고 다시"));
                         unknown.push(v);
                         continue;
@@ -690,6 +771,7 @@ async fn run_path(s: &Session, log: &Log, p: &Path, target: &TraceTarget, descs:
                     }
                     // 어느 조인에서 이 키의 행이 사라지나
                     for js in trace::join_steps(p, &target.keys, &target.vars, &unknown) {
+                        log.hint(js.table.clone());
                         let what = if js.on.is_empty() { format!("조인 단계: {} {} 에서 이 키", js.table, js.alias) } else { format!("조인 단계: + {} {}", js.table, js.alias) };
                         let rows = select(s, log, &what, &js.sql, &q.binds, 1).await.ok().and_then(|pg| pg.rows.first().and_then(|r| r.first().cloned().flatten())).and_then(|n| n.parse().ok());
                         let stop = rows == Some(0);

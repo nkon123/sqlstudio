@@ -5,20 +5,20 @@
 //
 // 화면: 위에 대상(열·키·값)과 출처 흐름(원본 → 대상), 아래에 넣는 문장마다 카드 — 카드 안은 원본에서 대상으로 흐르는 정거장.
 // AI 출처 설명은 창 안에서 바로 흘러나온다.
+// 왼쪽은 추적한 소스 전체 (tracesrc) — 쿼리마다 그 자리에 번호·결과 배지, 오른쪽 기록·카드와 서로 오간다.
 
 import { invoke } from "@tauri-apps/api/core";
 import { errOf, type Column } from "./api";
 import { glowProgress } from "./glow";
+import { SourcePane, tone, type LogEntry, type SrcLoc } from "./tracesrc";
 import { h, modal, toast } from "./ui";
 
 interface Target { owner: string | null; table: string; column: string; keys: [string, string][]; value: string | null; known: boolean; vars: [string, string][] }
 interface InputRow { keys: [string, string][]; value: string | null }
 interface InputRows { owner: string | null; table: string; column: string; alias: string; key_cols: string[]; rows: InputRow[]; missing: number }
 interface JoinRun { alias: string; table: string; on: string[]; rows?: number | null; sql: string }
-interface Lacking { node: string; unit: string; line: number; kind: string; produces?: boolean | null; sql?: string | null; binds: [string, string][]; error?: string | null }
+interface Lacking { node: string; unit: string; line: number; end_line?: number; kind: string; produces?: boolean | null; sql?: string | null; binds: [string, string][]; error?: string | null }
 interface Via { kind: string; name: string; line?: number | null; expr: string }
-/** 탐색 기록 한 줄 — sql 이 없으면 쿼리 없이 길을 고른 것 */
-interface LogEntry { seq: number; at: string; purpose: string; sql?: string | null; binds: [string, string][]; sent: boolean; result?: string | null; ms: number; error?: string | null }
 /** 다시 계산 한 번 (문장 또는 서브쿼리 층) */
 interface Calc {
   expr: string; source?: string | null; notes: string[];
@@ -30,7 +30,7 @@ interface Calc {
   join_steps: JoinRun[];
 }
 interface Writer extends Calc {
-  node: string; unit: string; line: number; kind: string; label: string; reproduced?: boolean | null;
+  node: string; unit: string; line: number; end_line?: number; kind: string; label: string; reproduced?: boolean | null;
   inputs: InputRows[]; via: Via[]; layers: (Calc & { label: string; via: Via[] })[];
 }
 interface Step {
@@ -41,8 +41,8 @@ interface Step {
   mode?: "row";
   log?: LogEntry[];
 }
-interface RowTrace { target: Target; analyzed: boolean; not_run?: string | null; exists?: boolean | null; exists_sql: string; writers: Writer[]; deleters: { node: string; unit: string; line: number; kind: string; text: string }[]; log: LogEntry[] }
-interface RowPrep { owner: string; table: string; key_cols: string[]; values: (string | null)[] }
+interface RowTrace { target: Target; analyzed: boolean; not_run?: string | null; exists?: boolean | null; exists_sql: string; writers: Writer[]; deleters: { node: string; unit: string; line: number; end_line?: number; kind: string; text: string }[]; log: LogEntry[] }
+interface RowPrep { owner: string; table: string; key_cols: string[]; values: (string | null)[]; pk: string[]; columns: string[] }
 
 export interface TraceHooks {
   openSource: (owner: string, name: string, kind: string, line?: number) => void;
@@ -51,6 +51,31 @@ export interface TraceHooks {
   explain: (text: string, out: HTMLElement) => Promise<void>;
   cancelExplain: () => void;
 }
+/** 창 안에서 — 왼쪽 소스 창까지 */
+type Hooks = TraceHooks & { pane: SourcePane };
+
+/** 오른쪽 기록의 그 쿼리를 펼쳐 보인다 (왼쪽 배지를 눌렀을 때) */
+function revealLog(root: HTMLElement, gid: number) {
+  const row = root.querySelector<HTMLElement>(`.vt-log-q[data-gid="${gid}"]`);
+  if (!row) return;
+  const det = row.closest("details");
+  if (det) det.open = true;
+  row.querySelector<HTMLElement>(".vt-log-sql")?.removeAttribute("hidden");
+  root.querySelectorAll(".vt-log-q.focus").forEach((x) => x.classList.remove("focus"));
+  row.classList.add("focus");
+  row.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+/** 왼쪽 소스 + 오른쪽 결과 */
+function split(pane: SourcePane, right: HTMLElement): HTMLElement {
+  pane.onPick = (gid) => revealLog(right, gid);
+  return h("div", { class: "vt-split" }, pane.el, right);
+}
+
+/** 이 문장 카드가 돌린 쿼리들 */
+const entriesOf = (log: LogEntry[] | undefined, w: { unit: string; line: number; label: string }) =>
+  (log ?? []).filter((e) => e.sql && e.unit === w.unit && e.line === w.line && e.at.includes(w.label));
+const locOf = (e: LogEntry): SrcLoc | null => e.unit ? { unit: e.unit, line: e.line ?? 1, end_line: e.end_line, marks: e.marks, hint: e.hint } : null;
 
 type State = "ok" | "diff" | "miss" | "idle" | "err" | "none";
 const STATE: Record<State, { chip: string; icon: string }> = {
@@ -170,21 +195,58 @@ function station(kind: string, title: Node | string, ...body: (Node | string | n
 
 // ── 창 ──────────────────────────────────────────────
 
-export async function showValueTrace(id: number, sql: string, pos: number | null, col: Column, row: [string, string | null][], hooks: TraceHooks) {
+export async function showValueTrace(id: number, sql: string, pos: number | null, col: Column, row: [string, string | null][], hooks0: TraceHooks) {
   const body = h("div", { class: "vtrace" });
-  const g = glowProgress(`${col.name} 값을 만든 문장을 찾아 이 행의 키로 다시 계산하는 중…`);
-  body.append(g.el);
-  const shown = modal(`값 추적 — ${col.name}`, body, [{ label: "닫기", value: true }], { wide: true, cls: "vt-modal" });
-  void shown.then(() => hooks.cancelExplain());
-  let step: Step;
-  try {
-    step = await invoke<Step>("value_trace_start", { id, sql, pos, column: col.name, row });
-  } catch (e) {
+  const host = h("div", {});
+  const shown = modal(`값 추적 — ${col.name}`, host, [{ label: "닫기", value: true }], { wide: true, cls: "vt-modal" });
+  void shown.then(() => hooks0.cancelExplain());
+  // 키 열을 골라 (없으면 PK) 처음부터 — 창 안을 새로 그린다
+  const start = async (keyCols: string[] | null) => {
+    const pane = new SourcePane(id);
+    const hooks: Hooks = { ...hooks0, pane };
+    body.replaceChildren();
+    host.replaceChildren(split(pane, body));
+    const g = glowProgress(`${col.name} 값을 만든 문장을 찾아 이 행의 ${keyCols ? keyCols.join(", ") : "키"}로 다시 계산하는 중…`);
+    body.append(g.el);
+    let step: Step;
+    try {
+      step = await invoke<Step>("value_trace_start", { id, sql, pos, column: col.name, row, keyCols });
+    } catch (e) {
+      g.done();
+      const err = errOf(e);
+      body.append(h("div", { class: "vt-error" }, h("b", {}, "추적하지 못했습니다"), h("div", {}, err.message)));
+      if (err.kind === "nokey" || /키 열/.test(err.message)) body.append(keyPicker(row, keyCols ?? [], start));
+      return;
+    }
     g.done();
-    body.append(h("div", { class: "vt-error" }, h("b", {}, "추적하지 못했습니다"), h("div", {}, errOf(e).message)));
-    return shown;
-  }
-  g.done();
+    traceBody(id, step, hooks, body, () => body.prepend(keyPicker(row, step.target.keys.map(([k]) => k), start)));
+  };
+  await start(null);
+  return shown;
+}
+
+/** 이 행을 집을 열 고르기 — 결과 행의 열 중에서 (여러 개면 AND) */
+function keyPicker(row: [string, string | null][], picked: string[], go: (cols: string[]) => void): HTMLElement {
+  const want = new Set(picked.map((x) => x.toUpperCase()));
+  const boxes = row.filter(([n]) => n).map(([n, v]) => {
+    const cb = h("input", { type: "checkbox" }) as HTMLInputElement;
+    cb.checked = want.has(n.toUpperCase());
+    return { n, cb, el: h("label", { class: `vt-keypick${v == null ? " null" : ""}`, title: v == null ? "NULL 은 키로 쓸 수 없습니다" : "" }, cb, h("b", {}, n), h("span", { class: "dim" }, v == null ? "NULL" : v.length > 24 ? `${v.slice(0, 24)}…` : v)) };
+  });
+  const box = h("div", { class: "vt-section vt-keys-box" },
+    h("div", { class: "vt-cap" }, "이 행을 집을 열 — PK 가 없거나 다른 열로 보고 싶을 때 고르세요 (고른 열이 모두 같은 행을 원본에서 찾습니다)"),
+    h("div", { class: "vt-row wrap" }, ...boxes.map((b) => b.el)),
+    h("div", { class: "vt-row" }, h("button", { class: "vt-ai-btn", onclick: (e: Event) => {
+      e.preventDefault();
+      const cols = boxes.filter((b) => b.cb.checked).map((b) => b.n);
+      if (!cols.length) return toast("열을 하나 이상 고르세요", "error");
+      go(cols);
+    } }, "이 열들로 추적")));
+  return box;
+}
+
+/** 값 추적 결과 — 맨 위 요약·출처 흐름·문장 카드·기록 */
+function traceBody(id: number, step: Step, hooks: Hooks, body: HTMLElement, changeKeys: () => void) {
   const lines: string[] = [];
   let current: Crumb[] = [];
   const flowText = () => `출처 흐름 (원본 → 대상): ${[...current].reverse().filter((c) => c.kind !== "end" || !c.text.startsWith("↑")).map(crumbText).join(" → ")}`;
@@ -210,9 +272,9 @@ export async function showValueTrace(id: number, sql: string, pos: number | null
     current = p;
     flowBox.replaceChildren(h("div", { class: "vt-cap" }, "출처 흐름 — 원본에서 이 값까지 (재현된 문장을 따라가고, 거슬러 오를수록 위로 길어집니다)"), flowEl(p));
   };
+  const keyBtn = h("button", { class: "vt-ghost", title: "이 행을 집을 열을 바꿔 다시 추적합니다", onclick: () => { keyBtn.remove(); changeKeys(); } }, "키 바꾸기");
   const tree = stepEl(id, step, hooks, lines, 0, false, [], onPath);
-  body.append(hero(step, aiBtn, copyBtn), flowBox, aiCard, tree);
-  return shown;
+  body.append(hero(step, aiBtn, h("span", { class: "vt-row" }, keyBtn, copyBtn)), flowBox, aiCard, tree);
 }
 
 /** 출처 흐름 — 원본(위) → 대상(아래). 행 마디는 테이블·키·값, 문장 마디는 프로시저·거쳐 온 층·식 */
@@ -268,8 +330,9 @@ function hero(s: Step, aiBtn: HTMLElement, copyBtn: HTMLElement): HTMLElement {
 }
 
 /** 한 단계 — 넣는 문장마다 카드 (거슬러 오른 단계면 위에 작은 대상 머리) */
-function stepEl(id: number, s: Step, hooks: TraceHooks, lines: string[], depth: number, child: boolean, prefix: Crumb[], onPath: OnPath): HTMLElement {
+function stepEl(id: number, s: Step, hooks: Hooks, lines: string[], depth: number, child: boolean, prefix: Crumb[], onPath: OnPath): HTMLElement {
   const pad = "  ".repeat(depth);
+  hooks.pane.add(s.log ?? [], [...s.writers, ...(s.lacking ?? [])].filter((w) => w.unit).map((w) => ({ unit: w.unit, line: w.line, end_line: w.end_line })));
   onPath(pathFor(s, prefix));
   lines.push(`${pad}${targetText(s.target)}`);
   const el = h("div", { class: "vt-step" });
@@ -295,19 +358,19 @@ function stepEl(id: number, s: Step, hooks: TraceHooks, lines: string[], depth: 
   }
   for (const w of s.writers) el.append(writerEl(id, s, w, hooks, lines, depth, prefix, onPath));
   if (s.lacking?.length) el.append(lackingEl(s, hooks, lines, pad));
-  if (s.log?.length) el.append(logEl(s.log, child ? `${s.target.table}.${s.target.column} 단계` : "이 단계"));
+  if (s.log?.length) el.append(logEl(s.log, child ? `${s.target.table}.${s.target.column} 단계` : "이 단계", hooks.pane, !child));
   return el;
 }
 
 /** 탐색 기록 — 어디를 거치며 어떤 쿼리를 몇 번, 몇 건·몇 ms. 거친 곳(at)이 바뀔 때마다 머리를 단다 */
-function logEl(log: LogEntry[], title: string): HTMLElement {
+function logEl(log: LogEntry[], title: string, pane: SourcePane, open = true): HTMLElement {
   const sent = log.filter((e) => e.sql && e.sent);
   const unsent = log.filter((e) => e.sql && !e.sent).length;
   const errs = log.filter((e) => e.error).length;
   const ms = sent.reduce((a, e) => a + e.ms, 0);
   const secs = ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
   const text = log.map((e) => {
-    const head = `${e.seq}. [${e.at}] ${e.purpose}${e.sql ? ` — ${e.sent ? `${e.error ? `오류: ${e.error}` : e.result ?? ""} (${e.ms}ms)` : "보내지 않음"}` : ""}`;
+    const head = `${e.gid ? `#${e.gid}` : "  ›"} [${e.at}${e.line ? ` · ${e.line}줄` : ""}] ${e.purpose}${e.sql ? ` — ${e.sent ? `${e.error ? `오류: ${e.error}` : e.result ?? ""} (${e.ms}ms)` : "보내지 않음"}` : ""}`;
     if (!e.sql) return head;
     const b = e.binds.length ? `\n   -- 바인드: ${e.binds.map(([k, v]) => `:${k} = '${v}'`).join(", ")}` : "";
     return `${head}\n   ${e.sql.replace(/\n/g, "\n   ")};${b}`;
@@ -318,31 +381,36 @@ function logEl(log: LogEntry[], title: string): HTMLElement {
   for (const e of log) {
     if (e.at !== at) {
       at = e.at;
-      list.append(h("li", { class: "vt-log-at" }, at));
+      const loc = locOf(e);
+      list.append(h("li", { class: `vt-log-at${loc ? " link" : ""}`, title: loc ? "왼쪽 소스에서 이 문장 보기" : "", onclick: () => { if (loc) void pane.show(loc); } },
+        at, e.line ? h("span", { class: "vt-log-lines" }, ` ${e.line}${e.end_line && e.end_line !== e.line ? `–${e.end_line}` : ""}줄`) : ""));
     }
     if (!e.sql) {
       list.append(h("li", { class: "vt-log-note" }, h("span", { class: "vt-log-seq" }, "›"), e.purpose));
       continue;
     }
-    const zero = /^0(건|행)$/.test(e.result ?? "");
-    const badge = !e.sent ? h("span", { class: "vt-log-res dim" }, "보내지 않음")
-      : e.error ? h("span", { class: "vt-log-res err", title: e.error }, "오류")
-      : h("span", { class: `vt-log-res${zero ? " zero" : ""}` }, e.result ?? "");
+    const t = tone(e);
+    const badge = h("span", { class: `vt-log-res ${t}`, title: e.error ?? "" }, t === "idle" ? "보내지 않음" : t === "err" ? "오류" : e.result ?? "");
     const sqlBox = h("div", { class: "vt-log-sql", hidden: true }, sqlCode(e.sql, "vt-code"),
       e.binds.length ? h("div", { class: "dim" }, `바인드 ${e.binds.map(([k, v]) => `:${k} = '${v}'`).join(", ")}`) : "",
       e.error ? h("div", { class: "vt-error" }, e.error) : "");
-    const row = h("li", { class: "vt-log-q", title: "눌러서 SQL 보기" },
+    const row = h("li", { class: `vt-log-q t-${t}`, "data-gid": String(e.gid ?? ""), title: "눌러서 SQL 보기 · 왼쪽 소스의 그 자리로" },
       h("div", { class: "vt-log-line" },
-        h("span", { class: "vt-log-seq q" }, String(sent.indexOf(e) + 1 || "–")),
+        h("span", { class: "vt-log-seq q" }, `#${e.gid ?? "–"}`),
         h("span", { class: "vt-log-purpose" }, e.purpose),
         h("span", { class: "spacer" }),
         badge,
         e.sent ? h("span", { class: "vt-log-ms" }, `${e.ms}ms`) : ""),
       sqlBox);
-    row.addEventListener("click", (ev) => { if (!(ev.target as HTMLElement).closest(".vt-log-sql")) sqlBox.hidden = !sqlBox.hidden; });
+    row.addEventListener("click", (ev) => {
+      if ((ev.target as HTMLElement).closest(".vt-log-sql")) return;
+      sqlBox.hidden = !sqlBox.hidden;
+      const loc = locOf(e);
+      if (loc) void pane.show(loc, e.gid);
+    });
     list.append(row);
   }
-  return h("details", { class: "vt-log" },
+  return h("details", { class: "vt-log", open },
     h("summary", {},
       h("b", {}, `탐색 기록 — ${title}`),
       h("span", { class: "vt-sum" }, `쿼리 ${sent.length}번`),
@@ -354,7 +422,7 @@ function logEl(log: LogEntry[], title: string): HTMLElement {
 }
 
 /** 이 열을 넣지 않는 INSERT — 이 키의 행을 만들면 이 열은 기본값·NULL */
-function lackingEl(s: Step, hooks: TraceHooks, lines: string[], pad: string): HTMLElement {
+function lackingEl(s: Step, hooks: Hooks, lines: string[], pad: string): HTMLElement {
   const def = s.default?.trim();
   const made = s.lacking!.filter((l) => l.produces === true);
   lines.push(`${pad}  이 열을 넣지 않는 문장: ${s.lacking!.map((l) => `${procOf(l.node)} ${l.line}줄${l.produces ? " (이 키의 행을 만듦)" : ""}`).join(", ")}`);
@@ -377,9 +445,12 @@ function lackingEl(s: Step, hooks: TraceHooks, lines: string[], pad: string): HT
 
 // ── 행 추적: 이 키의 행은 왜 없나 ─────────────────────
 
-export async function showRowTrace(id: number, sql: string | null, table: string | null, hooks: TraceHooks) {
+export async function showRowTrace(id: number, sql: string | null, table: string | null, hooks0: TraceHooks) {
   const body = h("div", { class: "vtrace" });
-  const shown = modal("행 추적 — 이 키의 데이터는 왜 없나", body, [{ label: "닫기", value: true }], { wide: true, cls: "vt-modal" });
+  let pane = new SourcePane(id);
+  let hooks: Hooks = { ...hooks0, pane };
+  const wrap = h("div", {}, split(pane, body));
+  const shown = modal("행 추적 — 이 키의 데이터는 왜 없나", wrap, [{ label: "닫기", value: true }], { wide: true, cls: "vt-modal" });
   const tableIn = h("input", { class: "vt-input", placeholder: "테이블 (예: ORD_SUM)", value: table ?? "" }) as HTMLInputElement;
   const keysBox = h("div", { class: "vt-row" });
   const goBtn = h("button", { class: "vt-ai-btn" }, "추적") as HTMLButtonElement;
@@ -391,22 +462,52 @@ export async function showRowTrace(id: number, sql: string | null, table: string
       keysBox),
     h("div", { class: "vt-hero-side" }, goBtn));
   body.append(form, result);
-  let keyIns: { col: string; el: HTMLInputElement }[] = [];
+  // 키 열·값 — PK 가 없어도 아무 열이나 골라 (여러 개면 AND)
+  let keyIns: { sel: HTMLSelectElement; el: HTMLInputElement }[] = [];
+  let columns: string[] = [];
   let owner = "";
+  const keyRow = (col: string, val: string) => {
+    const sel = h("select", { class: "vt-input sel" }, ...columns.map((c) => h("option", { value: c }, c))) as HTMLSelectElement;
+    sel.value = col;
+    const el = h("input", { class: "vt-input", placeholder: "값", value: val }) as HTMLInputElement;
+    const k = { sel, el };
+    keyIns.push(k);
+    return k;
+  };
+  const drawKeys = (pkNote: string) => {
+    const add = h("button", { class: "vt-ghost", onclick: (e: Event) => {
+      e.preventDefault();
+      const used = new Set(keyIns.map((k) => k.sel.value));
+      keyRow(columns.find((c) => !used.has(c)) ?? columns[0], "");
+      drawKeys(pkNote);
+      keyIns[keyIns.length - 1].sel.focus();
+    } }, "+ 열 추가");
+    keysBox.replaceChildren(
+      ...keyIns.map((k) => h("span", { class: "vt-keyedit" }, k.sel, h("span", { class: "eq" }, "="), k.el,
+        h("button", { class: "vt-link", title: "이 열 빼기", onclick: (e: Event) => { e.preventDefault(); keyIns = keyIns.filter((x) => x !== k); drawKeys(pkNote); } }, "✕"))),
+      add, pkNote ? h("span", { class: "dim" }, pkNote) : "");
+  };
   const prep = async (q: string | null) => {
     try {
       const p = await invoke<RowPrep>("row_trace_prepare", { id, sql: q, table: tableIn.value.trim() || null });
       owner = p.owner;
       tableIn.value = p.table;
-      keyIns = p.key_cols.map((c, i) => ({ col: c, el: h("input", { class: "vt-input", placeholder: c, value: p.values[i] ?? "" }) as HTMLInputElement }));
-      keysBox.replaceChildren(...keyIns.flatMap((k) => [h("span", { class: "vt-key" }, h("span", { class: "k" }, k.col)), k.el]));
+      columns = p.columns;
+      keyIns = [];
+      const cols = p.key_cols.length ? p.key_cols : columns.slice(0, 1);
+      cols.forEach((c, i) => keyRow(c, p.values[i] ?? ""));
+      drawKeys(p.pk.length ? `PK: ${p.pk.join(", ")}` : "PK·고유 인덱스가 없습니다 — 행을 집을 열을 고르세요");
       keyIns.find((k) => !k.el.value)?.el.focus();
     } catch (e) { keysBox.replaceChildren(h("div", { class: "vt-error" }, errOf(e).message)); }
   };
   const run = async () => {
     if (!keyIns.length) await prep(null);
-    const keys = keyIns.map((k) => [k.col, k.el.value.trim()] as [string, string]);
-    if (!keys.some(([, v]) => v)) return toast("키 값을 넣으세요", "error");
+    const keys = keyIns.map((k) => [k.sel.value, k.el.value.trim()] as [string, string]).filter(([, v]) => v);
+    if (!keys.length) return toast("키 값을 넣으세요", "error");
+    // 새로 돌 때마다 왼쪽 소스·번호도 새로
+    pane = new SourcePane(id);
+    hooks = { ...hooks0, pane };
+    wrap.replaceChildren(split(pane, body));
     goBtn.disabled = true;
     const g = glowProgress(`${tableIn.value} 에 행을 넣는 문장마다 원본을 이 키로 돌려 보는 중…`);
     result.replaceChildren(g.el);
@@ -418,14 +519,15 @@ export async function showRowTrace(id: number, sql: string | null, table: string
     } finally { g.done(); goBtn.disabled = false; }
   };
   goBtn.addEventListener("click", () => void run());
-  form.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); void run(); } });
+  form.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); e.stopPropagation(); void run(); } });
   await prep(sql);
   // SQL 의 WHERE 에서 키 값을 다 찾았으면 바로 돈다
   if (keyIns.length && keyIns.every((k) => k.el.value)) void run();
+  void shown.then(() => hooks0.cancelExplain());
   return shown;
 }
 
-function rowResult(id: number, r: RowTrace, hooks: TraceHooks): Node[] {
+function rowResult(id: number, r: RowTrace, hooks: Hooks): Node[] {
   const t = r.target;
   const lines: string[] = [];
   const have = r.writers.filter((w) => w.values.length).length;
@@ -451,7 +553,8 @@ function rowResult(id: number, r: RowTrace, hooks: TraceHooks): Node[] {
     : "다시 계산을 돌리지 못했습니다";
   const out: Node[] = [head, h("div", { class: "vt-banner info" }, verdict)];
   if (r.not_run) out.push(h("div", { class: "vt-banner" }, r.not_run));
-  const step: Step = { target: t, analyzed: r.analyzed, not_run: r.not_run, writers: r.writers, notes: [], mode: "row" };
+  const step: Step = { target: t, analyzed: r.analyzed, not_run: r.not_run, writers: r.writers, notes: [], mode: "row", log: r.log };
+  hooks.pane.add(r.log ?? [], [...r.writers, ...r.deleters].filter((w) => w.unit).map((w) => ({ unit: w.unit, line: w.line, end_line: w.end_line })));
   for (const w of r.writers) out.push(writerEl(id, step, w, hooks, lines, 0, [], () => {}));
   if (r.deleters.length) {
     out.push(h("div", { class: "vt-card" },
@@ -461,11 +564,13 @@ function rowResult(id: number, r: RowTrace, hooks: TraceHooks): Node[] {
         const obj = dbObject(d.unit);
         return h("div", { class: "vt-block" },
           h("div", { class: "vt-input-row" }, h("span", { class: "vt-proc" }, h("b", {}, procOf(d.node)), h("span", { class: "dim" }, ` ${d.line}줄 · ${d.kind}`)),
-            h("span", { class: "spacer" }), obj ? h("button", { class: "vt-link", onclick: () => hooks.openSource(obj.owner, obj.name, obj.kind, d.line) }, "소스 ↗") : ""),
+            h("span", { class: "spacer" }),
+            h("button", { class: "vt-link", onclick: () => void hooks.pane.show({ unit: d.unit, line: d.line, end_line: d.end_line }) }, "← 소스에서 보기"),
+            obj ? h("button", { class: "vt-link", onclick: () => hooks.openSource(obj.owner, obj.name, obj.kind, d.line) }, "새 탭 ↗") : ""),
           sqlCode(d.text, "vt-code dim"));
       })));
   }
-  if (r.log?.length) out.push(logEl(r.log, `${t.table} 행 추적`));
+  if (r.log?.length) out.push(logEl(r.log, `${t.table} 행 추적`, hooks.pane));
   return out;
 }
 
@@ -531,7 +636,43 @@ function sqlDetails(c: Calc, title: string): HTMLElement | null {
     h("pre", {}, text));
 }
 
-function writerEl(id: number, s: Step, w: Writer, hooks: TraceHooks, lines: string[], depth: number, prefix: Crumb[], onPath: OnPath): HTMLElement {
+/** 왜 안 나왔나 — 조인 단계에서 0 이 된 곳, 아니면 아무 행도 통과하지 못한 조건 (바깥 문장과 서브쿼리 층) */
+function whyOf(c: Calc, where: string): string | null {
+  if (!c.ran || c.values.length) return null;
+  const cut = c.join_steps.findIndex((j) => j.rows === 0);
+  if (cut === 0) return `${where}${c.join_steps[0].table} 에 이 키의 행이 없습니다 (0건)`;
+  if (cut > 0) {
+    const a = c.join_steps[cut - 1], b = c.join_steps[cut];
+    return `${where}${b.table} ${b.alias} 조인에서 끊겼습니다 — ${a.table} 까지 ${a.rows}건 → + ${b.table} 0건${b.on.length ? ` (${b.on.join(" AND ")})` : ""}`;
+  }
+  const n = c.flag_rows.length;
+  if (n) {
+    const zero = c.flag_conds.filter((_, i) => c.flag_rows.every((r) => r[i] !== "O"));
+    if (zero.length) return `${where}조건 ${zero.join(", ")} 을(를) 이 키의 행 ${n}건이 하나도 통과하지 못했습니다`;
+    return `${where}조건마다는 통과하는 행이 있지만, 모두 함께 맞는 행이 없습니다 (${n}건 중)`;
+  }
+  return null;
+}
+
+function whyEl(w: Writer): HTMLElement | string {
+  const ws = [...w.layers].reverse().map((l) => whyOf(l, `${l.via[0]?.kind ?? "서브쿼리"} ${l.via[0]?.name ?? ""} 안: `)).filter(Boolean);
+  const why = ws[0] ?? whyOf(w, "");
+  return why ? h("div", { class: "vt-why" }, h("b", {}, "끊긴 곳 "), why) : "";
+}
+
+/** 이 카드가 돌린 쿼리 — 번호·목적·결과. 누르면 왼쪽 소스의 그 자리와 아래 기록의 그 쿼리로 */
+function queryChips(es: LogEntry[], pane: SourcePane, card: HTMLElement): HTMLElement | string {
+  if (!es.length) return "";
+  return h("div", { class: "vt-qchips" }, h("span", { class: "vt-cap-inline" }, "돌린 쿼리"),
+    ...es.map((e) => h("button", { class: `vt-qchip t-${tone(e)}`, title: `${e.purpose}${e.error ? ` — ${e.error}` : ""}`, onclick: () => {
+      const loc = locOf(e);
+      if (loc) void pane.show(loc, e.gid);
+      const root = card.closest<HTMLElement>(".vtrace");
+      if (root && e.gid) revealLog(root, e.gid);
+    } }, h("b", {}, `#${e.gid}`), ` ${e.purpose.replace(/^이 키로 /, "").replace(/ — .*/, "")} `, h("span", { class: "r" }, tone(e) === "idle" ? "안 보냄" : e.error ? "오류" : e.result ?? ""))));
+}
+
+function writerEl(id: number, s: Step, w: Writer, hooks: Hooks, lines: string[], depth: number, prefix: Crumb[], onPath: OnPath): HTMLElement {
   const pad = "  ".repeat(depth + 1);
   const st = stateOf(w);
   const obj = dbObject(w.unit);
@@ -559,8 +700,11 @@ function writerEl(id: number, s: Step, w: Writer, hooks: TraceHooks, lines: stri
       h("span", { class: "vt-proc" }, h("span", { class: "vt-cap-inline" }, "프로시저"), h("b", {}, procOf(w.node)), h("span", { class: "dim" }, ` ${w.line}줄`)),
       h("span", { class: "vt-kind" }, w.label.split(" ←")[0]),
       h("span", { class: "spacer" }),
-      obj ? h("button", { class: "vt-link", title: `${w.node} — 소스를 그 줄로 엽니다`, onclick: () => hooks.openSource(obj.owner, obj.name, obj.kind, w.line) }, "소스 열기 ↗") : ""),
-    h("div", { class: "vt-headline" }, headline));
+      h("button", { class: "vt-link", title: "왼쪽 소스에서 이 문장을 봅니다", onclick: () => void hooks.pane.show({ unit: w.unit, line: w.line, end_line: w.end_line }) }, "← 소스에서 보기"),
+      obj ? h("button", { class: "vt-link", title: `${w.node} — 소스를 에디터 새 탭으로 엽니다`, onclick: () => hooks.openSource(obj.owner, obj.name, obj.kind, w.line) }, "새 탭 ↗") : ""),
+    h("div", { class: "vt-headline" }, headline),
+    whyEl(w),
+    queryChips(entriesOf(s.log, w), hooks.pane, card));
 
   // 정거장: 원본 행 → (서브쿼리 안쪽 → 바깥) → 커서·SELECT INTO → 문장 → 대상
   const flow = h("div", { class: "vt-stations" });
@@ -649,6 +793,7 @@ function writerEl(id: number, s: Step, w: Writer, hooks: TraceHooks, lines: stri
       try {
         const again = await invoke<Step>("value_trace_step", { id, target: { ...t, vars } });
         const fresh = again.writers.find((x) => x.node === w.node && x.line === w.line && x.label === w.label);
+        hooks.pane.add(again.log ?? [], []);
         if (fresh) card.replaceWith(writerEl(id, again, fresh, hooks, [], depth, prefix, onPath));
       } catch (e) { toast(errOf(e).message, "error"); } finally { g.done(); rerun.disabled = false; }
     });

@@ -1,4 +1,4 @@
-//! 결과 그리드 편집 — 단일 테이블 SELECT 에 ROWID 를 붙여 다시 조회하고, 고친 셀을 UPDATE/DELETE 문으로 만든다.
+//! 결과 그리드 편집 — 단일 테이블 SELECT 에 ROWID 를 붙여 다시 조회하고, 고친 셀을 UPDATE/DELETE 문으로, 새 행을 INSERT 문으로 만든다.
 //!
 //! 문장은 화면에 보여 주고 사람이 확인한 뒤 실행한다. 값은 전부 바인드 변수로 넣는다 (SQL 에 값을 이어 붙이지 않는다).
 //! 날짜·타임스탬프는 그리드에 나온 글자 형식 그대로 `TO_DATE`/`TO_TIMESTAMP` 로 되돌린다.
@@ -118,6 +118,12 @@ pub struct RowEdit {
     pub cells: Vec<CellEdit>,
 }
 
+/// 새 행 — 값을 넣은 열만 (나머지는 테이블의 DEFAULT·NULL)
+#[derive(Debug, Clone, Deserialize)]
+pub struct RowInsert {
+    pub cells: Vec<CellEdit>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Change {
     pub sql: String,
@@ -166,8 +172,8 @@ fn show(v: &Option<String>) -> String {
     }
 }
 
-/// UPDATE/DELETE 문들. 행마다 ROWID 로 찾는다.
-pub fn changes(table: &str, edits: &[RowEdit], deletes: &[String]) -> Result<Vec<Change>, String> {
+/// UPDATE/DELETE/INSERT 문들. 고치고 지울 행은 ROWID 로 찾는다.
+pub fn changes(table: &str, edits: &[RowEdit], deletes: &[String], inserts: &[RowInsert]) -> Result<Vec<Change>, String> {
     let qt = quote_table(table);
     let mut out = Vec::new();
     for e in edits {
@@ -201,6 +207,33 @@ pub fn changes(table: &str, edits: &[RowEdit], deletes: &[String]) -> Result<Vec
             sql: format!("DELETE FROM {qt} WHERE ROWID = CHARTOROWID(:RID)"),
             preview: format!("DELETE FROM {qt} WHERE ROWID = '{rid}'"),
             binds: vec![("RID".into(), Some(rid.clone()))],
+        });
+    }
+    for ins in inserts {
+        let cells: Vec<&CellEdit> = ins.cells.iter().filter(|c| c.value.is_some()).collect();
+        if cells.is_empty() {
+            return Err("값을 하나도 넣지 않은 새 행이 있습니다".into());
+        }
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        let mut shown = Vec::new();
+        let mut binds = Vec::new();
+        for (i, c) in cells.iter().enumerate() {
+            if !editable_type(&c.type_name) {
+                return Err(format!("{} ({}) 는 그리드에서 넣을 수 없습니다", c.column, c.type_name));
+            }
+            let b = format!("V{}", i + 1);
+            let expr = value_expr(&c.type_name, &b);
+            cols.push(quote_ident(&c.column));
+            shown.push(expr.replace(&format!(":{b}"), &show(&c.value)));
+            vals.push(expr);
+            binds.push((b, c.value.clone()));
+        }
+        let cols = cols.join(", ");
+        out.push(Change {
+            sql: format!("INSERT INTO {qt} ({cols}) VALUES ({})", vals.join(", ")),
+            preview: format!("INSERT INTO {qt} ({cols}) VALUES ({})", shown.join(", ")),
+            binds,
         });
     }
     Ok(out)
@@ -247,7 +280,14 @@ mod tests {
                 CellEdit { column: "ENAME".into(), type_name: "VARCHAR2(10)".into(), value: Some("O'NEIL".into()) },
             ],
         }];
-        let c = changes("SCOTT.EMP", &edits, &["AAAR3sAAEAAAACXAAB".into()]).unwrap();
+        let ins = vec![RowInsert {
+            cells: vec![
+                CellEdit { column: "EMPNO".into(), type_name: "NUMBER(4)".into(), value: Some("7999".into()) },
+                CellEdit { column: "COMM".into(), type_name: "NUMBER".into(), value: None },
+                CellEdit { column: "ENAME".into(), type_name: "VARCHAR2(10)".into(), value: Some("KIM".into()) },
+            ],
+        }];
+        let c = changes("SCOTT.EMP", &edits, &["AAAR3sAAEAAAACXAAB".into()], &ins).unwrap();
         assert_eq!(
             c[0].sql,
             "UPDATE \"SCOTT\".\"EMP\" SET \"SAL\" = TO_NUMBER(:V1), \"HIREDATE\" = TO_DATE(:V2, 'YYYY-MM-DD HH24:MI:SS'), \"COMM\" = NULL, \"ENAME\" = :V4 WHERE ROWID = CHARTOROWID(:RID)"
@@ -255,6 +295,10 @@ mod tests {
         assert_eq!(c[0].binds.len(), 4);
         assert!(c[0].preview.contains("\"ENAME\" = 'O''NEIL'"));
         assert_eq!(c[1].sql, "DELETE FROM \"SCOTT\".\"EMP\" WHERE ROWID = CHARTOROWID(:RID)");
-        assert!(changes("T", &[RowEdit { rowid: "x".into(), cells: vec![CellEdit { column: "DOC".into(), type_name: "CLOB".into(), value: Some("a".into()) }] }], &[]).is_err());
+        assert_eq!(c[2].sql, "INSERT INTO \"SCOTT\".\"EMP\" (\"EMPNO\", \"ENAME\") VALUES (TO_NUMBER(:V1), :V2)");
+        assert_eq!(c[2].preview, "INSERT INTO \"SCOTT\".\"EMP\" (\"EMPNO\", \"ENAME\") VALUES (TO_NUMBER('7999'), 'KIM')");
+        assert_eq!(c[2].binds.len(), 2);
+        assert!(changes("T", &[], &[], &[RowInsert { cells: vec![] }]).is_err());
+        assert!(changes("T", &[RowEdit { rowid: "x".into(), cells: vec![CellEdit { column: "DOC".into(), type_name: "CLOB".into(), value: Some("a".into()) }] }], &[], &[]).is_err());
     }
 }

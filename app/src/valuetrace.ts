@@ -356,7 +356,7 @@ function stepEl(id: number, s: Step, hooks: Hooks, lines: string[], depth: numbe
     el.append(h("div", { class: "vt-empty" }, h("b", {}, "값을 넣는 문장을 찾지 못했습니다"),
       h("div", {}, "다른 시스템이 넣거나, 동적 SQL·트리거의 :NEW 대입일 수 있습니다.")));
   }
-  for (const w of s.writers) el.append(writerEl(id, s, w, hooks, lines, depth, prefix, onPath));
+  if (s.writers.length) el.append(...writerTables(id, s, hooks, lines, depth, prefix, onPath));
   if (s.lacking?.length) el.append(lackingEl(s, hooks, lines, pad));
   if (s.log?.length) el.append(logEl(s.log, child ? `${s.target.table}.${s.target.column} 단계` : "이 단계", hooks.pane, !child));
   return el;
@@ -433,14 +433,137 @@ function lackingEl(s: Step, hooks: Hooks, lines: string[], pad: string): HTMLEle
     h("div", { class: "vt-headline" }, made.length
       ? `이 키의 행을 이 문장${made.length > 1 ? "들" : ""}이 만듭니다 — 그렇게 들어온 행이면 ${s.target.column} 은(는) ${def ? `기본값 ${def}` : "NULL"} 입니다`
       : `이 문장들로 들어온 행이면 ${s.target.column} 은(는) ${def ? `기본값 ${def}` : "NULL"} 입니다`),
-    ...s.lacking!.map((l) => {
-      const obj = dbObject(l.unit);
-      return h("div", { class: "vt-input-row" },
-        h("span", { class: "vt-proc" }, h("b", {}, procOf(l.node)), h("span", { class: "dim" }, ` ${l.line}줄 · ${l.kind}`)),
-        h("span", { class: "spacer" }),
-        h("span", { class: l.produces ? "warn-text" : "dim" }, l.produces === true ? "이 키의 행을 만듦" : l.produces === false ? "이 키는 안 만듦" : l.error ? "확인 못 함" : "돌리지 않음"),
-        obj ? h("button", { class: "vt-link", onclick: () => hooks.openSource(obj.owner, obj.name, obj.kind, l.line) }, "소스 ↗") : "");
-    }));
+    dataGrid("", s.lacking!, [
+      { name: "프로시저", cell: (l) => h("b", {}, procOf(l.node)), text: (l) => procOf(l.node) },
+      { name: "줄", cell: (l) => String(l.line), cls: "num" },
+      { name: "종류", cell: (l) => l.kind },
+      { name: "이 키의 행", cell: (l) => h("span", { class: l.produces ? "warn-text" : "dim" }, produced(l)), text: produced },
+      { name: "", cell: (l) => srcLinks(hooks, l), text: () => "" },
+    ], { onRow: (l) => void hooks.pane.show({ unit: l.unit, line: l.line, end_line: l.end_line }) }));
+}
+
+const produced = (l: Lacking) => l.produces === true ? "이 키의 행을 만듦" : l.produces === false ? "이 키는 안 만듦" : l.error ? "확인 못 함" : "돌리지 않음";
+
+/** 소스 보기 단추 — 왼쪽 소스, 에디터 새 탭 */
+function srcLinks(hooks: Hooks, w: { unit: string; line: number; end_line?: number; node: string }): HTMLElement {
+  const obj = dbObject(w.unit);
+  return h("span", { class: "vt-row nowrap" },
+    h("button", { class: "vt-link", title: "왼쪽 소스에서 이 문장을 봅니다", onclick: (e: Event) => { e.stopPropagation(); void hooks.pane.show({ unit: w.unit, line: w.line, end_line: w.end_line }); } }, "← 소스"),
+    obj ? h("button", { class: "vt-link", title: `${w.node} — 소스를 에디터 새 탭으로 엽니다`, onclick: (e: Event) => { e.stopPropagation(); hooks.openSource(obj.owner, obj.name, obj.kind, w.line); } }, "새 탭 ↗") : "");
+}
+
+// ── 표 ─────────────────────────────────────────────
+
+interface GridCol<T> { name: string; cell: (x: T) => Node | string; text?: (x: T) => string; cls?: string }
+
+/** 결과 표 — 행을 누르면 onRow, detail 이 있으면 그 행 아래에 자세히를 펼친다. '복사' 는 탭으로 나눈 글자 (엑셀에 붙여 넣기) */
+function dataGrid<T>(title: string, items: T[], cols: GridCol<T>[], opts: { onRow?: (x: T) => void; detail?: (x: T) => HTMLElement; open?: (x: T) => boolean; rowCls?: (x: T) => string; foot?: Node | string } = {}): HTMLElement {
+  const textOf = (c: GridCol<T>, x: T) => c.text ? c.text(x) : (() => { const v = c.cell(x); return typeof v === "string" ? v : (v.textContent ?? ""); })();
+  const tsv = () => [cols.filter((c) => c.name).map((c) => c.name), ...items.map((x) => cols.filter((c) => c.name).map((c) => textOf(c, x).replace(/[\t\n]+/g, " ")))].map((r) => r.join("\t")).join("\n");
+  const body = h("tbody", {});
+  for (const x of items) {
+    const tr = h("tr", { class: `${opts.rowCls?.(x) ?? ""}${opts.onRow || opts.detail ? " link" : ""}` }, ...cols.map((c) => h("td", { class: c.cls ?? "" }, c.cell(x))));
+    body.append(tr);
+    if (opts.detail) {
+      const d = opts.detail(x);
+      const open = !!opts.open?.(x);
+      const dr = h("tr", { class: "vt-gd", hidden: !open }, h("td", { colspan: String(cols.length) }, d));
+      if (open) tr.classList.add("open");
+      body.append(dr);
+      tr.addEventListener("click", (e) => {
+        if ((e.target as HTMLElement).closest("button, input, a")) return;
+        dr.hidden = !dr.hidden;
+        tr.classList.toggle("open", !dr.hidden);
+        opts.onRow?.(x);
+      });
+    } else if (opts.onRow) {
+      tr.addEventListener("click", (e) => { if (!(e.target as HTMLElement).closest("button, input, a")) opts.onRow!(x); });
+    }
+  }
+  const copy = h("button", { class: "vt-link", title: "표를 복사합니다 (엑셀에 붙여 넣을 수 있게 탭으로 나눔)", onclick: (e: Event) => { e.preventDefault(); navigator.clipboard.writeText(tsv()).then(() => toast("표를 복사했습니다", "info", 1500)); } }, "표 복사");
+  return h("div", { class: "vt-grid-box" },
+    h("div", { class: "vt-grid-head" }, title ? h("b", {}, title) : "", h("span", { class: "vt-sum dim" }, `${items.length}행`), h("span", { class: "spacer" }), copy),
+    h("div", { class: "vt-grid-wrap" },
+      h("table", { class: "vt-grid" }, h("thead", {}, h("tr", {}, ...cols.map((c) => h("th", { class: c.cls ?? "" }, c.name)))), body)),
+    opts.foot ?? "");
+}
+
+const valuesText = (vs: (string | null)[]) => vs.length ? vs.slice(0, 3).map(show).join(", ") + (vs.length > 3 ? ` 외 ${vs.length - 3}` : "") : "";
+const viaText = (w: Writer) => w.via.map(viaName).filter(Boolean).join(" › ");
+
+/** 이 단계의 넣는 문장 표 + 찾은 원본 행 표 (+ 원본 행에서 거슬러 오른 단계) */
+function writerTables(id: number, s: Step, hooks: Hooks, lines: string[], depth: number, prefix: Crumb[], onPath: OnPath): HTMLElement[] {
+  const t = s.target;
+  const row = s.mode === "row";
+  const detail = (w: Writer) => writerEl(id, s, w, hooks, lines, depth, prefix, onPath);
+  const cols: GridCol<Writer>[] = [
+    row
+      ? { name: "결과", cell: (w) => h("span", { class: `vt-chip ${w.values.length ? "s-ok" : w.ran ? "s-miss" : "s-idle"}` }, w.values.length ? "✓ 원본에 있음" : w.ran ? "∅ 원본에 없음" : STATE[stateOf(w)].chip) }
+      : { name: "상태", cell: (w) => { const st = stateOf(w); return h("span", { class: `vt-chip s-${st}` }, `${STATE[st].icon} ${STATE[st].chip}`); } },
+    { name: "프로시저", cell: (w) => h("b", {}, procOf(w.node)), text: (w) => procOf(w.node) },
+    { name: "줄", cell: (w) => String(w.line), cls: "num" },
+    { name: "문장", cell: (w) => w.label.split(" ←")[0] },
+    { name: "거친 곳", cell: (w) => h("span", { class: "dim" }, viaText(w)), text: viaText },
+    row
+      ? { name: "원본 행", cell: (w) => w.ran ? `${w.values.length}${w.values.length >= 20 ? "+" : ""}` : "", cls: "num" }
+      : { name: "다시 계산 값", cell: (w) => w.ran ? (w.values.length ? h("span", { class: "mono" }, valuesText(w.values)) : h("span", { class: "warn-text" }, "행 없음")) : "", text: (w) => w.ran ? (w.values.length ? valuesText(w.values) : "행 없음") : "" },
+    ...(row || !t.known ? [] : [{ name: "지금 값", cell: () => h("span", { class: "mono" }, show(t.value)) } as GridCol<Writer>]),
+    { name: "끊긴 곳", cell: (w) => { const y = whyText(w); return y ? h("span", { class: "vt-why-cell" }, y) : (w.error ? h("span", { class: "vt-error-text" }, w.error) : ""); }, text: (w) => whyText(w) ?? w.error ?? "", cls: "wide" },
+    { name: "쿼리", cell: (w) => queryChips(entriesOf(s.log, w), hooks.pane, null), text: (w) => entriesOf(s.log, w).map((e) => `#${e.gid} ${e.result ?? ""}`).join(" ") , cls: "q" },
+    { name: "", cell: (w) => srcLinks(hooks, w), text: () => "" },
+  ];
+  const box = h("div", { class: "vt-gridstep" });
+  const out: HTMLElement[] = [dataGrid(row ? `${t.table} 에 행을 넣는 문장` : `${t.column} 을(를) 넣는 문장`, s.writers, cols, {
+    detail, open: () => s.writers.length === 1,
+    rowCls: (w) => `s-${stateOf(w)}`,
+    onRow: (w) => void hooks.pane.show({ unit: w.unit, line: w.line, end_line: w.end_line }),
+    foot: h("div", { class: "vt-grid-foot dim" }, "행을 누르면 그 문장의 자세한 계산(식·키·조건별 통과·조인 단계)이 펼쳐지고 왼쪽 소스가 그 자리로 갑니다"),
+  })];
+  // 찾은 원본 행 — 원본 테이블·열마다 한 표 (키 열이 칸)
+  type Src = { w: Writer; inp: InputRows; r: InputRow };
+  const groups = new Map<string, Src[]>();
+  const missing: string[] = [];
+  for (const w of s.writers) for (const inp of w.inputs) {
+    if (inp.missing) missing.push(`${inp.table} 에 이 키와 짝인 행이 없습니다 (${inp.missing}건) — 아우터 조인이라 행은 남고 ${inp.column} 은(는) NULL (${procOf(w.node)} ${w.line}줄)`);
+    const k = `${inp.owner ?? ""}.${inp.table}.${inp.column}`;
+    for (const r of inp.rows) groups.set(k, [...(groups.get(k) ?? []), { w, inp, r }]);
+  }
+  const kids = h("div", { class: "vt-kids" });
+  for (const items of groups.values()) {
+    const { inp } = items[0];
+    const keyNames: string[] = [];
+    for (const it of items) for (const [k] of it.r.keys) if (!keyNames.includes(k)) keyNames.push(k);
+    const upCol: GridCol<Src> = { name: "", text: () => "", cell: (it) => {
+      const btn = h("button", { class: "vt-up", title: "이 원본 행의 값은 또 어디서 왔는지 한 단계 더" }, "↑ 어디서?") as HTMLButtonElement;
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        btn.disabled = true;
+        const slot = h("div", { class: "vt-child" });
+        kids.append(slot);
+        const g = glowProgress(`${it.inp.table}.${it.inp.column} 을(를) 거슬러 오르는 중…`, { compact: true });
+        slot.replaceChildren(g.el);
+        try {
+          const child = await invoke<Step>("value_trace_step", { id, target: { owner: it.inp.owner, table: it.inp.table, column: it.inp.column, keys: it.r.keys, value: it.r.value, known: true, vars: [] } });
+          slot.replaceChildren(stepEl(id, child, hooks, lines, depth + 2, true, [...prefix, rowCrumb(t), writerCrumb(it.w)], onPath));
+          slot.scrollIntoView({ block: "nearest", behavior: "smooth" });
+          btn.textContent = "↑ 아래 펼침";
+        } catch (err) {
+          slot.replaceChildren(h("div", { class: "vt-error" }, errOf(err).message));
+          btn.disabled = false;
+        } finally { g.done(); }
+      });
+      return btn;
+    } };
+    out.push(dataGrid(`찾은 원본 행 — ${inp.table}.${inp.column}`, items, [
+      ...keyNames.map((k): GridCol<Src> => ({ name: k, cell: (it) => h("span", { class: "mono" }, it.r.keys.find(([n]) => n === k)?.[1] ?? ""), text: (it) => it.r.keys.find(([n]) => n === k)?.[1] ?? "" })),
+      { name: inp.column, cell: (it) => h("span", { class: `mono${it.r.value == null ? " dim" : ""}` }, show(it.r.value)), text: (it) => show(it.r.value), cls: "val" },
+      { name: "넣는 문장", cell: (it) => h("span", { class: "dim" }, `${procOf(it.w.node)} ${it.w.line}줄`), text: (it) => `${procOf(it.w.node)} ${it.w.line}줄` },
+      ...(row ? [] : [upCol]),
+    ], { onRow: (it) => void hooks.pane.show({ unit: it.w.unit, line: it.w.line, end_line: it.w.end_line }) }));
+  }
+  if (missing.length) out.push(h("div", { class: "vt-null-why" }, ...missing.map((m) => h("div", {}, m))));
+  box.append(...out, kids);
+  return [box];
 }
 
 // ── 행 추적: 이 키의 행은 왜 없나 ─────────────────────
@@ -549,26 +672,23 @@ function rowResult(id: number, r: RowTrace, hooks: Hooks): Node[] {
   const verdict = !r.analyzed ? "분석 결과가 없어 행을 넣는 문장을 모릅니다 — 분석 화면에서 PL/SQL 을 한 번 분석해 두세요"
     : !r.writers.length ? "분석한 소스에는 이 테이블에 행을 넣는 문장이 없습니다 — 다른 시스템·동적 SQL·트리거일 수 있습니다"
     : have ? `원본에 이 키가 있는 문장이 ${have}개 있습니다 — 그 문장이 아직 돌지 않았거나, 돈 뒤에 지워졌을 수 있습니다${r.deleters.length ? " (아래 '지우는 문장' 확인)" : ""}`
-    : ran ? "행을 넣는 모든 문장의 원본에 이 키가 없습니다 — 아래 카드에서 어느 조인·조건에서 끊겼는지 보세요"
+    : ran ? "행을 넣는 모든 문장의 원본에 이 키가 없습니다 — 아래 표의 '끊긴 곳' 에서 어느 조인·조건에서 끊겼는지 보세요"
     : "다시 계산을 돌리지 못했습니다";
   const out: Node[] = [head, h("div", { class: "vt-banner info" }, verdict)];
   if (r.not_run) out.push(h("div", { class: "vt-banner" }, r.not_run));
   const step: Step = { target: t, analyzed: r.analyzed, not_run: r.not_run, writers: r.writers, notes: [], mode: "row", log: r.log };
   hooks.pane.add(r.log ?? [], [...r.writers, ...r.deleters].filter((w) => w.unit).map((w) => ({ unit: w.unit, line: w.line, end_line: w.end_line })));
-  for (const w of r.writers) out.push(writerEl(id, step, w, hooks, lines, 0, [], () => {}));
+  if (r.writers.length) out.push(...writerTables(id, step, hooks, lines, 0, [], () => {}));
   if (r.deleters.length) {
-    out.push(h("div", { class: "vt-card" },
-      h("div", { class: "vt-card-head" }, h("span", { class: "vt-chip" }, "참고"), h("b", {}, `${t.table} 에서 행을 지우는 문장 ${r.deleters.length}개`)),
-      h("div", { class: "vt-headline" }, "행이 들어왔다가 이 문장들로 지워졌을 수 있습니다"),
-      ...r.deleters.map((d) => {
-        const obj = dbObject(d.unit);
-        return h("div", { class: "vt-block" },
-          h("div", { class: "vt-input-row" }, h("span", { class: "vt-proc" }, h("b", {}, procOf(d.node)), h("span", { class: "dim" }, ` ${d.line}줄 · ${d.kind}`)),
-            h("span", { class: "spacer" }),
-            h("button", { class: "vt-link", onclick: () => void hooks.pane.show({ unit: d.unit, line: d.line, end_line: d.end_line }) }, "← 소스에서 보기"),
-            obj ? h("button", { class: "vt-link", onclick: () => hooks.openSource(obj.owner, obj.name, obj.kind, d.line) }, "새 탭 ↗") : ""),
-          sqlCode(d.text, "vt-code dim"));
-      })));
+    type Del = RowTrace["deleters"][number];
+    out.push(h("div", { class: "vt-banner info" }, `${t.table} 에서 행을 지우는 문장 ${r.deleters.length}개 — 행이 들어왔다가 이 문장들로 지워졌을 수 있습니다`),
+      dataGrid(`${t.table} 에서 행을 지우는 문장`, r.deleters, [
+        { name: "프로시저", cell: (d) => h("b", {}, procOf(d.node)), text: (d) => procOf(d.node) },
+        { name: "줄", cell: (d) => String(d.line), cls: "num" },
+        { name: "종류", cell: (d) => d.kind },
+        { name: "문장", cell: (d) => h("span", { class: "mono vt-clip", title: d.text }, d.text.replace(/\s+/g, " ")), text: (d) => d.text.replace(/\s+/g, " "), cls: "wide" },
+        { name: "", cell: (d: Del) => srcLinks(hooks, d), text: () => "" },
+      ], { onRow: (d) => void hooks.pane.show({ unit: d.unit, line: d.line, end_line: d.end_line }) }));
   }
   if (r.log?.length) out.push(logEl(r.log, `${t.table} 행 추적`, hooks.pane));
   return out;
@@ -654,22 +774,28 @@ function whyOf(c: Calc, where: string): string | null {
   return null;
 }
 
-function whyEl(w: Writer): HTMLElement | string {
+function whyText(w: Writer): string | null {
   const ws = [...w.layers].reverse().map((l) => whyOf(l, `${l.via[0]?.kind ?? "서브쿼리"} ${l.via[0]?.name ?? ""} 안: `)).filter(Boolean);
-  const why = ws[0] ?? whyOf(w, "");
+  return ws[0] ?? whyOf(w, "");
+}
+
+function whyEl(w: Writer): HTMLElement | string {
+  const why = whyText(w);
   return why ? h("div", { class: "vt-why" }, h("b", {}, "끊긴 곳 "), why) : "";
 }
 
 /** 이 카드가 돌린 쿼리 — 번호·목적·결과. 누르면 왼쪽 소스의 그 자리와 아래 기록의 그 쿼리로 */
-function queryChips(es: LogEntry[], pane: SourcePane, card: HTMLElement): HTMLElement | string {
+function queryChips(es: LogEntry[], pane: SourcePane, card: HTMLElement | null): HTMLElement | string {
   if (!es.length) return "";
-  return h("div", { class: "vt-qchips" }, h("span", { class: "vt-cap-inline" }, "돌린 쿼리"),
-    ...es.map((e) => h("button", { class: `vt-qchip t-${tone(e)}`, title: `${e.purpose}${e.error ? ` — ${e.error}` : ""}`, onclick: () => {
+  const short = !card;
+  return h("div", { class: `vt-qchips${short ? " short" : ""}` }, short ? "" : h("span", { class: "vt-cap-inline" }, "돌린 쿼리"),
+    ...es.map((e) => h("button", { class: `vt-qchip t-${tone(e)}`, title: `${e.purpose}${e.error ? ` — ${e.error}` : ""}`, onclick: (ev: Event) => {
+      ev.stopPropagation();
       const loc = locOf(e);
       if (loc) void pane.show(loc, e.gid);
-      const root = card.closest<HTMLElement>(".vtrace");
+      const root = (card ?? ev.currentTarget as HTMLElement).closest<HTMLElement>(".vtrace");
       if (root && e.gid) revealLog(root, e.gid);
-    } }, h("b", {}, `#${e.gid}`), ` ${e.purpose.replace(/^이 키로 /, "").replace(/ — .*/, "")} `, h("span", { class: "r" }, tone(e) === "idle" ? "안 보냄" : e.error ? "오류" : e.result ?? ""))));
+    } }, h("b", {}, `#${e.gid}`), short ? " " : ` ${e.purpose.replace(/^이 키로 /, "").replace(/ — .*/, "")} `, h("span", { class: "r" }, tone(e) === "idle" ? "안 보냄" : e.error ? "오류" : e.result ?? ""))));
 }
 
 function writerEl(id: number, s: Step, w: Writer, hooks: Hooks, lines: string[], depth: number, prefix: Crumb[], onPath: OnPath): HTMLElement {

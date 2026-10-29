@@ -37,6 +37,8 @@ export interface EditSetup { rowidCol: number; editable: Set<number> }
 export interface GridChanges {
   edits: { rowid: string; cells: { column: string; type_name: string; value: string | null }[] }[];
   deletes: string[];
+  /** 새 행 — 값을 넣은 열만 (나머지는 테이블의 DEFAULT·NULL) */
+  inserts: { cells: { column: string; type_name: string; value: string | null }[] }[];
 }
 
 const NUMERIC = /^(NUMBER|FLOAT|BINARY_|INTEGER)/i;
@@ -109,6 +111,8 @@ export class ResultGrid {
   /** rows 인덱스 → (열 → 새 값) */
   private dirty = new Map<number, Map<number, string | null>>();
   private deleted = new Set<number>();
+  /** 편집 중 더한 새 행 (rows 인덱스, 끝에 붙는다) — 적용하면 INSERT */
+  private added = new Set<number>();
   /** 컬럼 이름 → 설명(COMMENT) */
   private notes: Record<string, string> = {};
   /** 머리에 이름 대신 설명을 */
@@ -164,6 +168,7 @@ export class ResultGrid {
     this.edit = null;
     this.dirty.clear();
     this.deleted.clear();
+    this.added.clear();
     this.header.replaceChildren();
     this.body.replaceChildren();
     this.spacer.style.height = "0px";
@@ -186,6 +191,7 @@ export class ResultGrid {
     this.edit = null;
     this.dirty.clear();
     this.deleted.clear();
+    this.added.clear();
     // 같은 열이 있으면 필터를 이어 쓴다 (다시 실행했을 때)
     this.filter = compileFilter(this.filterText, this.columns);
     this.rebuildView();
@@ -321,6 +327,7 @@ export class ResultGrid {
 
   /** 편집 모드 켜기 (ROWID 를 붙여 다시 조회한 결과에서) */
   setEditable(e: EditSetup | null) {
+    if (this.added.size) this.dropAdded();
     this.edit = e;
     this.dirty.clear();
     this.deleted.clear();
@@ -334,8 +341,10 @@ export class ResultGrid {
   }
 
   changeCount() {
-    let n = this.deleted.size;
-    for (const [r, m] of this.dirty) if (!this.deleted.has(r)) n += m.size;
+    let n = 0;
+    for (const r of this.deleted) if (!this.added.has(r)) n++;
+    for (const r of this.added) if (!this.deleted.has(r)) n++;
+    for (const [r, m] of this.dirty) if (!this.deleted.has(r) && !this.added.has(r)) n += m.size;
     return n;
   }
 
@@ -347,17 +356,59 @@ export class ResultGrid {
   /** 바뀐 것 (ROWID 기준) */
   changes(): GridChanges {
     const e = this.edit;
-    if (!e) return { edits: [], deletes: [] };
+    if (!e) return { edits: [], deletes: [], inserts: [] };
+    const cell = (c: number, v: string | null) => ({ column: this.columns[c].name, type_name: this.columns[c].type_name, value: v });
     const edits: GridChanges["edits"] = [];
     for (const [r, m] of this.dirty) {
-      if (this.deleted.has(r) || !m.size) continue;
+      if (this.deleted.has(r) || this.added.has(r) || !m.size) continue;
       edits.push({
         rowid: this.rows[r][e.rowidCol] ?? "",
-        cells: [...m].map(([c, v]) => ({ column: this.columns[c].name, type_name: this.columns[c].type_name, value: v })),
+        cells: [...m].map(([c, v]) => cell(c, v)),
       });
     }
-    const deletes = [...this.deleted].map((r) => this.rows[r][e.rowidCol] ?? "");
-    return { edits, deletes };
+    const deletes = [...this.deleted].filter((r) => !this.added.has(r)).map((r) => this.rows[r][e.rowidCol] ?? "");
+    const inserts = [...this.added].filter((r) => !this.deleted.has(r)).sort((a, b) => a - b)
+      .map((r) => ({ cells: [...(this.dirty.get(r) ?? [])].filter(([, v]) => v != null).sort(([a], [b]) => a - b).map(([c, v]) => cell(c, v)) }));
+    return { edits, deletes, inserts };
+  }
+
+  /** 새 행을 끝에 더하고 첫 편집 칸을 연다 */
+  addRow() {
+    const e = this.edit;
+    if (!e) return;
+    const r = this.rows.length;
+    this.rows.push(this.columns.map(() => null));
+    this.added.add(r);
+    this.rebuildView();
+    // 필터·고른 행 보기에 걸려도 새 행은 보이게
+    if (!this.view.includes(r)) this.view.push(r);
+    const vr = this.view.indexOf(r);
+    const c = [...e.editable].sort((a, b) => a - b)[0] ?? 0;
+    this.sel = { r0: vr, c0: c, r1: vr, c1: c };
+    this.cur = { r: vr, c };
+    this.picked.clear();
+    this.viewport.scrollTop = Math.max(0, (vr + 1) * ROW_H - this.viewport.clientHeight);
+    this.update();
+    this.notifyDirty();
+    const el = this.body.querySelector(`.grid-cell[data-r="${vr}"][data-c="${c}"]`) as HTMLElement | null;
+    if (el) this.startEdit(vr, c, el);
+  }
+
+  /** 아직 넣지 않은 새 행을 뺀다 (끝에 붙어 있으니 앞 행의 인덱스는 그대로) */
+  private dropAdded() {
+    for (const r of this.added) {
+      this.dirty.delete(r);
+      this.deleted.delete(r);
+    }
+    this.rows = this.rows.filter((_, i) => !this.added.has(i));
+    this.added.clear();
+    this.rebuildView();
+  }
+
+  /** 넣은 뒤 ROWID 를 모르는 행 — 다시 조회하기 전에는 고치거나 지울 수 없다 */
+  private locked(r: number) {
+    const e = this.edit;
+    return !!e && !this.added.has(r) && this.rows[r]?.[e.rowidCol] == null;
   }
 
   /** 적용이 끝났다 — 바뀐 값을 결과에 반영하고 지운 행을 뺀다 */
@@ -367,12 +418,14 @@ export class ResultGrid {
     if (del.size) this.rows = this.rows.filter((_, i) => !del.has(i));
     this.dirty.clear();
     this.deleted.clear();
+    this.added.clear();
     this.rebuildView();
     this.update();
     this.notifyDirty();
   }
 
   discardChanges() {
+    if (this.added.size) this.dropAdded();
     this.dirty.clear();
     this.deleted.clear();
     this.update();
@@ -383,7 +436,7 @@ export class ResultGrid {
   toggleDeleteSelected() {
     if (!this.edit) return;
     // 사각형 선택과 Ctrl+클릭으로 고른 셀의 행 모두
-    const rs = this.selRowIdx().map((r) => this.view[r]);
+    const rs = this.selRowIdx().map((r) => this.view[r]).filter((r) => r != null && !this.locked(r));
     if (!rs.length) return;
     const all = rs.every((r) => this.deleted.has(r));
     for (const r of rs) (all ? this.deleted.delete(r) : this.deleted.add(r));
@@ -400,7 +453,7 @@ export class ResultGrid {
     const e = this.edit;
     if (!e || !e.editable.has(c)) return false;
     const r = this.view[viewRow];
-    if (this.deleted.has(r)) return true;
+    if (this.deleted.has(r) || this.locked(r)) return true;
     const cur = this.value(r, c);
     const input = document.createElement("input");
     input.className = "grid-input";
@@ -546,10 +599,11 @@ export class ResultGrid {
       if (r % 2) row.classList.add("odd");
       const ri = this.view[r];
       if (this.deleted.has(ri)) row.classList.add("deleted");
+      if (this.added.has(ri)) row.classList.add("added");
       const rc = rowClass?.(this.rows[ri]);
       if (rc) row.classList.add(rc);
       const num = div("grid-cell grid-num");
-      num.textContent = String(r + 1);
+      num.textContent = this.added.has(ri) ? "+" : String(r + 1);
       row.append(num);
       const changed = this.dirty.get(ri);
       for (let c = 0; c < this.columns.length; c++) {
@@ -775,6 +829,9 @@ export class ResultGrid {
       if (this.view.length) this.sel = { r0: 0, c0: 0, r1: this.view.length - 1, c1: this.columns.length - 1 };
       this.update();
       this.status();
+    } else if (this.edit && e.key === "Insert" && !e.ctrlKey && !e.shiftKey) {
+      e.preventDefault();
+      this.addRow();
     } else if (this.edit && (e.key === "Delete" || (e.ctrlKey && e.key === "Delete"))) {
       e.preventDefault();
       this.toggleDeleteSelected();

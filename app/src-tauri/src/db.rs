@@ -1080,10 +1080,11 @@ pub async fn grid_apply(
     table: String,
     edits: Vec<sqls_core::edit::RowEdit>,
     deletes: Vec<String>,
+    inserts: Option<Vec<sqls_core::edit::RowInsert>>,
     dry_run: bool,
 ) -> R<ApplyView> {
     require_writable(&st, id)?;
-    let changes = sqls_core::edit::changes(&table, &edits, &deletes).map_err(|m| ErrView::msg("invalid", m))?;
+    let changes = sqls_core::edit::changes(&table, &edits, &deletes, &inserts.unwrap_or_default()).map_err(|m| ErrView::msg("invalid", m))?;
     let (s, txn, _) = st.session(id)?;
     if dry_run {
         return Ok(ApplyView { done: changes.into_iter().map(|c| (c.preview, 0)).collect(), txn_pending: txn.load(Ordering::Relaxed) });

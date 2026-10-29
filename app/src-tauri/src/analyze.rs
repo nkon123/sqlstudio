@@ -498,19 +498,44 @@ pub async fn open_dfd_window(
     if let Some(u) = unit.filter(|u| matches!(u.as_str(), "proc" | "pkg")) {
         url.push_str(&format!("&unit={u}"));
     }
-    let label = format!("dfd-{}", NEXT_DFD.fetch_add(1, Ordering::Relaxed));
-    let mut b = tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))
-        .title(format!("데이터 흐름도 — {profile}"))
-        .inner_size(1360.0, 860.0)
-        .min_inner_size(700.0, 450.0)
-        .additional_browser_args(crate::WEBVIEW_ARGS);
-    if let Some(dir) = crate::webview_dir() {
-        b = b.data_directory(dir);
-    }
-    let win = b.build().map_err(|e| {
-        tracing::warn!("흐름도 창을 열 수 없습니다: {e}");
-        ErrView::msg("invalid", format!("창을 열 수 없습니다: {e}"))
-    })?;
+    let title = format!("데이터 흐름도 — {profile}");
+    let build = |dir: Option<std::path::PathBuf>, seed: bool| {
+        let label = format!("dfd-{}", NEXT_DFD.fetch_add(1, Ordering::Relaxed));
+        let mut b = tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.clone().into()))
+            .title(&title)
+            .inner_size(1360.0, 860.0)
+            .min_inner_size(700.0, 450.0)
+            .additional_browser_args(crate::WEBVIEW_ARGS);
+        if let Some(dir) = dir {
+            b = b.data_directory(dir);
+        }
+        // 따로 쓰는 데이터 폴더면 화면 상태가 비어 있다 — 파일에서 채워야 그 창이 빈 상태를 파일에 덮어쓰지 않는다
+        if let Some(js) = seed.then(crate::ui_state_script).flatten() {
+            b = b.initialization_script(js);
+        }
+        b.build()
+    };
+    // 메인 창과 같은 WebView 브라우저 프로세스를 함께 쓴다. 그 프로세스와 연결이 끊겨 있으면
+    // (WebView2 "호출된 개체가 해당 클라이언트로부터 연결이 끊겼습니다", RPC_E_DISCONNECTED) 창이 떴다 바로 닫힌다 —
+    // 한 번 더 해 보고, 그래도 안 되면 따로 둔 데이터 폴더로 새 브라우저 프로세스에서 연다
+    let win = match build(crate::webview_dir(), false) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("흐름도 창을 열 수 없습니다: {e} — 다시 해 본다");
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            match build(crate::webview_dir(), false) {
+                Ok(w) => w,
+                Err(e) => {
+                    let aux = aux_webview_dir(&app);
+                    tracing::warn!("흐름도 창을 또 열 수 없습니다: {e} — 따로 둔 WebView 데이터 폴더로 ({:?})", aux);
+                    build(aux, true).map_err(|e| {
+                        tracing::warn!("흐름도 창을 열 수 없습니다: {e}");
+                        ErrView::msg("invalid", format!("창을 열 수 없습니다: {e}"))
+                    })?
+                }
+            }
+        }
+    };
     tracing::info!("흐름도 창 열림: {} ({profile})", win.label());
     // 메뉴가 닫히며 메인 창이 다시 앞으로 오면 새 창이 그 뒤로 가 사라진 것처럼 보인다 — 몇 번 앞으로 가져온다
     tauri::async_runtime::spawn(async move {
@@ -522,6 +547,18 @@ pub async fn open_dfd_window(
         }
     });
     Ok(())
+}
+
+/// 흐름도 창이 메인 창과 다른 브라우저 프로세스로 열릴 때 쓰는 WebView 데이터 폴더
+fn aux_webview_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    match crate::webview_dir() {
+        Some(d) => {
+            let name = d.file_name()?.to_string_lossy().into_owned();
+            Some(d.with_file_name(format!("{name}-aux")))
+        }
+        None => app.path().app_local_data_dir().ok().map(|d| d.join("EBWebView-aux")),
+    }
 }
 
 #[derive(Serialize)]

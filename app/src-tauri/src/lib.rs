@@ -82,7 +82,7 @@ fn ui_state_path() -> std::path::PathBuf {
 static UI_STATE_TS: std::sync::Mutex<f64> = std::sync::Mutex::new(0.0);
 
 /// 창을 열 때 화면 코드보다 먼저 돌 스크립트 — 파일이 이 PC 의 localStorage 보다 새것이면 그 내용으로 바꾼다
-fn ui_state_script() -> Option<String> {
+pub(crate) fn ui_state_script() -> Option<String> {
     let text = std::fs::read_to_string(ui_state_path()).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     let ts = v.get("ts")?.as_f64()?;

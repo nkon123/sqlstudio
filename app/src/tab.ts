@@ -58,6 +58,7 @@ export class Tab {
   readonly editBtn = h("button", { class: "small", title: "단일 테이블 조회 결과를 고친다 (ROWID 로 다시 조회)" }, "편집");
   readonly applyBtn = h("button", { class: "small primary", hidden: true }, "적용");
   readonly discardBtn = h("button", { class: "small", hidden: true, title: "고친 것을 버린다" }, "되돌리기");
+  readonly addRowBtn = h("button", { class: "small", hidden: true, title: "끝에 새 행을 더한다 — 적용하면 INSERT (Insert 키)" }, "행 추가");
   readonly delRowBtn = h("button", { class: "small", hidden: true, title: "선택한 행을 지울 행으로 표시 (다시 누르면 풀림, Delete 키)" }, "행 삭제");
   private dbg: DebugView | null = null;
   /** 글을 새 탭으로 (INSERT 문 내보내기) */
@@ -165,6 +166,7 @@ export class Tab {
     };
     this.applyBtn.onclick = () => app.applyGridEdit(this);
     this.discardBtn.onclick = () => this.grid.discardChanges();
+    this.addRowBtn.onclick = () => this.grid.addRow();
     this.delRowBtn.onclick = () => this.grid.toggleDeleteSelected();
     const gridPane = h("div", { class: "pane result" }, this.grid.el);
     // 내보내기: 엑셀 · CSV · INSERT 문 (보이는 열·정렬·거르기 그대로)
@@ -181,7 +183,7 @@ export class Tab {
     };
     const bottom = h("section", { class: "bottom" },
       h("nav", { class: "pane-tabs" }, btn("result", "결과"), btn("output", "출력"), btn("plan", "실행계획"), btn("desc", "구조"),
-        this.filterIn, this.notesBtn, this.editBtn, this.delRowBtn, this.applyBtn, this.discardBtn,
+        this.filterIn, this.notesBtn, this.editBtn, this.addRowBtn, this.delRowBtn, this.applyBtn, this.discardBtn,
         h("span", { class: "spacer" }), this.gridStatus,
         h("button", { class: "small", title: "가져온 행을 CSV 로 복사", onclick: () => this.copyCsv() }, "CSV 복사"),
         exportSel,

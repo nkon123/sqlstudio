@@ -860,6 +860,7 @@ export class App {
     t.editBtn.classList.remove("editing");
     t.applyBtn.hidden = true;
     t.discardBtn.hidden = true;
+    t.addRowBtn.hidden = true;
     t.delRowBtn.hidden = true;
   }
 
@@ -890,11 +891,12 @@ export class App {
         t.editBtn.classList.add("editing");
         t.applyBtn.hidden = false;
         t.discardBtn.hidden = false;
+        t.addRowBtn.hidden = false;
         t.delRowBtn.hidden = false;
         t.applyBtn.disabled = true;
         t.discardBtn.disabled = true;
         t.show("result");
-        t.log(`${e.table} 편집 — 셀 더블클릭(또는 F2)으로 고치고, Delete 로 행 삭제 표시, '적용' 으로 문장 확인 후 실행. 커밋은 따로.`, "dim");
+        t.log(`${e.table} 편집 — 셀 더블클릭(또는 F2)으로 고치고, Insert 로 행 추가, Delete 로 행 삭제 표시, '적용' 으로 문장 확인 후 실행. 커밋은 따로.`, "dim");
       });
     } catch (err) {
       toast(errOf(err).message, "error");
@@ -904,7 +906,8 @@ export class App {
   async applyGridEdit(t: Tab) {
     if (!t.conn || !t.editTable) return;
     const ch = t.grid.changes();
-    if (!ch.edits.length && !ch.deletes.length) return;
+    if (!ch.edits.length && !ch.deletes.length && !ch.inserts.length) return;
+    if (ch.inserts.some((r) => !r.cells.length)) return toast("값을 하나도 넣지 않은 새 행이 있습니다 — 값을 넣거나 행 삭제로 빼세요", "error");
     try {
       const plan = await api.gridApply(t.conn.id, t.editTable, ch, true);
       const list = plan.done.map(([s]) => s);
@@ -916,6 +919,7 @@ export class App {
       for (const [s, n] of r.done) t.log(`${s} — ${n}행`, "ok");
       t.log(`${r.done.length}건 적용 — 커밋 전입니다`, "warn");
       t.grid.commitChanges();
+      if (ch.inserts.length) t.log("넣은 행을 다시 고치거나 지우려면 다시 조회하세요 (ROWID 를 그때 받습니다)", "dim");
       toast(`${r.done.length}건 적용 — 커밋하면 저장됩니다`, "ok");
     } catch (err) {
       t.txnPending = true;

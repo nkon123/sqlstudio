@@ -50,6 +50,7 @@ const GROUPS: [string, [string, string][]][] = [
     ["방향키 · PgUp/PgDn · Home/End", "셀 옮기기 (Shift: 넓혀 고르기 · Ctrl+Home/End: 처음/끝 행)"],
     ["Ctrl+방향키 · Space", "고른 것은 두고 커서만 옮기기 · 커서 셀 더하기/빼기 (떨어진 행 고르기)"],
     ["F2 · Enter", "셀 고치기 (편집 모드에서)"],
+    ["Insert", "행 추가 (편집 모드에서, 적용하면 INSERT)"],
     ["Delete", "행 삭제 표시 (편집 모드에서, 다시 누르면 풀림)"],
     ["Esc", "거르기 칸 비우기 (거르기 칸에서)"],
   ]],

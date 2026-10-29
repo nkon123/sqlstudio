@@ -435,6 +435,8 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .grid-head .grid-cell.ro { color: var(--dim); font-style: italic; }
 .grid-cell.dirty { background: color-mix(in srgb, var(--warn) 25%, transparent) !important; }
 .grid-row.deleted .grid-cell { text-decoration: line-through; color: var(--danger); }
+.grid-row.added .grid-cell { background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.grid-row.added .grid-num { color: var(--ok); font-weight: 600; }
 .grid-input { user-select: text; box-sizing: border-box; height: 20px; font: inherit; padding: 0 3px; border: 1px solid var(--accent); }
 
 /* ── 데이터 흐름도 ── */
@@ -758,9 +760,13 @@ button.danger.running-btn { animation: pulse 1.2s infinite; }
 }
 
 /* 값 추적 */
-.vt-modal { width: min(1600px, 97vw); max-width: 97vw; }
+/* 거의 전체 화면 — dialog.modal 의 max-width 80vw 보다 앞서게 */
+dialog.modal.vt-modal { width: 98vw; max-width: 98vw; height: 96vh; max-height: 96vh; padding: 10px 14px; }
+dialog.modal.vt-modal > form { display: flex; flex-direction: column; height: 100%; }
+dialog.modal.vt-modal > form > div:not(.modal-buttons) { flex: 1; min-height: 0; }
+dialog.modal.vt-modal .modal-buttons { margin-top: 8px; }
 /* 왼쪽 소스 · 오른쪽 결과 */
-.vt-split { display: grid; grid-template-columns: minmax(0, 46fr) minmax(0, 54fr); gap: 12px; height: 78vh; }
+.vt-split { display: grid; grid-template-columns: minmax(0, 40fr) minmax(0, 60fr); gap: 12px; height: 100%; }
 .vt-split > .vtrace { min-width: 0; max-height: none; height: 100%; }
 @media (max-width: 1100px) { .vt-split { grid-template-columns: 1fr; height: auto; } .vt-split > .vt-src { height: 40vh; } .vt-split > .vtrace { height: auto; max-height: 60vh; } }
 .vt-src { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); overflow: hidden; }
@@ -804,6 +810,33 @@ button.danger.running-btn { animation: pulse 1.2s infinite; }
 .vt-keypick { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; font-size: 12px; cursor: pointer; }
 .vt-keypick.null { opacity: .55; }
 .vt-keypick b { font-family: var(--mono); font-weight: 600; }
+/* 결과 표 */
+.vt-grid-box { margin: 8px 0 12px; }
+.vt-grid-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.vt-grid-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; max-height: 60vh; }
+.vt-grid { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+.vt-grid th { position: sticky; top: 0; z-index: 1; background: var(--panel); text-align: left; font-weight: 600; padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; color: var(--dim); }
+.vt-grid td { padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+.vt-grid td.wide { white-space: normal; min-width: 220px; }
+.vt-grid td.num, .vt-grid th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.vt-grid td.val { font-weight: 600; }
+.vt-grid tbody tr:nth-child(even of :not(.vt-gd)) > td { background: color-mix(in srgb, var(--hover) 45%, transparent); }
+.vt-grid tr.link { cursor: pointer; }
+.vt-grid tr.link:hover > td { background: var(--hover); }
+.vt-grid tr.open > td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.vt-grid tr.s-ok > td:first-child { box-shadow: inset 3px 0 var(--ok); }
+.vt-grid tr.s-diff > td:first-child, .vt-grid tr.s-miss > td:first-child { box-shadow: inset 3px 0 var(--warn); }
+.vt-grid tr.s-err > td:first-child { box-shadow: inset 3px 0 var(--danger); }
+.vt-grid tr.vt-gd > td { padding: 6px 8px 10px; white-space: normal; background: var(--bg); }
+.vt-grid .vt-chip { white-space: nowrap; }
+.vt-grid td.q { white-space: normal; min-width: 120px; }
+.vt-grid .vt-qchips.short { margin: 0; }
+.vt-why-cell { color: var(--warn); }
+.vt-error-text { color: var(--danger); }
+.vt-clip { display: inline-block; max-width: 520px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.vt-grid-foot { font-size: 11px; margin-top: 3px; }
+.vt-row.nowrap { flex-wrap: nowrap; }
+.vt-kids > .vt-child { margin-top: 10px; }
 .vtrace { min-width: 760px; max-height: 74vh; overflow: auto; user-select: text; padding: 2px 4px 4px; font-size: 13px; }
 .vt-cap { font-size: 11px; letter-spacing: .02em; color: var(--dim); margin-bottom: 3px; }
 .vt-pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font: 12px/1.6 var(--mono); background: var(--hover); border: 1px solid var(--line); max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }

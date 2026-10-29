@@ -354,10 +354,16 @@ pub async fn get_ddl(s: &Session, object_type: &str, qualified: &str) -> Result<
         .await;
     match r {
         Ok(page) => Ok(page.rows.first().map(|r| cell(r, 0)).unwrap_or_default().trim().to_string()),
-        // 31603: 객체가 없음 — 대체 경로로 가도 없다
-        Err(Error::Db { code, .. }) if code != 31603 => {
+        // 31603(객체 없음)은 정말 없을 때도 나지만, 다른 계정의 객체를 SELECT_CATALOG_ROLE 없이 읽을 때도 난다
+        // (조회 권한이 있어 ALL_VIEWS·ALL_SOURCE 에는 보이는데). 사전 정보로 만들어 보고, 거기도 없으면 처음 오류를 낸다
+        Err(e @ Error::Db { code: 31603, .. }) => {
+            tracing::info!("DBMS_METADATA 가 {owner}.{name} 을 못 찾음(ORA-31603) — 다른 계정이면 권한 탓일 수 있어 사전 정보로 만들어 본다");
+            let note = "-- 다른 계정의 객체라 DBMS_METADATA 로 읽지 못해(SELECT_CATALOG_ROLE 필요) 데이터 사전으로 만든 DDL 입니다 (저장 옵션·권한 제외)\n";
+            ddl_fallback(s, &otype, &owner, &name, note).await.map_err(|_| e)
+        }
+        Err(Error::Db { code, .. }) => {
             tracing::warn!("DBMS_METADATA 실패(ORA-{code:05}) — 사전 정보로 DDL 을 만든다");
-            ddl_fallback(s, &otype, &owner, &name).await
+            ddl_fallback(s, &otype, &owner, &name, "-- DBMS_METADATA 를 쓸 수 없어 데이터 사전으로 만든 DDL 입니다 (저장 옵션·권한 제외)\n").await
         }
         Err(e) => Err(e),
     }
@@ -367,8 +373,7 @@ const SOURCE_TYPES: &[&str] = &[
     "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "TRIGGER", "TYPE", "TYPE BODY",
 ];
 
-async fn ddl_fallback(s: &Session, otype: &str, owner: &str, name: &str) -> Result<String> {
-    let note = "-- DBMS_METADATA 를 쓸 수 없어 데이터 사전으로 만든 DDL 입니다 (저장 옵션·권한 제외)\n";
+async fn ddl_fallback(s: &Session, otype: &str, owner: &str, name: &str, note: &str) -> Result<String> {
     if SOURCE_TYPES.contains(&otype) {
         let page = s
             .query(

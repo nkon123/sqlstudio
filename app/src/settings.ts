@@ -2,7 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { api, errOf, type Group, type ModelProfile, type Profile, type Provider, type TnsEntry, type TnsView } from "./api";
+import { api, errOf, type AcpAgent, type Group, type ModelProfile, type Profile, type Provider, type TnsEntry, type TnsView } from "./api";
 import { colorOf, countIn, groupLabel, groupLeaf, groupParent, groupTree, isCollapsed, setCollapsed, type GroupNode } from "./conngroups";
 import { DEFAULT_PREFS, STYLE_PRESETS, autoFormat, detectPrefs, formatSql, loadPrefs, savePrefs, setAutoFormat, type AutoFormat, type FormatPrefs } from "./format";
 import { restoreEnabled, setRestoreEnabled } from "./tabsession";
@@ -823,7 +823,68 @@ async function providersPage(app: App) {
   guideSel.addEventListener("change", () => {
     invoke("set_ai_guide_select", { mode: guideSel.value }).then(() => toast("저장했습니다", "ok", 1200)).catch((e) => toast(errOf(e).message, "error"));
   });
-  return h("div", {}, h("h4", {}, "AI 공급자"), h("div", { class: "split" }, list, form), h("h4", {}, "하네스"), ...harness, h("h4", {}, "Oracle 문법 안내"), ...guides);
+  return h("div", {}, h("h4", {}, "AI 공급자"), h("div", { class: "split" }, list, form),
+    h("h4", {}, "ACP 에이전트 (opencode 등)"), ...(await acpSection(app)),
+    h("h4", {}, "하네스"), ...harness, h("h4", {}, "Oracle 문법 안내"), ...guides);
+}
+
+/** ACP 에이전트 — 코딩 에이전트를 자식 프로세스로 띄워 AI 패널에서 쓴다 (Agent Client Protocol) */
+async function acpSection(app: App): Promise<HTMLElement[]> {
+  const list = h("div", { class: "list" });
+  const form = h("div", { class: "form" });
+  const edit = (a?: AcpAgent) => {
+    markActive(list, a?.name ?? "");
+    const name = h("input", { value: a?.name ?? "", placeholder: "예: opencode" });
+    const command = h("input", { value: a?.command ?? "", placeholder: "예: opencode (PATH 에서 찾음) 또는 전체 경로" });
+    const args = h("input", { value: (a?.args ?? []).join(" "), placeholder: "예: acp" });
+    const cwd = h("input", { value: a?.cwd ?? "", placeholder: "비우면 데이터 폴더의 acp-work" });
+    const mode = h("input", { value: a?.mode ?? "", placeholder: "예: plan" });
+    const mcp = h("input", { type: "checkbox", checked: a?.mcp ?? true }) as HTMLInputElement;
+    const result = h("pre", { class: "modal-text" });
+    const collect = (): AcpAgent => ({
+      name: name.value.trim(), command: command.value.trim(), args: args.value.trim().split(/\s+/).filter(Boolean),
+      cwd: cwd.value.trim() || null, mcp: mcp.checked, mode: mode.value.trim() || null,
+    });
+    form.replaceChildren(
+      h("p", { class: "hint" }, "ACP(Agent Client Protocol)를 지원하는 코딩 에이전트를 AI 패널의 공급자 목록에서 고를 수 있게 합니다. 모델·로그인은 에이전트 쪽 설정을 씁니다 (opencode: 터미널에서 opencode auth login)."),
+      field("이름", name), field("실행 파일", command), field("인자", args, "빈칸으로 나눕니다"),
+      field("작업 폴더", cwd, "에이전트가 파일을 보는 곳"),
+      field("처음 모드", mode, "새 대화마다 이 모드로 바꿉니다. opencode 의 plan 은 파일 편집 도구를 막습니다 (build 는 묻지 않고 파일을 고칠 수 있습니다)"),
+      h("label", { class: "check", title: "새 대화를 열 때 sqlstudio-mcp 를 MCP 서버로 넘깁니다. 설정 → MCP 에서 허용한 접속의 사전(테이블·컬럼·소스)만 조회하고, SQL 은 실행하지 않습니다" },
+        mcp, "DB 사전 조회 도구(sqlstudio-mcp)를 에이전트에 넘기기"),
+      h("div", { class: "row" },
+        h("button", { class: "primary", onclick: async (e: Event) => {
+          e.preventDefault();
+          try { await api.acpSaveAgent(collect(), a?.name); toast("저장했습니다", "ok"); await refresh(); await app.ai.load(); } catch (err) { toast(errOf(err).message, "error"); }
+        } }, "저장"),
+        h("button", { title: "저장하지 않은 설정으로 띄워 보고 바로 끝냅니다", onclick: async (e: Event) => {
+          e.preventDefault();
+          result.textContent = "띄워 보는 중…";
+          try {
+            const r = await api.acpTestAgent(collect());
+            result.textContent = `연결됨 — ${r.agent?.name ?? "?"} ${r.agent?.version ?? ""}\n${r.path}` +
+              (r.auth.length ? `\n로그인이 필요하면: ${r.auth.join(" / ")}` : "");
+          } catch (err) { result.textContent = errOf(err).message; }
+        } }, "연결 테스트"),
+        a ? h("button", { class: "danger", onclick: async (e: Event) => {
+          e.preventDefault();
+          if (!(await confirmBox("ACP 에이전트 삭제", `'${a.name}' 을(를) 지울까요?`, "삭제"))) return;
+          try { await api.acpDeleteAgent(a.name); form.replaceChildren(); toast("지웠습니다", "ok"); await refresh(); await app.ai.load(); } catch (err) { toast(errOf(err).message, "error"); }
+        } }, "삭제") : null),
+      result);
+  };
+  const refresh = async () => {
+    const agents = await api.acpAgents().catch(() => [] as AcpAgent[]);
+    list.replaceChildren(
+      ...agents.map((a) => h("button", { class: "list-item", "data-name": a.name, onclick: (e: Event) => { e.preventDefault(); edit(a); } },
+        a.name, h("small", {}, ` ${a.command} ${a.args.join(" ")}${a.available ? "" : " · 찾을 수 없음"}`))),
+      h("button", { class: "list-item add", "data-name": "", onclick: (e: Event) => { e.preventDefault(); edit(); } }, "+ 새 에이전트"));
+    if (!agents.length) {
+      form.replaceChildren(h("p", { class: "hint" }, "opencode 를 설치하면(npm i -g opencode-ai) 여기에 저절로 나타납니다. 다른 ACP 에이전트는 '+ 새 에이전트' 로 추가하세요."));
+    }
+  };
+  await refresh();
+  return [h("div", { class: "split" }, list, form)];
 }
 
 /** 모델 측정 결과 한 줄 — 하네스가 무엇을 바꾸는지까지 */

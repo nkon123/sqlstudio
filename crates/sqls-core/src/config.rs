@@ -34,6 +34,46 @@ pub struct Config {
     pub history: HistoryConfig,
     #[serde(default)]
     pub ai: AiConfig,
+    /// ACP(Agent Client Protocol) 에이전트 — opencode 같은 코딩 에이전트를 AI 패널에서 쓴다
+    #[serde(default, rename = "acp")]
+    pub acp_agents: Vec<AcpAgentConfig>,
+}
+
+/// ACP 에이전트 하나 — 앱이 `command args…` 를 자식 프로세스로 띄우고 stdin/stdout 으로 이야기한다
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcpAgentConfig {
+    pub name: String,
+    /// 실행 파일 — PATH 에서 찾는다 (Windows 는 .exe·.cmd 도)
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// 에이전트의 작업 폴더. 비우면 데이터 폴더의 `acp-work`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// 새 대화마다 sqlstudio-mcp 를 MCP 서버로 넘긴다 (MCP 설정에서 허용한 접속의 사전 조회만)
+    #[serde(default = "default_true")]
+    pub mcp: bool,
+    /// 새 대화의 처음 모드 (opencode: plan = 편집 도구를 막음, build = 다 씀). 비우면 에이전트 기본값
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// 외부 전송 동의 — 에이전트가 쓰는 모델은 대개 이 PC 밖에 있다
+    #[serde(default)]
+    pub remote_ack: bool,
+}
+
+impl AcpAgentConfig {
+    /// PATH 에 opencode 가 있으면 설정 없이도 보이는 기본값
+    pub fn opencode() -> Self {
+        Self {
+            name: "opencode".into(),
+            command: "opencode".into(),
+            args: vec!["acp".into()],
+            cwd: None,
+            mcp: true,
+            mode: Some("plan".into()),
+            remote_ack: false,
+        }
+    }
 }
 
 /// AI 질문 (앱)

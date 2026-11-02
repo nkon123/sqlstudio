@@ -3,6 +3,7 @@
 //! 화면(WebView)은 그리기만 한다. DB·LLM·파일 작업은 전부 여기서 하고, 무거운 일은
 //! 세션 스레드(sqls-core)나 async 작업으로 보낸다. 명령 처리기는 절대 블로킹하지 않는다.
 
+mod acp;
 mod ai;
 mod analyze;
 mod complete;
@@ -303,6 +304,16 @@ pub fn run() {
             ai::ai_harness_opts,
             ai::set_ai_harness_opts,
             ai::ai_examples_clear,
+            acp::acp_agents,
+            acp::acp_save_agent,
+            acp::acp_delete_agent,
+            acp::acp_ack_remote,
+            acp::acp_test_agent,
+            acp::acp_new_session,
+            acp::acp_set_option,
+            acp::acp_prompt,
+            acp::acp_cancel,
+            acp::acp_permission,
             valuetrace::value_trace_start,
             valuetrace::value_trace_step,
             valuetrace::row_trace_prepare,
@@ -344,6 +355,7 @@ pub fn run() {
                 if closes_sessions(window.label()) {
                     if let Some(st) = window.try_state::<AppState>() {
                         st.close_all();
+                        st.acp.shutdown_all();
                     }
                 }
             }

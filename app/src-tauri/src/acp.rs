@@ -1,0 +1,729 @@
+//! ACP(Agent Client Protocol) 클라이언트 — opencode 같은 코딩 에이전트를 AI 패널의 두뇌로 쓴다.
+//!
+//! 에이전트를 자식 프로세스로 띄우고 stdin/stdout 으로 줄 단위 JSON-RPC 2.0 을 주고받는다 (이 앱이 클라이언트).
+//! 에이전트는 이름마다 하나만 띄워 두고, AI 패널의 대화마다 세션을 연다.
+//! 파일·터미널은 빌려 주지 않는다 (clientCapabilities 를 끈다) — 에이전트가 묻는 권한만 화면에 넘긴다.
+//! 새 세션에는 sqlstudio-mcp 를 MCP 서버로 넘겨, 허용한 접속의 사전(스키마)을 에이전트가 직접 찾아보게 한다.
+
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use serde::Serialize;
+use serde_json::{json, Value};
+use sqls_core::config::{config_path, data_dir, AcpAgentConfig};
+use sqls_core::sync::{MutexExt, RwLockExt};
+use tauri::ipc::Channel;
+use tauri::State;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin};
+use tokio::sync::oneshot;
+
+use crate::state::{AppState, ErrView};
+
+type R<T> = Result<T, ErrView>;
+
+/// 띄우고 initialize 에 답하기까지 (opencode 는 처음에 플러그인·모델 목록을 읽느라 몇 초 걸린다)
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+/// session/new · 설정 바꾸기
+const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// 오류 문구에 붙일 stderr 끝 줄 수
+const STDERR_TAIL: usize = 12;
+
+/// 화면으로 보내는 일 — 한 번의 질문(session/prompt) 동안
+#[derive(Serialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AcpEvent {
+    /// 답 글자
+    Text { text: String },
+    /// 생각 글자 (보이지 않고 '생각하는 중' 으로만)
+    Thought { text: String },
+    /// 도구 호출 — 처음(tool_call)과 바뀔 때(tool_call_update). 바뀔 때는 바뀐 칸만 온다
+    Tool { id: String, title: Option<String>, kind: Option<String>, status: Option<String> },
+    /// 에이전트의 할 일 목록 [{content, status}]
+    Plan { entries: Value },
+    /// 권한 요청 — 화면이 고른 뒤 acp_permission(key, option_id) 로 답한다
+    Permission { key: u64, title: String, detail: String, options: Vec<PermOption> },
+    /// 문맥 사용량 (토큰)
+    Usage { used: u64, size: u64 },
+}
+
+#[derive(Serialize, Clone)]
+pub struct PermOption {
+    id: String,
+    name: String,
+    /// allow_once · allow_always · reject_once · reject_always
+    kind: String,
+}
+
+struct RpcError {
+    code: i64,
+    message: String,
+}
+
+/// 보낸 요청의 답을 받을 곳
+type Reply = oneshot::Sender<Result<Value, RpcError>>;
+/// 권한 요청에 고른 선택지를 받을 곳 (None = 취소)
+type PermReply = oneshot::Sender<Option<String>>;
+
+/// 띄운 에이전트 하나
+struct Agent {
+    cfg: AcpAgentConfig,
+    stdin: tokio::sync::Mutex<Option<ChildStdin>>,
+    child: Mutex<Option<Child>>,
+    alive: AtomicBool,
+    next: AtomicU64,
+    pending: Mutex<HashMap<u64, Reply>>,
+    /// 세션 → 지금 질문의 화면 채널
+    sinks: Mutex<HashMap<String, Channel<AcpEvent>>>,
+    /// 권한 요청 키 → (세션, 답할 곳). 답이 없이 버려지면 cancelled 로 답한다
+    perms: Mutex<HashMap<u64, (String, PermReply)>>,
+    stderr: Mutex<VecDeque<String>>,
+    /// initialize 의 답 (agentInfo · authMethods)
+    info: Mutex<Value>,
+}
+
+impl Agent {
+    async fn spawn(cfg: &AcpAgentConfig) -> R<Arc<Self>> {
+        let path = resolve(&cfg.command).ok_or_else(|| {
+            let hint = if cfg.command == "opencode" { " — npm i -g opencode-ai 로 설치하세요" } else { "" };
+            ErrView::msg("acp", format!("'{}' 을(를) 찾을 수 없습니다 (PATH){hint}", cfg.command))
+        })?;
+        let cwd = work_dir(cfg)?;
+        let mut c = tokio::process::Command::new(&path);
+        c.args(&cfg.args)
+            .current_dir(&cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW — 콘솔 창이 뜨지 않게
+        let mut child = c.spawn().map_err(|e| ErrView::msg("acp", format!("{} 을(를) 실행하지 못했습니다: {e}", path.display())))?;
+        let (stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+        let a = Arc::new(Self {
+            cfg: cfg.clone(),
+            stdin: tokio::sync::Mutex::new(stdin),
+            child: Mutex::new(Some(child)),
+            alive: AtomicBool::new(true),
+            next: AtomicU64::new(1),
+            pending: Mutex::new(HashMap::new()),
+            sinks: Mutex::new(HashMap::new()),
+            perms: Mutex::new(HashMap::new()),
+            stderr: Mutex::new(VecDeque::new()),
+            info: Mutex::new(Value::Null),
+        });
+        if let Some(out) = stdout {
+            tokio::spawn(read_loop(a.clone(), out));
+        }
+        if let Some(err) = stderr {
+            let me = a.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(err).lines();
+                while let Ok(Some(l)) = lines.next_line().await {
+                    tracing::debug!("ACP {} stderr: {l}", me.cfg.name);
+                    let mut t = me.stderr.lk();
+                    if t.len() >= STDERR_TAIL {
+                        t.pop_front();
+                    }
+                    t.push_back(l);
+                }
+            });
+        }
+        let init = json!({
+            "protocolVersion": 1,
+            "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
+            "clientInfo": { "name": "sqlstudio", "version": env!("CARGO_PKG_VERSION") },
+        });
+        match a.request("initialize", init, Some(START_TIMEOUT)).await {
+            Ok(info) => {
+                tracing::info!("ACP {} 시작: {}", cfg.name, info.get("agentInfo").map(|v| v.to_string()).unwrap_or_default());
+                *a.info.lk() = info;
+                Ok(a)
+            }
+            Err(e) => {
+                a.shutdown();
+                Err(e)
+            }
+        }
+    }
+
+    fn alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    async fn write(&self, msg: Value) -> R<()> {
+        let mut line = msg.to_string();
+        line.push('\n');
+        let mut g = self.stdin.lock().await;
+        let w = g.as_mut().ok_or_else(|| self.died())?;
+        w.write_all(line.as_bytes()).await.map_err(|_| self.died())?;
+        w.flush().await.map_err(|_| self.died())
+    }
+
+    async fn request(&self, method: &str, params: Value, timeout: Option<Duration>) -> R<Value> {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lk().insert(id, tx);
+        if let Err(e) = self.write(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await {
+            self.pending.lk().remove(&id);
+            return Err(e);
+        }
+        let got = match timeout {
+            Some(t) => match tokio::time::timeout(t, rx).await {
+                Ok(r) => r,
+                Err(_) => {
+                    self.pending.lk().remove(&id);
+                    return Err(ErrView::msg("acp", format!("{} 이(가) {method} 에 {}초 안에 답하지 않았습니다", self.cfg.name, t.as_secs())));
+                }
+            },
+            None => rx.await,
+        };
+        match got {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(self.rpc_error(method, e)),
+            Err(_) => Err(self.died()),
+        }
+    }
+
+    async fn notify(&self, method: &str, params: Value) -> R<()> {
+        self.write(json!({ "jsonrpc": "2.0", "method": method, "params": params })).await
+    }
+
+    fn rpc_error(&self, method: &str, e: RpcError) -> ErrView {
+        // -32000: 로그인이 필요하다 (ACP 의 auth_required)
+        if e.code == -32000 || e.message.to_ascii_lowercase().contains("auth") {
+            let how: Vec<String> = self.info.lk()["authMethods"]
+                .as_array()
+                .map(|v| v.iter().filter_map(|m| m["description"].as_str().or(m["name"].as_str()).map(String::from)).collect())
+                .unwrap_or_default();
+            let how = if how.is_empty() { String::new() } else { format!(" — {}", how.join(" / ")) };
+            return ErrView::msg("acp_auth", format!("{} 에 로그인이 필요합니다{how}\n({})", self.cfg.name, e.message));
+        }
+        ErrView::msg("acp", format!("{} ({method}): {}", self.cfg.name, e.message))
+    }
+
+    fn died(&self) -> ErrView {
+        let tail: Vec<String> = self.stderr.lk().iter().cloned().collect();
+        let tail = if tail.is_empty() { String::new() } else { format!("\n\n{}", tail.join("\n")) };
+        ErrView::msg("acp_closed", format!("{} 이(가) 끝났습니다{tail}", self.cfg.name))
+    }
+
+    /// 끝낸다 — stdin 을 닫고, 프로세스를 (Windows 는 .cmd 가 띄운 node 까지) 끝낸다
+    fn shutdown(&self) {
+        self.alive.store(false, Ordering::Relaxed);
+        if let Ok(mut g) = self.stdin.try_lock() {
+            g.take();
+        }
+        if let Some(mut c) = self.child.lk().take() {
+            #[cfg(windows)]
+            if let Some(pid) = c.id() {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/T", "/F", "/PID", &pid.to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .creation_flags(0x0800_0000)
+                    .status();
+            }
+            let _ = c.start_kill();
+        }
+        self.pending.lk().clear();
+        self.perms.lk().clear();
+    }
+
+    async fn reply(&self, id: Value, result: Value) {
+        let _ = self.write(json!({ "jsonrpc": "2.0", "id": id, "result": result })).await;
+    }
+
+    /// 에이전트가 묻는 것 — 권한만 화면에 넘기고, 나머지(fs·terminal)는 빌려 주지 않았으니 없는 메서드라 답한다
+    fn on_request(self: &Arc<Self>, method: &str, id: Value, params: &Value) {
+        if method != "session/request_permission" {
+            let me = self.clone();
+            let method = method.to_string();
+            tokio::spawn(async move {
+                let msg = json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("지원하지 않습니다: {method}") } });
+                let _ = me.write(msg).await;
+            });
+            return;
+        }
+        let sid = params["sessionId"].as_str().unwrap_or_default().to_string();
+        let sink = self.sinks.lk().get(&sid).cloned();
+        let tool = &params["toolCall"];
+        let options: Vec<PermOption> = params["options"]
+            .as_array()
+            .map(|v| {
+                v.iter()
+                    .map(|o| PermOption {
+                        id: o["optionId"].as_str().unwrap_or_default().into(),
+                        name: o["name"].as_str().unwrap_or_default().into(),
+                        kind: o["kind"].as_str().unwrap_or_default().into(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (tx, rx) = oneshot::channel();
+        let key = self.next.fetch_add(1, Ordering::Relaxed);
+        match sink {
+            Some(sink) => {
+                self.perms.lk().insert(key, (sid, tx));
+                let detail = match &tool["rawInput"] {
+                    Value::Null => String::new(),
+                    v => clip(&serde_json::to_string_pretty(v).unwrap_or_default(), 2000),
+                };
+                let title = tool["title"].as_str().unwrap_or("도구 실행").to_string();
+                let _ = sink.send(AcpEvent::Permission { key, title, detail, options });
+            }
+            // 화면이 듣고 있지 않은 세션 — 묻지 않고 취소
+            None => drop(tx),
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            let outcome = match rx.await.ok().flatten() {
+                Some(option_id) => json!({ "outcome": "selected", "optionId": option_id }),
+                None => json!({ "outcome": "cancelled" }),
+            };
+            me.reply(id, json!({ "outcome": outcome })).await;
+        });
+    }
+
+    fn on_update(&self, params: &Value) {
+        let sid = params["sessionId"].as_str().unwrap_or_default();
+        let Some(sink) = self.sinks.lk().get(sid).cloned() else { return };
+        let u = &params["update"];
+        let s = |k: &str| u[k].as_str().map(String::from);
+        let ev = match u["sessionUpdate"].as_str().unwrap_or_default() {
+            "agent_message_chunk" => u["content"]["text"].as_str().map(|t| AcpEvent::Text { text: t.into() }),
+            "agent_thought_chunk" => u["content"]["text"].as_str().map(|t| AcpEvent::Thought { text: t.into() }),
+            "tool_call" | "tool_call_update" => Some(AcpEvent::Tool {
+                id: s("toolCallId").unwrap_or_default(),
+                title: s("title"),
+                kind: s("kind"),
+                status: s("status"),
+            }),
+            "plan" => Some(AcpEvent::Plan { entries: u["entries"].clone() }),
+            "usage_update" => Some(AcpEvent::Usage { used: u["used"].as_u64().unwrap_or(0), size: u["size"].as_u64().unwrap_or(0) }),
+            _ => None,
+        };
+        if let Some(ev) = ev {
+            let _ = sink.send(ev);
+        }
+    }
+}
+
+async fn read_loop(a: Arc<Agent>, out: tokio::process::ChildStdout) {
+    let mut lines = BufReader::new(out).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(msg) = serde_json::from_str::<Value>(line) else {
+            tracing::debug!("ACP {}: JSON 이 아닌 줄: {}", a.cfg.name, clip(line, 200));
+            continue;
+        };
+        let method = msg["method"].as_str();
+        let id = msg.get("id").filter(|v| !v.is_null()).cloned();
+        match (method, id) {
+            (Some(m), Some(id)) => a.on_request(m, id, &msg["params"]),
+            (Some("session/update"), None) => a.on_update(&msg["params"]),
+            (Some(_), None) => {}
+            (None, Some(id)) => {
+                let Some(tx) = id.as_u64().and_then(|i| a.pending.lk().remove(&i)) else { continue };
+                let r = match msg.get("error") {
+                    Some(e) => Err(RpcError { code: e["code"].as_i64().unwrap_or(0), message: e["message"].as_str().unwrap_or("오류").to_string() }),
+                    None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
+                };
+                let _ = tx.send(r);
+            }
+            (None, None) => {}
+        }
+    }
+    tracing::info!("ACP {} 끝남", a.cfg.name);
+    a.alive.store(false, Ordering::Relaxed);
+    // 기다리던 요청은 보낼 곳이 사라져 died() 로 끝난다
+    a.pending.lk().clear();
+    a.perms.lk().clear();
+}
+
+/// 띄운 에이전트들 (앱 상태)
+#[derive(Default)]
+pub struct Acp {
+    agents: Mutex<HashMap<String, Arc<Agent>>>,
+}
+
+impl Acp {
+    /// 살아 있는 에이전트, 없거나 실행 설정이 바뀌었으면 새로 띄운다
+    async fn get(&self, cfg: &AcpAgentConfig) -> R<Arc<Agent>> {
+        let old = {
+            let mut m = self.agents.lk();
+            if let Some(a) = m.get(&cfg.name).filter(|a| a.alive() && same_process(&a.cfg, cfg)) {
+                return Ok(a.clone());
+            }
+            m.remove(&cfg.name)
+        };
+        if let Some(o) = old {
+            o.shutdown();
+        }
+        let a = Agent::spawn(cfg).await?;
+        self.agents.lk().insert(cfg.name.clone(), a.clone());
+        Ok(a)
+    }
+
+    /// 세션이 있는 에이전트 — 끝났으면 세션도 사라졌다
+    fn running(&self, name: &str) -> R<Arc<Agent>> {
+        self.agents
+            .lk()
+            .get(name)
+            .filter(|a| a.alive())
+            .cloned()
+            .ok_or_else(|| ErrView::msg("acp_session_lost", format!("{name} 이(가) 다시 시작되어 대화가 끊겼습니다 — 새 대화로 이어 묻습니다")))
+    }
+
+    fn stop(&self, name: &str) {
+        if let Some(a) = self.agents.lk().remove(name) {
+            a.shutdown();
+        }
+    }
+
+    pub fn shutdown_all(&self) {
+        for (_, a) in self.agents.lk().drain() {
+            a.shutdown();
+        }
+    }
+}
+
+fn same_process(a: &AcpAgentConfig, b: &AcpAgentConfig) -> bool {
+    a.command == b.command && a.args == b.args && a.cwd == b.cwd
+}
+
+/// 실행 파일 찾기 — 경로면 그대로, 이름이면 PATH 에서 (Windows 는 .exe·.cmd·.bat. npm 의 확장자 없는 sh 스크립트는 건너뛴다)
+fn resolve(cmd: &str) -> Option<PathBuf> {
+    let p = Path::new(cmd);
+    if p.is_absolute() || p.components().count() > 1 {
+        return p.is_file().then(|| p.to_path_buf());
+    }
+    let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat"] } else { &[""] };
+    let has_ext = cfg!(windows) && p.extension().is_some_and(|e| ["exe", "cmd", "bat"].iter().any(|x| e.eq_ignore_ascii_case(x)));
+    for dir in std::env::split_paths(&std::env::var_os("PATH")?) {
+        if has_ext {
+            if dir.join(cmd).is_file() {
+                return Some(dir.join(cmd));
+            }
+            continue;
+        }
+        for e in exts {
+            let f = dir.join(format!("{cmd}{e}"));
+            if f.is_file() {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
+fn work_dir(cfg: &AcpAgentConfig) -> R<PathBuf> {
+    let d = match cfg.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(c) => PathBuf::from(c),
+        None => data_dir().join("acp-work"),
+    };
+    std::fs::create_dir_all(&d).map_err(|e| ErrView::msg("io", format!("{}: {e}", d.display())))?;
+    // ACP 는 절대 경로를 요구한다
+    Ok(std::path::absolute(&d).unwrap_or(d))
+}
+
+fn clip(s: &str, n: usize) -> String {
+    match s.char_indices().nth(n) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
+    }
+}
+
+/// 설정의 에이전트 — 하나도 없으면, PATH 에 opencode 가 있을 때 기본 하나
+fn agents(st: &AppState) -> Vec<AcpAgentConfig> {
+    let v = st.cfg.rd().acp_agents.clone();
+    if v.is_empty() && resolve("opencode").is_some() {
+        return vec![AcpAgentConfig::opencode()];
+    }
+    v
+}
+
+fn agent_cfg(st: &AppState, name: &str) -> R<AcpAgentConfig> {
+    agents(st).into_iter().find(|a| a.name == name).ok_or_else(|| ErrView::msg("invalid", format!("ACP 에이전트가 없습니다: {name}")))
+}
+
+/// 설정 파일의 목록을 바꾼다 — 보이기만 하던 기본값(opencode)도 이때 파일에 들어간다
+fn edit_agents(st: &AppState, f: impl FnOnce(&mut Vec<AcpAgentConfig>) -> R<()>) -> R<()> {
+    let mut list = agents(st);
+    f(&mut list)?;
+    st.cfg.wr().acp_agents = list;
+    st.save_config()
+}
+
+/// 새 세션에 넘길 MCP 서버 — sqlstudio-mcp 가 앱 옆에 있고 MCP 설정에서 허용한 접속이 있을 때
+fn mcp_servers(st: &AppState, cfg: &AcpAgentConfig) -> (Value, Vec<String>) {
+    let allowed = st.cfg.rd().mcp.allowed_connections.clone();
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(if cfg!(windows) { "sqlstudio-mcp.exe" } else { "sqlstudio-mcp" })));
+    match exe {
+        Some(exe) if cfg.mcp && !allowed.is_empty() && exe.is_file() => (
+            json!([{ "name": "sqlstudio", "command": exe, "args": ["--config", config_path()], "env": [] }]),
+            allowed,
+        ),
+        _ => (json!([]), vec![]),
+    }
+}
+
+#[derive(Serialize)]
+pub struct AgentView {
+    #[serde(flatten)]
+    cfg: AcpAgentConfig,
+    /// 실행 파일을 찾았는지
+    available: bool,
+    running: bool,
+}
+
+#[tauri::command]
+pub fn acp_agents(st: State<'_, AppState>) -> Vec<AgentView> {
+    let running = st.acp.agents.lk().iter().filter(|(_, a)| a.alive()).map(|(n, _)| n.clone()).collect::<Vec<_>>();
+    agents(&st)
+        .into_iter()
+        .map(|cfg| AgentView { available: resolve(&cfg.command).is_some(), running: running.contains(&cfg.name), cfg })
+        .collect()
+}
+
+#[tauri::command]
+pub fn acp_save_agent(st: State<'_, AppState>, agent: AcpAgentConfig, original_name: Option<String>) -> R<()> {
+    let mut agent = agent;
+    agent.name = agent.name.trim().to_string();
+    agent.command = agent.command.trim().to_string();
+    if agent.name.is_empty() || agent.command.is_empty() {
+        return Err(ErrView::msg("invalid", "이름과 실행 파일은 비울 수 없습니다"));
+    }
+    let key = original_name.unwrap_or_else(|| agent.name.clone());
+    edit_agents(&st, |list| {
+        // 동의는 화면이 보낸 값을 믿지 않는다 — 같은 실행 파일·인자일 때만 이어 간다
+        let old = list.iter().find(|a| a.name == key);
+        agent.remote_ack = old.is_some_and(|o| o.remote_ack && o.command == agent.command && o.args == agent.args);
+        if key != agent.name && list.iter().any(|a| a.name == agent.name) {
+            return Err(ErrView::msg("invalid", format!("같은 이름이 있습니다: {}", agent.name)));
+        }
+        match list.iter_mut().find(|a| a.name == key) {
+            Some(a) => *a = agent.clone(),
+            None => list.push(agent.clone()),
+        }
+        Ok(())
+    })?;
+    if key != agent.name {
+        st.acp.stop(&key);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn acp_delete_agent(st: State<'_, AppState>, name: String) -> R<()> {
+    edit_agents(&st, |list| {
+        list.retain(|a| a.name != name);
+        Ok(())
+    })?;
+    st.acp.stop(&name);
+    Ok(())
+}
+
+/// 외부 전송 동의 — AI 패널의 확인 창에서 "계속"
+#[tauri::command]
+pub fn acp_ack_remote(st: State<'_, AppState>, name: String) -> R<()> {
+    edit_agents(&st, |list| {
+        let a = list.iter_mut().find(|a| a.name == name).ok_or_else(|| ErrView::msg("invalid", format!("ACP 에이전트가 없습니다: {name}")))?;
+        a.remote_ack = true;
+        Ok(())
+    })
+}
+
+#[derive(Serialize)]
+pub struct TestResult {
+    agent: Value,
+    auth: Vec<String>,
+    path: String,
+}
+
+/// 연결 확인 — 저장하지 않은 설정으로 따로 띄워 initialize 만 하고 끝낸다
+#[tauri::command]
+pub async fn acp_test_agent(agent: AcpAgentConfig) -> R<TestResult> {
+    let path = resolve(&agent.command).map(|p| p.display().to_string()).unwrap_or_default();
+    let a = Agent::spawn(&agent).await?;
+    let info = a.info.lk().clone();
+    a.shutdown();
+    let auth = info["authMethods"]
+        .as_array()
+        .map(|v| v.iter().filter_map(|m| m["description"].as_str().or(m["name"].as_str()).map(String::from)).collect())
+        .unwrap_or_default();
+    Ok(TestResult { agent: info["agentInfo"].clone(), auth, path })
+}
+
+#[derive(Serialize)]
+pub struct NewSession {
+    session_id: String,
+    /// 에이전트가 고르게 하는 것 (opencode: model · mode) — [{id, name, currentValue, options:[{value,name}]}]
+    options: Value,
+    /// sqlstudio-mcp 로 넘긴 접속 — 비면 MCP 없이
+    mcp_profiles: Vec<String>,
+    agent: Value,
+}
+
+/// 새 대화 — 필요하면 에이전트를 띄우고 세션을 연다. 설정의 처음 모드로 바꿔 둔다
+#[tauri::command]
+pub async fn acp_new_session(st: State<'_, AppState>, agent: String) -> R<NewSession> {
+    let cfg = agent_cfg(&st, &agent)?;
+    let a = st.acp.get(&cfg).await?;
+    let (mcp, mcp_profiles) = mcp_servers(&st, &cfg);
+    let cwd = work_dir(&cfg)?;
+    let r = a.request("session/new", json!({ "cwd": cwd, "mcpServers": mcp }), Some(CALL_TIMEOUT)).await?;
+    let session_id = r["sessionId"].as_str().ok_or_else(|| ErrView::msg("acp", format!("{agent}: session/new 답에 sessionId 가 없습니다")))?.to_string();
+    let mut options = r.get("configOptions").cloned().unwrap_or(Value::Array(vec![]));
+    if let Some(mode) = cfg.mode.as_deref().filter(|m| !m.is_empty()) {
+        let opt = options.as_array().and_then(|v| v.iter().find(|o| o["id"] == "mode")).cloned();
+        if let Some(o) = opt {
+            let has = o["options"].as_array().is_some_and(|v| v.iter().any(|x| x["value"] == mode));
+            if has && o["currentValue"] != mode {
+                match a.request("session/set_config_option", json!({ "sessionId": session_id, "configId": "mode", "value": mode }), Some(CALL_TIMEOUT)).await {
+                    Ok(v) => options = v.get("configOptions").cloned().unwrap_or(options),
+                    Err(e) => tracing::warn!("ACP {agent}: 처음 모드 {mode} 로 바꾸지 못했습니다: {}", e.message),
+                }
+            }
+        } else if r["modes"]["availableModes"].as_array().is_some_and(|v| v.iter().any(|m| m["id"] == mode)) {
+            // 예전 방식 (modes · session/set_mode)
+            if let Err(e) = a.request("session/set_mode", json!({ "sessionId": session_id, "modeId": mode }), Some(CALL_TIMEOUT)).await {
+                tracing::warn!("ACP {agent}: 처음 모드 {mode} 로 바꾸지 못했습니다: {}", e.message);
+            }
+        }
+    }
+    let agent_info = a.info.lk()["agentInfo"].clone();
+    Ok(NewSession { session_id, options, mcp_profiles, agent: agent_info })
+}
+
+/// 모델·모드 바꾸기 — 바뀐 전체 목록을 돌려준다
+#[tauri::command]
+pub async fn acp_set_option(st: State<'_, AppState>, agent: String, session_id: String, config_id: String, value: String) -> R<Value> {
+    let a = st.acp.running(&agent)?;
+    let r = a
+        .request("session/set_config_option", json!({ "sessionId": session_id, "configId": config_id, "value": value }), Some(CALL_TIMEOUT))
+        .await?;
+    Ok(r.get("configOptions").cloned().unwrap_or(Value::Array(vec![])))
+}
+
+#[derive(Serialize)]
+pub struct PromptDone {
+    /// end_turn · max_tokens · max_turn_requests · refusal · cancelled
+    stop_reason: String,
+    usage: Value,
+}
+
+/// 질문 — 답이 끝날 때까지 일을 채널로 보낸다. 외부 전송 동의는 여기서 확인한다
+#[tauri::command]
+pub async fn acp_prompt(st: State<'_, AppState>, agent: String, session_id: String, text: String, on_event: Channel<AcpEvent>) -> R<PromptDone> {
+    let cfg = agent_cfg(&st, &agent)?;
+    if !cfg.remote_ack {
+        return Err(ErrView::msg("remote_consent", format!("'{agent}' 은 받은 내용을 에이전트의 모델(대개 외부 서버)로 보냅니다. 전송 동의가 필요합니다.")));
+    }
+    let a = st.acp.running(&agent)?;
+    a.sinks.lk().insert(session_id.clone(), on_event);
+    let r = a.request("session/prompt", json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": text }] }), None).await;
+    a.sinks.lk().remove(&session_id);
+    a.perms.lk().retain(|_, (s, _)| *s != session_id);
+    let r = r?;
+    Ok(PromptDone { stop_reason: r["stopReason"].as_str().unwrap_or("end_turn").to_string(), usage: r["usage"].clone() })
+}
+
+/// 멈추기 — 에이전트가 cancelled 로 질문을 끝낸다. 기다리던 권한 요청도 취소로 답한다
+#[tauri::command]
+pub async fn acp_cancel(st: State<'_, AppState>, agent: String, session_id: String) -> R<()> {
+    let a = st.acp.running(&agent)?;
+    a.perms.lk().retain(|_, (s, _)| *s != session_id);
+    a.notify("session/cancel", json!({ "sessionId": session_id })).await
+}
+
+/// 권한 요청에 답한다 — option_id 가 없으면 취소
+#[tauri::command]
+pub fn acp_permission(st: State<'_, AppState>, agent: String, key: u64, option_id: Option<String>) -> R<()> {
+    let a = st.acp.running(&agent)?;
+    if let Some((_, tx)) = a.perms.lk().remove(&key) {
+        let _ = tx.send(option_id);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clip_counts_chars() {
+        assert_eq!(clip("가나다라", 2), "가나…");
+        assert_eq!(clip("ab", 5), "ab");
+    }
+
+    #[test]
+    fn resolve_rejects_missing_paths() {
+        assert!(resolve(r"C:\없는\폴더\agent.exe").is_none());
+        assert!(resolve("sqlstudio-없는-에이전트").is_none());
+    }
+
+    /// 실제 opencode 로 끝까지 — 띄우기 · 세션 · plan 모드 · 질문 · 글자 이벤트 · 끝내기.
+    /// `cargo test -p sqlstudio acp_live -- --ignored --nocapture`.
+    /// SQLSTUDIO_ACP_LIVE_MCP=1 이면 sqlstudio-mcp 도 넘겨 도구가 보이는지 본다
+    /// (`cargo build --release -p sqls-mcp` 와 Oracle Client 가 있어야 MCP 서버가 뜬다)
+    #[tokio::test]
+    #[ignore]
+    async fn acp_live_opencode() {
+        let mut cfg = AcpAgentConfig::opencode();
+        let dir = std::env::temp_dir().join("sqlstudio-acp-live");
+        std::fs::create_dir_all(&dir).unwrap();
+        cfg.cwd = Some(dir.display().to_string());
+        let a = Agent::spawn(&cfg).await.expect("opencode acp 를 띄우지 못함");
+        assert!(a.info.lk()["agentInfo"]["name"].is_string());
+
+        let mcp_exe = std::env::current_dir().unwrap().join("../../target/release/sqlstudio-mcp.exe");
+        let mcp_cfg = dir.join("config.toml");
+        std::fs::write(&mcp_cfg, "").unwrap();
+        let with_mcp = std::env::var("SQLSTUDIO_ACP_LIVE_MCP").is_ok_and(|v| v == "1") && mcp_exe.is_file();
+        let mcp = if with_mcp {
+            json!([{ "name": "sqlstudio", "command": std::path::absolute(&mcp_exe).unwrap(), "args": ["--config", mcp_cfg], "env": [] }])
+        } else {
+            json!([])
+        };
+        let r = a.request("session/new", json!({ "cwd": work_dir(&cfg).unwrap(), "mcpServers": mcp }), Some(CALL_TIMEOUT)).await.unwrap();
+        let sid = r["sessionId"].as_str().unwrap().to_string();
+        let r = a.request("session/set_config_option", json!({ "sessionId": sid, "configId": "mode", "value": "plan" }), Some(CALL_TIMEOUT)).await.unwrap();
+        assert!(r["configOptions"].as_array().unwrap().iter().any(|o| o["id"] == "mode" && o["currentValue"] == "plan"));
+
+        let events = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let ev = events.clone();
+        let ch: Channel<AcpEvent> = Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                ev.lk().push(serde_json::from_str(&s).unwrap());
+            }
+            Ok(())
+        });
+        a.sinks.lk().insert(sid.clone(), ch);
+        // MCP 없이 도구 이름을 물으면 모델이 설정 파일을 뒤지러 나선다 — 그때는 짧은 답만
+        let ask = if with_mcp { "MCP 서버 'sqlstudio' 의 도구 이름을 쉼표로 나열하라. 도구는 부르지 말고 이름만. 없으면 NONE 이라고만." } else { "도구를 쓰지 말고 정확히 pong 이라고만 답하라." };
+        let done = a.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": ask }] }), Some(Duration::from_secs(180))).await;
+        let evs = events.lk().clone();
+        let tail: Vec<String> = a.stderr.lk().iter().cloned().collect();
+        a.shutdown();
+        let done = done.unwrap_or_else(|e| panic!("{}\n이벤트: {evs:?}\nstderr: {tail:?}", e.message));
+        let text: String = evs.iter().filter(|e| e["type"] == "text").filter_map(|e| e["text"].as_str()).collect();
+        eprintln!("stop={} 이벤트 {}개\n답: {text}", done["stopReason"], evs.len());
+        assert_eq!(done["stopReason"], "end_turn");
+        assert!(!text.trim().is_empty());
+        if with_mcp {
+            assert!(!text.contains("NONE"), "sqlstudio-mcp 를 넘겼는데 도구가 없다고 함: {text}");
+        }
+        assert!(!a.alive());
+    }
+}

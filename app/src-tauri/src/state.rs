@@ -41,6 +41,8 @@ pub struct AppState {
     pub debuggers: Mutex<HashMap<u64, Arc<crate::debug::DebugRun>>>,
     /// 진행 중인 PL/SQL 분석 → 멈춤 신호
     pub analyses: Mutex<HashMap<u64, Arc<AtomicBool>>>,
+    /// 띄운 ACP 에이전트 (opencode 등)
+    pub acp: crate::acp::Acp,
 }
 
 impl AppState {
@@ -80,6 +82,7 @@ impl AppState {
             debuggers: Mutex::new(HashMap::new()),
             analyses: Mutex::new(HashMap::new()),
             ai_tasks: Mutex::new(HashMap::new()),
+            acp: Default::default(),
         }
     }
 

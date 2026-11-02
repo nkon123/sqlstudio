@@ -1165,7 +1165,7 @@ export class App {
       const text = t.editor.text();
       sql = text.length < 20000 ? text : text.slice(Math.max(0, t.editor.cursor() - 4000), t.editor.cursor() + 4000);
     }
-    return { sessionId: t?.conn?.id, sql: sql?.trim() || undefined, error: t?.lastError, tables: [...this.pickedTables] };
+    return { sessionId: t?.conn?.id, profile: t?.conn?.profile, sql: sql?.trim() || undefined, error: t?.lastError, tables: [...this.pickedTables] };
   }
 
   // ── 객체 탐색기 / 자동완성 ─────────────────────────

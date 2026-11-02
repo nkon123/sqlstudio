@@ -215,6 +215,19 @@ body.row-resizing { cursor: row-resize; user-select: none; }
 .badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; }
 .badge.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
 .badge.warn { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+/* ACP 에이전트의 모델·모드 고르기 */
+.ai-acp-opts { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 6px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.ai-acp-opts[hidden] { display: none; }
+.ai-acp-opt { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1 1 140px; }
+.ai-acp-opt span { color: var(--dim); white-space: nowrap; }
+.ai-acp-opt select { flex: 1; min-width: 0; }
+/* 에이전트가 부른 도구 — 답 위에 한 줄씩 */
+.ai-tools:empty { display: none; }
+.ai-tools { margin: 2px 0 4px; font-size: 11.5px; color: var(--dim); }
+.ai-tool { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ai-tool[data-status="failed"] { color: var(--danger); }
+.ai-tool[data-status="in_progress"] { color: var(--text); }
+.ai-plan { margin-top: 2px; padding-left: 4px; border-left: 2px solid var(--line); }
 .ai-tasks { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px; border-bottom: 1px solid var(--line); }
 .ai-log { flex: 1; overflow: auto; padding: 6px; display: flex; flex-direction: column; gap: 8px; }
 .msg { padding: 6px 8px; border-radius: 6px; white-space: pre-wrap; word-break: break-word; }

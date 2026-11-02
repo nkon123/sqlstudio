@@ -98,6 +98,23 @@ export interface CompletionItem {
 export interface CompletionResultView { from: number; items: CompletionItem[]; context: string }
 export interface CompletionStatus { profile: string; phase: string; objects: number; columns: number; error?: string | null }
 export interface McpSettings { allowed_connections: string[]; call_timeout_secs: number; allow_explain: boolean }
+/** ACP 에이전트 (opencode 등) — 설정의 [[acp]] */
+export interface AcpAgent {
+  name: string; command: string; args: string[]; cwd?: string | null; mcp: boolean; mode?: string | null; remote_ack?: boolean;
+  /** 실행 파일을 찾았는지 · 지금 띄워져 있는지 (읽을 때만) */
+  available?: boolean; running?: boolean;
+}
+/** 에이전트가 고르게 하는 것 (opencode: model · mode) */
+export interface AcpConfigOption { id: string; name: string; currentValue: string; options: { value: string; name: string; description?: string }[] }
+export interface AcpSession { session_id: string; options: AcpConfigOption[]; mcp_profiles: string[]; agent: { name?: string; version?: string } | null }
+export interface AcpPermOption { id: string; name: string; kind: "allow_once" | "allow_always" | "reject_once" | "reject_always" | string }
+export type AcpEvent =
+  | { type: "text"; text: string }
+  | { type: "thought"; text: string }
+  | { type: "tool"; id: string; title?: string | null; kind?: string | null; status?: string | null }
+  | { type: "plan"; entries: { content: string; status: string }[] }
+  | { type: "permission"; key: number; title: string; detail: string; options: AcpPermOption[] }
+  | { type: "usage"; used: number; size: number };
 
 export const api = {
   /** 조회 결과 컬럼 → 설명 (자동완성 캐시로만) */
@@ -173,6 +190,22 @@ export const api = {
     return invoke<AiAnswer>("ai_ask", { args, onEvent: ch });
   },
   aiCancel: (requestId: number) => invoke<void>("ai_cancel", { requestId }),
+  acpAgents: () => invoke<AcpAgent[]>("acp_agents"),
+  acpSaveAgent: (agent: AcpAgent, originalName?: string) => invoke<void>("acp_save_agent", { agent, originalName }),
+  acpDeleteAgent: (name: string) => invoke<void>("acp_delete_agent", { name }),
+  acpAckRemote: (name: string) => invoke<void>("acp_ack_remote", { name }),
+  /** 저장하지 않은 설정으로 따로 띄워 initialize 만 — 에이전트 이름·버전, 로그인 방법 */
+  acpTestAgent: (agent: AcpAgent) => invoke<{ agent: { name?: string; version?: string } | null; auth: string[]; path: string }>("acp_test_agent", { agent }),
+  acpNewSession: (agent: string) => invoke<AcpSession>("acp_new_session", { agent }),
+  acpSetOption: (agent: string, sessionId: string, configId: string, value: string) =>
+    invoke<AcpConfigOption[]>("acp_set_option", { agent, sessionId, configId, value }),
+  acpPrompt: (agent: string, sessionId: string, text: string, onEvent: (e: AcpEvent) => void) => {
+    const ch = new Channel<AcpEvent>();
+    ch.onmessage = onEvent;
+    return invoke<{ stop_reason: string; usage: unknown }>("acp_prompt", { agent, sessionId, text, onEvent: ch });
+  },
+  acpCancel: (agent: string, sessionId: string) => invoke<void>("acp_cancel", { agent, sessionId }),
+  acpPermission: (agent: string, key: number, optionId: string | null) => invoke<void>("acp_permission", { agent, key, optionId }),
   /** 모델 측정 — 결과를 공급자 설정에 남긴다 */
   aiProbe: (name: string) => invoke<ModelProfile>("ai_probe", { name }),
   /** 서버 파싱을 통과한 AI 의 SQL 을 에디터에 넣었을 때 — 내 쿼리 예시로 쌓는다 */

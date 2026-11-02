@@ -124,7 +124,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 
 /* ── 탭 — 크롬처럼: 위가 둥근 탭, 고른 탭은 아래 편집기와 이어지고(밑 모서리가 바깥으로 휜다), 탭 사이는 짧은 세로선 ── */
 .tabs { display: flex; align-items: flex-end; overflow-x: auto; overflow-y: hidden; padding: 5px 8px 0; scrollbar-width: none; }
-.tab { position: relative; display: flex; align-items: center; gap: 4px; height: 30px; max-width: 240px; padding: 0 6px 0 12px; border-radius: 8px 8px 0 0;
+.tab { position: relative; display: flex; align-items: center; gap: 4px; height: 30px; max-width: 240px; min-width: 110px; flex-shrink: 1; padding: 0 6px 0 12px; border-radius: 8px 8px 0 0;
   /* 위 테두리는 접속 색 (tab.ts 가 색을 넣는다) */
   border-top: 2px solid transparent; cursor: default; white-space: nowrap; color: var(--dim);
   background-image: linear-gradient(var(--line), var(--line)); background-size: 1px 16px; background-position: right center; background-repeat: no-repeat; }
@@ -648,7 +648,7 @@ dialog.imp { width: min(1100px, 95vw); }
 
 /* ── 우클릭 메뉴 ── */
 .ctx-menu { position: fixed; z-index: 2000; /* CodeMirror 찾기 패널(300)·자동완성 위로 */  min-width: 200px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
-  box-shadow: 0 6px 22px rgba(0,0,0,.2); padding: 4px 0; font-size: 12px; user-select: none; }
+  box-shadow: 0 6px 22px rgba(0,0,0,.2); padding: 4px 0; font-size: 12px; user-select: none; max-height: calc(100vh - 8px); overflow-y: auto; }
 .ctx-item { display: flex; align-items: center; gap: 16px; padding: 4px 12px; cursor: default; white-space: nowrap; }
 .ctx-item.on { background: var(--sel); }
 .ctx-item.disabled { color: var(--dim); opacity: .6; }
@@ -1084,6 +1084,9 @@ dialog.modal.vt-modal .modal-buttons { margin-top: 8px; }
 /* 탭들은 탭 폭만큼만 — "+" 가 마지막 탭 바로 옆에 붙는다. 탭이 넘치면 탭들만 줄어들며 스크롤하고 "+" 는 남는다 */
 .tabs-row .tabs { flex: 0 1 auto; min-width: 0; border-bottom: none; }
 .tab-plus { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; margin: 0 0 3px 2px; padding: 0; border: none; border-radius: 50%; background: none; font-size: 17px; line-height: 1; color: var(--dim); cursor: pointer; }
+/* 탭 목록 단추 — 줄 맨 오른쪽 */
+.tab-list { flex: none; margin: 0 6px 3px auto; width: 26px; height: 26px; padding: 0; border: none; border-radius: 50%; background: none; color: var(--dim); font-size: 12px; cursor: pointer; }
+.tab-list:hover { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
 .tab-plus:hover:not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
 .tab { user-select: none; }
 /* 탭 끌기: 원래 탭은 제자리에서 흐리게, 복제본이 마우스를 따라다니고, 놓일 자리에 파란 선 */

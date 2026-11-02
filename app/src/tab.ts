@@ -33,6 +33,8 @@ export class Tab {
   private paneBtns = new Map<Pane, HTMLElement>();
   private panes = new Map<Pane, HTMLElement>();
   conn: Conn | null = null;
+  /** 마지막으로 접속했던 프로필 — 끊긴 뒤(앱을 다시 연 뒤 포함)에도 남아 '탭 모두 다시 접속' 이 쓴다 */
+  lastProfile: string | null = null;
   filePath: string | null = null;
   encoding = "utf-8";
   /** 읽은 파일의 줄 끝 — 저장할 때 되돌린다 (편집기 안은 \n). CRLF 파일을 LF 로 바꿔 Git 에서 모든 줄이 바뀐 것처럼 보이지 않게 */
@@ -265,11 +267,13 @@ export class Tab {
 
   title() {
     const file = this.filePath ? this.filePath.split(/[\\/]/).pop() : `새 문서 ${this.id}`;
-    return `${this.dirty ? "● " : ""}${file}${this.conn ? ` — ${this.conn.profile}` : ""}`;
+    const prof = this.conn ? ` — ${this.conn.profile}` : this.lastProfile ? ` — ${this.lastProfile} (끊김)` : "";
+    return `${this.dirty ? "● " : ""}${file}${prof}`;
   }
 
   refreshTitle() {
     (this.tabEl.querySelector(".tab-title") as HTMLElement).textContent = this.title();
+    this.tabEl.title = this.title(); // 줄어든 탭은 제목이 잘리므로 마우스를 올리면 전체를 보인다
     this.tabEl.style.borderTopColor = this.conn?.color ?? "transparent";
     // 커밋하지 않은 변경 — 다른 탭을 보고 있어도 알 수 있게 탭과 에디터 위에
     const txn = !!this.conn && this.txnPending;

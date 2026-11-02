@@ -50,6 +50,8 @@ export class App {
   private tabStrip = h("div", { class: "tabs" });
   /** 탭 옆의 "+" — 새 탭 (지금 탭과 같은 접속으로) */
   private plusBtn = h("button", { class: "tab-plus", title: "새 탭 (같은 접속으로)", onclick: () => this.newTab(true) }, "+");
+  // 탭이 넘쳐 안 보일 때 — 열린 탭 전체를 목록으로 보고 고른다
+  private tabListBtn = h("button", { class: "tab-list", title: "열린 탭 목록", onclick: () => this.showTabList() }, "▾");
   /** 탭을 끌어 옮긴 직후의 클릭은 탭을 고르는 것이 아니다 */
   tabJustDragged = false;
   private tabBodies = h("div", { class: "tab-bodies" });
@@ -170,7 +172,13 @@ export class App {
       insertSql: (s) => this.active?.editor.insert(s),
       replaceSql: (s) => this.replaceStatement(s),
     });
-    const center = h("section", { class: "center" }, h("div", { class: "tabs-row" }, this.tabStrip, this.plusBtn), this.tabBodies);
+    const center = h("section", { class: "center" }, h("div", { class: "tabs-row" }, this.tabStrip, this.plusBtn, this.tabListBtn), this.tabBodies);
+    // 스크롤바를 숨겨 두었으니, 넘친 탭은 휠(세로)로 가로로 넘긴다
+    this.tabStrip.addEventListener("wheel", (e) => {
+      if (this.tabStrip.scrollWidth <= this.tabStrip.clientWidth) return;
+      e.preventDefault();
+      this.tabStrip.scrollLeft += Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+    }, { passive: false });
     const main = h("main", { class: "layout" });
     this.layout = new SideLayout(main, browser, center, this.ai.el, (side, open) => {
       this.btn[side === "left" ? "toggleBrowser" : "toggleAi"]?.classList.toggle("active", open);
@@ -238,13 +246,13 @@ export class App {
   private async saveTabs(force = false) {
     if (this.savingTabs || !restoreEnabled() || !this.tabs.length) return;
     const active = Math.max(0, this.active ? this.tabs.indexOf(this.active) : 0);
-    const sig = [active, ...this.tabs.flatMap((t) => [t.editor.view.state.doc, t.filePath, t.dirty, t.encoding, t.conn?.profile ?? null])];
+    const sig = [active, ...this.tabs.flatMap((t) => [t.editor.view.state.doc, t.filePath, t.dirty, t.encoding, t.conn?.profile ?? t.lastProfile])];
     if (!force && sig.length === this.savedTabsSig.length && sig.every((x, i) => x === this.savedTabsSig[i])) return;
     this.savingTabs = true;
     try {
       await saveSession(active, this.tabs.map((t) => ({
         text: t.editor.text(), filePath: t.filePath, encoding: t.encoding, eol: t.eol, dirty: t.dirty,
-        cursor: t.editor.cursor(), profile: t.conn?.profile ?? null,
+        cursor: t.editor.cursor(), profile: t.conn?.profile ?? t.lastProfile,
       })));
       this.savedTabsSig = sig;
     } catch { /* 다음 차례에 다시 */ } finally {
@@ -276,6 +284,7 @@ export class App {
       t.encoding = encoding;
       t.eol = eol;
       t.setDirty(dirty);
+      t.lastProfile = st.profile ?? null;
       t.refreshTitle();
       t.editor.view.dispatch({ selection: { anchor: Math.min(st.cursor, t.editor.view.state.doc.length) }, scrollIntoView: true });
       if (dirty) unsaved++;
@@ -289,6 +298,8 @@ export class App {
       this.refresh();
     }
     if (unsaved) toast(`지난번 저장하지 않은 탭 ${unsaved}개를 되살렸습니다 (접속은 다시 하세요)`, "info", 6000);
+    const n = this.reconnectTargets().length;
+    if (n) toast(`접속이 끊긴 탭 ${n}개 — 접속 메뉴(또는 탭 목록 ▾)의 '탭 모두 다시 접속' 으로 한 번에 접속합니다`, "info", 8000);
   }
 
   /** 선택 영역, 없으면 커서 위치 문장을 정리한다. 실행 취소 한 번으로 되돌린다. */
@@ -452,7 +463,6 @@ export class App {
     this.enableTabDrag(t);
     this.tabBodies.append(t.root);
     this.activate(t);
-    t.tabEl.scrollIntoView({ inline: "nearest", block: "nearest" });
     if (sameConnection && prev?.conn) this.connect(t, prev.conn.profile);
     return t;
   }
@@ -475,6 +485,7 @@ export class App {
       x.root.hidden = x !== t;
       x.tabEl.classList.toggle("active", x === t);
     }
+    t.tabEl.scrollIntoView({ inline: "nearest", block: "nearest" });
     if (t.conn) this.profileSel.value = t.conn.profile;
     this.compBadge.textContent = "";
     if (t.conn) api.completionStatus(t.conn.id).then((s) => this.showCompletionStatus(s)).catch(() => {});
@@ -482,6 +493,22 @@ export class App {
     if (t.conn) this.loadBrowser();
     else this.browserList.replaceChildren(h("div", { class: "empty" }, "접속하면 객체 목록이 나옵니다"));
     t.editor.focus();
+  }
+
+  private showTabList() {
+    const r = this.tabListBtn.getBoundingClientRect();
+    const items: MenuItem[] = [
+      { title: `열린 탭 ${this.tabs.length}개` },
+      ...this.tabs.map((t): MenuItem => ({ label: `${t === this.active ? "✓ " : ""}${t.title()}`, run: () => this.activate(t) })),
+      { sep: true },
+      this.reconnectAllItem(),
+    ];
+    showMenu(r.left, r.bottom + 2, items);
+  }
+
+  reconnectAllItem(): MenuItem {
+    const n = this.reconnectTargets().length;
+    return { label: `탭 모두 다시 접속${n ? ` (${n}개)` : ""}`, disabled: !n || this.reconnecting, run: () => void this.reconnectAll() };
   }
 
   async closeTab(t: Tab) {
@@ -524,18 +551,24 @@ export class App {
     await this.connect(t, name);
   }
 
-  async connect(t: Tab, profileName: string) {
+  /**
+   * 탭을 프로필로 접속한다. batch 면 (탭 모두 다시 접속) 입력한 비밀번호를 프로필별로 batch.pw 에 두어 다음 탭에 쓰고,
+   * 실패는 창을 띄우지 않고 글로 돌려준다 ("cancel" = 비밀번호 입력 취소)
+   */
+  async connect(t: Tab, profileName: string, batch?: { pw: Map<string, { password: string; remember: boolean }> }): Promise<string | null> {
     const p = this.profiles.find((x) => x.name === profileName);
-    if (!p) return toast("접속 프로필을 고르세요", "error");
+    if (!p) { toast("접속 프로필을 고르세요", "error"); return "프로필 없음"; }
     localStorage.setItem("profile", p.name);
     if (t.conn) await this.disconnect(t);
     this.status(`${p.name} 접속 중…`);
-    let password: string | undefined;
-    let remember = false;
+    let password = batch?.pw.get(p.name)?.password;
+    let remember = batch?.pw.get(p.name)?.remember ?? false;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const c = await api.connect(p.name, password, remember);
+        if (password != null) batch?.pw.set(p.name, { password, remember });
         t.conn = { ...c, profile: p.name, at: Date.now() };
+        t.lastProfile = p.name;
         t.txnPending = false;
         t.refreshTitle();
         t.log(`접속: ${c.user}@${c.connect_string} — ${c.server_version}${c.read_only ? " (읽기 전용)" : ""}`, "ok");
@@ -545,22 +578,59 @@ export class App {
           this.loadBrowser();
           api.completionStatus(c.id).then((s) => this.showCompletionStatus(s)).catch(() => {});
         }
-        return;
+        return null;
       } catch (e) {
         const err = errOf(e);
         if (err.kind === "password_required" || err.ora_code === 1017) {
           if (err.ora_code === 1017) toast("비밀번호가 틀렸습니다 (ORA-01017)", "error");
           const pw = await passwordBox(p.name, p.user);
-          if (pw == null) { this.status("접속 취소"); return; }
+          if (pw == null) { this.status("접속 취소"); return "cancel"; }
           password = pw.password;
           remember = pw.remember;
           continue;
         }
         this.status("접속 실패");
+        if (batch) return err.message;
         await alertBox("접속 실패", hintFor(err));
-        return;
+        return err.message;
       }
     }
+    return "비밀번호가 세 번 틀렸습니다";
+  }
+
+  /** 접속이 없는데 전에 접속했던 프로필이 남아 있는 탭 */
+  reconnectTargets() {
+    return this.tabs.filter((t) => !t.conn && !t.recovering && t.lastProfile && this.profiles.some((p) => p.name === t.lastProfile));
+  }
+
+  private reconnecting = false;
+
+  /** 끊긴 탭을 모두 마지막 프로필로 다시 접속한다 — 한 탭씩 차례로. 같은 프로필 비밀번호는 한 번만 묻는다 */
+  async reconnectAll() {
+    if (this.reconnecting) return;
+    const targets = this.reconnectTargets();
+    if (!targets.length) { toast("다시 접속할 탭이 없습니다 (전에 접속했던 끊긴 탭만 대상)", "info"); return; }
+    this.reconnecting = true;
+    const batch = { pw: new Map<string, { password: string; remember: boolean }>() };
+    const skipped = new Set<string>(); // 비밀번호 입력을 취소한 프로필 — 나머지 탭도 건너뛴다
+    const failed: string[] = [];
+    let ok = 0;
+    try {
+      for (const [i, t] of targets.entries()) {
+        const prof = t.lastProfile!;
+        if (t.conn || !this.tabs.includes(t) || skipped.has(prof)) continue;
+        this.status(`탭 다시 접속 ${i + 1}/${targets.length} — ${prof}`);
+        const err = await this.connect(t, prof, batch);
+        if (!err) ok++;
+        else if (err === "cancel") skipped.add(prof);
+        else { failed.push(`${t.title()}: ${err}`); t.log(`다시 접속 실패: ${err}`, "err"); }
+      }
+    } finally {
+      this.reconnecting = false;
+    }
+    this.status(`탭 다시 접속 — ${ok}개 접속${failed.length ? `, ${failed.length}개 실패` : ""}${skipped.size ? `, ${[...skipped].join("·")} 건너뜀` : ""}`);
+    if (failed.length) await alertBox("일부 탭 접속 실패", failed.join("\n"));
+    else if (ok) toast(`탭 ${ok}개를 다시 접속했습니다`, "ok");
   }
 
   /** 끊긴 탭을 같은 프로필로 다시 접속한다 — 묻지 않고 (비밀번호는 기억한 것). 실행은 다시 하지 않는다 */

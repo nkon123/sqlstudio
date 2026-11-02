@@ -5,31 +5,30 @@ import { type MenuItem } from "./ctxmenu";
 import { showShortcuts } from "./shortcuts";
 import { openPalette, type Command } from "./palette";
 import { toast } from "./ui";
-import { groupLeaf, groupTree, withGroup, type GroupNode } from "./conngroups";
+import { groupLabel, groupTree, withGroup, type GroupNode } from "./conngroups";
 import type { Profile } from "./api";
 import type { App } from "./main";
 
 /** 접속 메뉴 — 프로필을 고르면 접속 (이미 접속한 탭에서 다른 프로필이면 새 탭), 다시 접속, 끊기, 접속 관리 */
 export function connMenu(app: App): MenuItem[] {
   const c = app.active?.conn;
+  const again = c?.profile ?? app.active?.lastProfile; // 끊긴 탭은 마지막 프로필로
   const pick = (name: string) => { app.profileSel.value = name; void app.connectActive(); };
+  // 하위 메뉴로 파고들지 않게 접속마다 한 줄 — 그룹 경로(ERP / 운영)는 오른쪽에. 순서는 그룹 나무 순서, 그룹 없는 접속은 끝에
   const item = (p: Profile): MenuItem => ({
-    label: `${c?.profile === p.name ? "● " : ""}${p.name}`, hint: p.read_only ? "읽기 전용" : "",
+    label: `${c?.profile === p.name ? "● " : ""}${p.name}`,
+    hint: [p.group ? groupLabel(p.group) : "", p.read_only ? "읽기 전용" : ""].filter(Boolean).join(" · "),
     disabled: app.btn.connect.disabled, run: () => pick(p.name),
   });
-  // 그룹은 하위 메뉴로 — 지금 접속이 들어 있는 그룹에 ● 표시
-  const has = (n: GroupNode): boolean => n.profiles.some((p) => p.name === c?.profile) || n.children.some(has);
-  const group = (n: GroupNode): MenuItem => {
-    const sub = [...n.children.map(group), ...(n.children.length && n.profiles.length ? [{ sep: true } as MenuItem] : []), ...n.profiles.map(item)];
-    return { label: `${has(n) ? "● " : ""}${groupLeaf(n.group.path)}`, sub: sub.length ? sub : [{ label: "접속 없음", disabled: true }] };
-  };
+  const flat = (n: GroupNode): Profile[] => [...n.profiles, ...n.children.flatMap(flat)];
   const { roots, loose } = groupTree(app.groups, app.profiles);
   return [
     { title: c ? "다른 접속은 새 탭에서 엽니다" : "접속할 프로필" },
-    ...(app.profiles.length ? [...roots.map(group), ...loose.map(item)] : [{ label: "프로필 없음 — 설정에서 추가", disabled: true } as MenuItem]),
+    ...(app.profiles.length ? [...roots.flatMap(flat), ...loose].map(item) : [{ label: "프로필 없음 — 설정에서 추가", disabled: true } as MenuItem]),
     { sep: true },
-    { label: "다시 접속", disabled: !c || app.btn.connect.disabled, run: () => { if (c) pick(c.profile); } },
+    { label: "다시 접속", disabled: !again || app.btn.connect.disabled, run: () => { if (again) pick(again); } },
     { label: "끊기", disabled: app.btn.disconnect.disabled, run: () => app.disconnectActive() },
+    app.reconnectAllItem(),
     { sep: true },
     { label: "접속 관리…", run: () => void app.settings() },
   ];

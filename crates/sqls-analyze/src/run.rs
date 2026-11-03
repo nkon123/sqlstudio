@@ -72,6 +72,11 @@ pub fn analysis_key(c: &chunk::Chunk, cfg: &ProviderConfig, lang: Lang, extra: &
     }
 }
 
+/// 저장된 답을 그대로 써도 되는지 — 한국어인데 한자·가나가 섞여 있으면 다시 묻는다 (예전 답, 한국어로 다시 쓰기에 실패한 답)
+fn settled(lang: Lang, ins: Option<&Insight>) -> bool {
+    lang != Lang::Ko || ins.is_none_or(|i| llm::foreign_chars(i) == 0)
+}
+
 /// 한 단위를 도는 동안 같이 쓰는 것
 struct RunCtx<'a> {
     store: &'a Store,
@@ -124,7 +129,7 @@ async fn run_chunk(rc: &RunCtx<'_>, c: &chunk::Chunk, extra: &str) -> Result<Chu
     let ak = analysis_key(c, cfg, rc.opts.lang, extra);
     if !rc.opts.force {
         if let Some(old) = rc.store.read_chunk(&rc.key, &c.id) {
-            if old.analysis_key.as_deref() == Some(ak.as_str()) && old.error.is_none() && old.insight.is_some() {
+            if old.analysis_key.as_deref() == Some(ak.as_str()) && old.error.is_none() && old.insight.is_some() && settled(rc.opts.lang, old.insight.as_ref()) {
                 rc.cached.fetch_add(1, Ordering::Relaxed);
                 report("cached", 0, None);
                 return Ok(old);
@@ -374,7 +379,7 @@ async fn cursor_meaning(ss: &mut SumState, owner: &chunk::Chunk, s: &crate::flow
     let k = fnv(&[&body, &model]);
     let prev = ss.prev.iter().find(|x| x.line == s.line && x.kind == "CURSOR").cloned();
     let summary = match prev {
-        Some(p) if ss.keys.get(&rk) == Some(&k) && !opts.force => Some(p.summary),
+        Some(p) if ss.keys.get(&rk) == Some(&k) && !opts.force && settled(opts.lang, Some(&p.summary)) => Some(p.summary),
         _ => {
             on(Event::Rollup { key: plan.key.clone(), what: format!("커서 {name}") });
             let sys = llm::rollup_system(opts.lang, "one SQL cursor (what rows it returns)");
@@ -545,7 +550,7 @@ async fn sql_rollups(ss: &mut SumState, chunks: &[ChunkResult], pick: impl Fn(&c
         let k = fnv(&[&body, &model]);
         let prev = ss.prev.iter().find(|x| x.line == st.line && x.kind == st.kind).cloned();
         let summary = match prev {
-            Some(p) if ss.keys.get(&rk) == Some(&k) && !opts.force => Some(p.summary),
+            Some(p) if ss.keys.get(&rk) == Some(&k) && !opts.force && settled(opts.lang, Some(&p.summary)) => Some(p.summary),
             _ => {
                 on(Event::Rollup { key: unit_key.to_string(), what: format!("SQL {label}") });
                 let sys = llm::rollup_system(opts.lang, "one SQL statement (what rows it selects or changes, from which tables, under which conditions)");
@@ -605,7 +610,7 @@ async fn rollups(unit: &mut UnitResult, chunks: &[ChunkResult], l: &Llm<'_>, opt
         }
         let rk = format!("{}#{}", s.path, s.overload);
         let k = fnv(&[&body, &model]);
-        if unit.rollup_keys.get(&rk) == Some(&k) && s.summary.is_some() && !opts.force {
+        if unit.rollup_keys.get(&rk) == Some(&k) && s.summary.is_some() && !opts.force && settled(opts.lang, s.summary.as_ref()) {
             continue;
         }
         on(Event::Rollup { key: unit.key.clone(), what: s.path.clone() });
@@ -653,7 +658,7 @@ async fn rollups(unit: &mut UnitResult, chunks: &[ChunkResult], l: &Llm<'_>, opt
     let head = format!("Describe the whole unit {} {}.{} from its parts.\n", unit.unit_type, unit.owner, unit.name);
     let all = items.concat();
     let k = fnv(&[&all, &model]);
-    if unit.rollup_keys.get("_unit") == Some(&k) && unit.summary.is_some() && !opts.force {
+    if unit.rollup_keys.get("_unit") == Some(&k) && unit.summary.is_some() && !opts.force && settled(opts.lang, unit.summary.as_ref()) {
         return;
     }
     on(Event::Rollup { key: unit.key.clone(), what: "(단위)".into() });

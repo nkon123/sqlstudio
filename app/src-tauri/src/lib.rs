@@ -313,6 +313,7 @@ pub fn run() {
             acp::acp_test_agent,
             acp::acp_new_session,
             acp::acp_set_option,
+            acp::acp_model_context,
             acp::acp_prompt,
             acp::acp_cancel,
             acp::acp_permission,

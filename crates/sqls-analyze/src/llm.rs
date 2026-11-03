@@ -65,6 +65,46 @@ pub enum Lang {
     En,
 }
 
+/// 한국어로 답하라는 줄. 그래도 한자·가나가 섞이면 (작은 모델·중국계 모델이 가끔 낱말을 중국어로 쓴다) 마지막에 한국어로 다시 쓰게 한다 — `ask`
+const KO_LINE: &str = "Write every text value in Korean (한국어, Hangul). Never write Chinese characters (汉字/漢字) or Japanese — write Korean, or keep the English term.";
+
+/// 한국어 답에 섞이면 안 되는 글자 — 한자(CJK)·가나
+fn is_foreign(c: char) -> bool {
+    matches!(c, '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}')
+}
+
+/// 따옴표 밖의 한자·가나 수 — 코드에 적힌 글(오류 메시지 '库存不足' 등)을 그대로 옮긴 것은 세지 않는다
+fn foreign_in(s: &str) -> usize {
+    let mut quote: Option<char> = None;
+    let mut n = 0;
+    for c in s.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if matches!(c, '\'' | '"' | '`') => quote = Some(c),
+            None => n += is_foreign(c) as usize,
+        }
+    }
+    n
+}
+
+/// 답 전체의 (따옴표 밖) 한자·가나 수
+pub fn foreign_chars(ins: &Insight) -> usize {
+    foreign_in(&ins.summary) + ins.steps.iter().chain(&ins.rules).map(|t| foreign_in(t)).sum::<usize>() + ins.risks.iter().map(|r| foreign_in(&r.issue)).sum::<usize>()
+}
+
+/// 한국어로 다시 쓰기 — 한자·가나가 섞인 답을 같은 모양의 JSON 으로. 덜 섞였을 때만 바꾼다
+async fn to_korean(client: &Client, cfg: &ProviderConfig, ins: &Insight, lo: u32, hi: u32, schema_ok: bool) -> Option<Insight> {
+    let system = "You fix the language of a JSON analysis of Oracle PL/SQL code.\n\
+         Rewrite every text value in natural Korean (한국어, Hangul). Replace every Chinese (汉字) or Japanese word with Korean.\n\
+         Keep code identifiers, SQL, quoted literals and line numbers exactly as they are. Keep the same JSON shape and the same items.\n\
+         Reply with ONLY the JSON object.";
+    let req = ChatRequest { system: system.into(), messages: vec![Message::user(serde_json::to_string(ins).ok()?)], json_schema: schema_ok.then(schema) };
+    let resp = client.chat(cfg, &req, |_| {}).await.ok()?;
+    let fixed = parse_insight(&resp.text, lo, hi, &mut Vec::new())?;
+    (!fixed.summary.is_empty() && foreign_chars(&fixed) < foreign_chars(ins)).then_some(fixed)
+}
+
 fn schema() -> Value {
     json!({
         "type": "object",
@@ -89,7 +129,7 @@ fn schema() -> Value {
 
 fn system(lang: Lang) -> String {
     let lang_line = match lang {
-        Lang::Ko => "Write every text value in Korean (한국어).",
+        Lang::Ko => KO_LINE,
         Lang::En => "Write every text value in English.",
     };
     format!(
@@ -403,6 +443,8 @@ async fn ask(client: &Client, cfg: &ProviderConfig, mut req: ChatRequest, lo: u3
     // 조각 답은 짧다. 긴 답(같은 말 반복)을 끊는다.
     cfg.max_tokens = cfg.max_tokens.min(2048);
     let mut last_raw = String::new();
+    // 지시문으로 언어를 안다 — 조각·요약 지시문 모두 KO_LINE 을 쓴다
+    let ko = req.system.contains(KO_LINE);
     for attempt in 1..=3u32 {
         meta.attempts = attempt;
         let resp = match client.chat(&cfg, &req, |_| {}).await {
@@ -423,9 +465,20 @@ async fn ask(client: &Client, cfg: &ProviderConfig, mut req: ChatRequest, lo: u3
             return Err(AskError::Unreadable { raw: "(모델이 답을 거절했습니다)".into(), meta });
         }
         let mut rep = Vec::new();
-        if let Some(ins) = parse_insight(&resp.text, lo, hi, &mut rep) {
+        if let Some(mut ins) = parse_insight(&resp.text, lo, hi, &mut rep) {
             if !ins.summary.is_empty() || !ins.steps.is_empty() {
                 meta.repaired.extend(rep);
+                // 마지막 정리 — 한국어로 물었는데 한자·가나가 섞였으면 한 번 더 물어 한국어로
+                let n = foreign_chars(&ins);
+                if ko && n > 0 {
+                    match to_korean(client, &cfg, &ins, lo, hi, req.json_schema.is_some()).await {
+                        Some(fixed) => {
+                            meta.repaired.push(format!("한자·가나 {n}자 섞임 → 한국어로 다시 씀 (남은 것 {})", foreign_chars(&fixed)));
+                            ins = fixed;
+                        }
+                        None => meta.repaired.push(format!("한자·가나 {n}자 섞임 — 한국어로 다시 쓰지 못함")),
+                    }
+                }
                 meta.elapsed_ms = started.elapsed().as_millis() as u64;
                 return Ok((ins, meta));
             }
@@ -455,7 +508,7 @@ async fn ask(client: &Client, cfg: &ProviderConfig, mut req: ChatRequest, lo: u3
 /// 서브프로그램 요약 (여러 조각) / 단위 요약 / 통합 요약에 쓰는 지시문
 pub fn rollup_system(lang: Lang, what: &str) -> String {
     let lang_line = match lang {
-        Lang::Ko => "Write every text value in Korean (한국어).",
+        Lang::Ko => KO_LINE,
         Lang::En => "Write every text value in English.",
     };
     format!(

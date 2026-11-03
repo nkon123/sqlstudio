@@ -876,6 +876,80 @@ pub async fn acp_set_option(st: State<'_, AppState>, agent: String, session_id: 
     Ok(r.get("configOptions").cloned().unwrap_or(Value::Array(vec![])))
 }
 
+/// 에이전트 모델의 컨텍스트 크기와 거기서 정한 분석 조각 줄 수 (모르면 None)
+#[derive(Serialize)]
+pub struct ModelContext {
+    model: Option<String>,
+    context: Option<u32>,
+    lines: Option<u32>,
+}
+
+/// 분석 조각 크기를 정하려고 — ACP 는 모델의 컨텍스트 크기를 알려 주지 않아, opencode 는 `opencode models <공급자> --verbose` 로 읽는다.
+/// 다른 에이전트는 모른다
+#[tauri::command]
+pub async fn acp_model_context(st: State<'_, AppState>, agent: String) -> R<ModelContext> {
+    let acfg = agent_cfg(&st, &agent)?;
+    let unknown = |model: Option<String>| ModelContext { model, context: None, lines: None };
+    let Some(path) = resolve(&acfg.command).filter(|p| p.file_stem().is_some_and(|s| s.eq_ignore_ascii_case("opencode"))) else { return Ok(unknown(acfg.model.clone())) };
+    let model = match acfg.model.clone().filter(|m| !m.is_empty()) {
+        Some(m) => m,
+        None => {
+            // 고르지 않았으면 에이전트의 기본 모델 — 세션을 하나 열어 본다 (분석이 곧 쓸 프로세스를 미리 띄우는 셈)
+            let a = st.acp.get(&acfg, &|_| {}).await?;
+            let r = a.request("session/new", json!({ "cwd": work_dir(&acfg)?, "mcpServers": [] }), Some(CALL_TIMEOUT)).await?;
+            match r["configOptions"].as_array().and_then(|v| v.iter().find(|o| o["id"] == "model")).and_then(|o| o["currentValue"].as_str()) {
+                Some(m) => m.to_string(),
+                None => return Ok(unknown(None)),
+            }
+        }
+    };
+    let context = opencode_context(&path, &acfg, &model).await;
+    Ok(ModelContext { lines: context.map(auto_lines), model: Some(model), context })
+}
+
+/// 모델 → 컨텍스트 크기 (한 번 읽으면 앱을 끌 때까지)
+static CONTEXTS: std::sync::LazyLock<Mutex<HashMap<String, u32>>> = std::sync::LazyLock::new(Default::default);
+
+async fn opencode_context(path: &Path, acfg: &AcpAgentConfig, model: &str) -> Option<u32> {
+    if let Some(n) = CONTEXTS.lk().get(model) {
+        return Some(*n);
+    }
+    let (provider, _) = model.split_once('/')?;
+    let mut c = tokio::process::Command::new(path);
+    c.args(["models", provider, "--verbose"]);
+    if acfg.pure {
+        c.arg("--pure");
+    }
+    c.current_dir(work_dir(acfg).ok()?).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    #[cfg(windows)]
+    c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let out = tokio::time::timeout(Duration::from_secs(90), c.output()).await.ok()?.ok()?;
+    let n = parse_context(&String::from_utf8_lossy(&out.stdout), model)?;
+    CONTEXTS.lk().insert(model.to_string(), n);
+    Some(n)
+}
+
+/// `opencode models --verbose` 의 출력 — "공급자/모델" 한 줄 뒤에 JSON 객체 (닫는 `}` 가 맨 앞에 오는 줄까지)
+fn parse_context(out: &str, model: &str) -> Option<u32> {
+    let mut it = out.lines().skip_while(|l| l.trim() != model).skip(1);
+    let mut body = String::new();
+    for l in it.by_ref() {
+        body.push_str(l);
+        body.push('\n');
+        if l.starts_with('}') {
+            break;
+        }
+    }
+    let v: Value = serde_json::from_str(&body).ok()?;
+    v["limit"]["context"].as_u64().filter(|&n| n > 0).map(|n| n.min(u32::MAX as u64) as u32)
+}
+
+/// 컨텍스트에서 조각 줄 수 — 에이전트 자신의 지시문·도구 설명(약 1만 토큰)을 빼고 남은 것의 1/4 을 조각에, 한 줄 ≈ 15 토큰.
+/// 20~400 줄 (화면에서 고르는 범위) — 큰 모델이라도 조각이 너무 크면 요약이 거칠어진다
+fn auto_lines(context: u32) -> u32 {
+    (context.saturating_sub(10_000) / 4 / 15).clamp(20, 400)
+}
+
 #[derive(Serialize)]
 pub struct PromptDone {
     /// end_turn · max_tokens · max_turn_requests · refusal · cancelled
@@ -925,6 +999,28 @@ mod tests {
     fn clip_counts_chars() {
         assert_eq!(clip("가나다라", 2), "가나…");
         assert_eq!(clip("ab", 5), "ab");
+    }
+
+    #[test]
+    fn model_context_from_opencode_models() {
+        let out = "opencode/a-free\n{\n  \"id\": \"a-free\",\n  \"limit\": {\n    \"context\": 1048576,\n    \"output\": 131072\n  }\n}\nopencode/b\n{\n  \"id\": \"b\",\n  \"limit\": {\n    \"context\": 32000\n  }\n}\n";
+        assert_eq!(parse_context(out, "opencode/b"), Some(32000));
+        assert_eq!(parse_context(out, "opencode/a-free"), Some(1048576));
+        assert_eq!(parse_context(out, "opencode/none"), None);
+        assert_eq!(auto_lines(8192), 20);
+        assert_eq!(auto_lines(32000), 366);
+        assert_eq!(auto_lines(1048576), 400);
+    }
+
+    /// 실제 opencode 의 기본 모델 컨텍스트 — `cargo test -p sqlstudio acp_live_context -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn acp_live_context() {
+        let acfg = AcpAgentConfig::opencode();
+        let path = resolve(&acfg.command).expect("opencode");
+        let n = opencode_context(&path, &acfg, "opencode/big-pickle").await;
+        eprintln!("opencode/big-pickle: {n:?} → {:?}줄", n.map(auto_lines));
+        assert!(n.is_some_and(|n| n > 0));
     }
 
     #[test]
@@ -981,6 +1077,31 @@ END;";
                 assert!(!ins.summary.is_empty());
             }
             Err(e) => panic!("분석 답을 읽지 못함: {e:?}"),
+        }
+    }
+
+    /// 분석의 사전 대조처럼 한 opencode 에 여러 질문을 같이 — 세션마다 답이 섞이지 않는지.
+    /// `cargo test -p sqlstudio acp_live_parallel -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn acp_live_parallel() {
+        let acfg = AcpAgentConfig::opencode();
+        let acp = Acp::default();
+        let mut cfg = sqls_llm::ProviderConfig::new("acp:opencode", sqls_llm::ProviderKind::OpenaiCompatible, "에이전트 기본 모델");
+        cfg.base_url = Some("acp://opencode".into());
+        let ask = |n: u32| {
+            let req = sqls_llm::ChatRequest { system: "Answer with only the number.".into(), messages: vec![sqls_llm::Message::user(format!("What is {n} + 100?"))], json_schema: None };
+            let (acp, acfg, cfg) = (&acp, &acfg, &cfg);
+            async move { ask_agent(acp, acfg, cfg, &req).await }
+        };
+        let t = std::time::Instant::now();
+        let (a, b, c, d) = tokio::join!(ask(1), ask(2), ask(3), ask(4));
+        eprintln!("4개 같이: {}ms", t.elapsed().as_millis());
+        acp.shutdown_all();
+        for (n, r) in [(1, a), (2, b), (3, c), (4, d)] {
+            let text = r.unwrap_or_else(|e| panic!("{n}: {e:?}")).text;
+            eprintln!("{n} → {text:?}");
+            assert!(text.contains(&format!("{}", n + 100)), "{n} 의 답이 섞였거나 비었다: {text:?}");
         }
     }
 

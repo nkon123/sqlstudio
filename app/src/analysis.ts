@@ -148,6 +148,10 @@ export class AnalysisView {
   private badge = h("span", { class: "badge" });
   private linesIn = h("input", { type: "number", value: "120", min: "20", max: "400", style: "width:64px", title: "조각 하나의 최대 줄 수 — 작은 모델일수록 작게" });
   private jobsIn = h("input", { type: "number", value: "1", min: "1", max: "16", style: "width:48px", title: "동시에 물을 조각 수 (로컬 모델은 보통 1)" });
+  /** 조각 줄 수를 모델에 맞춰 정했을 때 보이는 표시 */
+  private linesAuto = h("span", { class: "muted", hidden: true }, "(자동)");
+  /** 손으로 바꾼 칸 — 공급자를 바꿔도 자동으로 덮지 않는다 */
+  private touched = new Set<HTMLInputElement>();
   private forceBox = h("input", { type: "checkbox" });
   private startBtn = h("button", { class: "primary" }, "분석 시작");
   /** 분석 대상: DB 의 PL/SQL 단위, 또는 폴더의 Pro*C·XML 쿼리 파일 */
@@ -217,7 +221,8 @@ export class AnalysisView {
     this.modeSel.onchange = () => this.setMode(this.modeSel.value === "code" ? "code" : "db");
     this.folderBtn.onclick = () => this.pickFolder();
     this.stopBtn.onclick = () => this.cancel();
-    this.provSel.onchange = () => this.updateBadge();
+    this.provSel.onchange = () => { this.updateBadge(); void this.autoFit(); };
+    for (const i of [this.linesIn, this.jobsIn]) i.addEventListener("input", () => { this.touched.add(i); if (i === this.linesIn) this.linesAuto.hidden = true; });
     this.allBox.onchange = () => {
       for (const r of this.rows) this.allBox.checked ? this.checked.add(keyOf(r)) : this.checked.delete(keyOf(r));
       this.renderList();
@@ -232,7 +237,7 @@ export class AnalysisView {
       h("span", { class: "sep" }),
       this.modeSel, this.ownerIn, this.nameIn, this.folderIn, this.folderBtn, listBtn, h("span", { class: "sep" }),
       this.provSel, this.badge,
-      h("label", { class: "check", title: "조각 하나의 최대 줄 수" }, "조각", this.linesIn, "줄"),
+      h("label", { class: "check", title: "조각 하나의 최대 줄 수" }, "조각", this.linesIn, "줄", this.linesAuto),
       h("label", { class: "check", title: "동시에 물을 조각 수" }, "동시", this.jobsIn),
       h("label", { class: "check", title: "저장된 결과가 있어도 다시 묻는다" }, this.forceBox, "다시"),
       this.startBtn, this.stopBtn,
@@ -308,6 +313,7 @@ export class AnalysisView {
       if (local) this.provSel.value = local.name;
     }
     this.updateBadge();
+    void this.autoFit();
     this.loading(steps, 1);
     await this.refreshSets();
     // 접속이 없으면 이 PC 의 결과 중 하나를 연다
@@ -574,6 +580,30 @@ export class AnalysisView {
 
   private provider(): Provider | undefined {
     return this.providers.find((p) => p.name === this.provSel.value);
+  }
+
+  /** ACP 에이전트면 조각 줄 수를 모델의 컨텍스트 크기로, 동시 수를 4 로 (조각마다 새 대화라 하나씩이면 느리다).
+   *  다른 공급자로 돌아가면 기본값. 손으로 바꾼 칸은 그대로 둔다 */
+  private async autoFit() {
+    const p = this.provSel.value;
+    const set = (i: HTMLInputElement, v: string, title: string) => { if (!this.touched.has(i)) { i.value = v; i.title = title; } };
+    this.linesAuto.hidden = true;
+    if (!p.startsWith("acp:")) {
+      set(this.linesIn, "120", "조각 하나의 최대 줄 수 — 작은 모델일수록 작게");
+      set(this.jobsIn, "1", "동시에 물을 조각 수 (로컬 모델은 보통 1)");
+      return;
+    }
+    set(this.jobsIn, "4", "동시에 물을 조각 수 — ACP 에이전트는 자동 4 (한 에이전트에 대화를 여럿 연다)");
+    if (this.touched.has(this.linesIn)) return;
+    this.linesIn.title = "모델의 컨텍스트 크기를 읽는 중…";
+    const c = await api.acpModelContext(p.slice(4)).catch(() => null);
+    if (this.provSel.value !== p || this.touched.has(this.linesIn)) return;
+    if (c?.lines && c.context) {
+      set(this.linesIn, String(c.lines), `자동 — ${c.model} 컨텍스트 ${Math.round(c.context / 1000)}K 토큰 → ${c.lines}줄 (최대 400). 직접 바꾸면 그 값을 쓴다`);
+      this.linesAuto.hidden = false;
+    } else {
+      this.linesIn.title = `${c?.model ?? "에이전트 모델"} 의 컨텍스트 크기를 알 수 없어 그대로 둔다 (opencode 만 읽을 수 있다)`;
+    }
   }
 
   private updateBadge() {

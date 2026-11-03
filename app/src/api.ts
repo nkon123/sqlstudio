@@ -206,6 +206,8 @@ export const api = {
   /** ACP 답의 SQL 확인 — 걸리면 repair 에 에이전트에게 보낼 고쳐 달라는 글 */
   acpCheckSql: (sessionId: number | undefined, task: Task, text: string, repairs: number, firstProblem: string | null) =>
     invoke<{ step: Step; repair?: string | null; problem?: string | null }>("acp_check_sql", { sessionId: sessionId ?? null, task, text, repairs, firstProblem }),
+  /** 분석 조각 크기용 — 에이전트 모델의 컨텍스트 크기와 거기서 정한 줄 수 (opencode 만, 모르면 null) */
+  acpModelContext: (agent: string) => invoke<{ model: string | null; context: number | null; lines: number | null }>("acp_model_context", { agent }),
   acpSetOption: (agent: string, sessionId: string, configId: string, value: string) =>
     invoke<AcpConfigOption[]>("acp_set_option", { agent, sessionId, configId, value }),
   acpPrompt: (agent: string, sessionId: string, text: string, onEvent: (e: AcpEvent) => void) => {

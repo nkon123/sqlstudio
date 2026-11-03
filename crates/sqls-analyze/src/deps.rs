@@ -521,15 +521,25 @@ async fn ask(client: &Client, cfg: &ProviderConfig, body: String) -> Option<Valu
     None
 }
 
-/// 차이 나는 곳만 LLM 에 묻고 integrated/supplement.json 에 쌓는다 (같은 질문은 다시 묻지 않는다). 새로 물은 수
+/// 한 번에 같이 묻는 수 — ACP 에이전트는 질문 하나에 수 초라 하나씩이면 오래 걸린다
+const PARALLEL: usize = 4;
+
+/// 물을 것 하나 — 사전만이면 table, 동적 SQL 이면 line
+struct Job {
+    unit: String,
+    table: Option<String>,
+    line: Option<u32>,
+    body: String,
+    input: String,
+    say: String,
+}
+
+/// 차이 나는 곳만 LLM 에 묻고 integrated/supplement.json 에 쌓는다 (같은 질문은 다시 묻지 않는다, 몇 개씩 같이 묻는다). 새로 물은 수
 pub async fn supplement(store: &Store, client: &Client, cfg: &ProviderConfig, cancel: &std::sync::atomic::AtomicBool, on: &(dyn Fn(String) + Sync)) -> usize {
+    use futures_util::stream::{self, StreamExt};
     let mut have: Vec<Guess> = store.read_integrated("supplement.json").unwrap_or_default();
-    let units = store.units();
-    let mut asked = 0;
-    for u in &units {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            break;
-        }
+    let mut jobs = Vec::new();
+    for u in &store.units() {
         let Some(ud) = store.read_deps(&u.key) else { continue };
         let lines = source_lines(store, u);
         if lines.is_empty() {
@@ -553,21 +563,7 @@ pub async fn supplement(store: &Store, client: &Client, cfg: &ProviderConfig, ca
             if have.iter().any(|g| g.unit == u.key && g.table.as_deref() == Some(t) && g.input == input) {
                 continue;
             }
-            on(format!("사전 대조: {} — {t} 사용 확인", u.name));
-            let Some(v) = ask(client, cfg, body).await else { continue };
-            asked += 1;
-            let ops = clean_ops(v["ops"].as_str().unwrap_or(""));
-            have.retain(|g| !(g.unit == u.key && g.table.as_deref() == Some(t)));
-            have.push(Guess {
-                unit: u.key.clone(),
-                table: Some(t.clone()),
-                line: None,
-                uses: if ops.is_empty() { vec![] } else { vec![(t.clone(), ops)] },
-                subprogram: v["subprogram"].as_str().filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_uppercase()),
-                reason: v["reason"].as_str().unwrap_or("").to_string(),
-                model: cfg.model.clone(),
-                input,
-            });
+            jobs.push(Job { unit: u.key.clone(), table: Some(t.clone()), line: None, body, input, say: format!("{} — {t} 사용 확인", u.name) });
         }
         // 동적 SQL: 그 줄 주변
         for m in u.facts.dynamic_sql.iter().take(30) {
@@ -576,24 +572,62 @@ pub async fn supplement(store: &Store, client: &Client, cfg: &ProviderConfig, ca
             if have.iter().any(|g| g.unit == u.key && g.line == Some(m.line) && g.input == input) {
                 continue;
             }
-            on(format!("사전 대조: {} — {}행 동적 SQL", u.name, m.line));
-            let Some(v) = ask(client, cfg, body).await else { continue };
-            asked += 1;
-            let uses: Vec<(String, String)> = v["tables"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|t| {
-                    let name = t["name"].as_str()?.trim().trim_matches('"').to_uppercase();
-                    let ops = clean_ops(t["ops"].as_str().unwrap_or(""));
-                    (!name.is_empty() && !ops.is_empty() && name.chars().all(|c| c.is_alphanumeric() || "_$#.".contains(c))).then_some((name, ops))
-                })
-                .collect();
-            have.retain(|g| !(g.unit == u.key && g.line == Some(m.line)));
-            have.push(Guess { unit: u.key.clone(), table: None, line: Some(m.line), uses, subprogram: None, reason: v["reason"].as_str().unwrap_or("").to_string(), model: cfg.model.clone(), input });
+            jobs.push(Job { unit: u.key.clone(), table: None, line: Some(m.line), body, input, say: format!("{} — {}행 동적 SQL", u.name, m.line) });
         }
-        let _ = store.write_integrated("supplement.json", &have);
     }
+    let total = jobs.len();
+    let mut asked = 0;
+    let mut done = 0;
+    let mut answers = stream::iter(jobs)
+        .map(|j| async move {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return (j, None);
+            }
+            let v = ask(client, cfg, j.body.clone()).await;
+            (j, v)
+        })
+        .buffer_unordered(PARALLEL);
+    while let Some((j, v)) = answers.next().await {
+        done += 1;
+        on(format!("사전 대조 {done}/{total}: {}", j.say));
+        let Some(v) = v else { continue };
+        asked += 1;
+        let guess = match &j.table {
+            Some(t) => {
+                let ops = clean_ops(v["ops"].as_str().unwrap_or(""));
+                Guess {
+                    unit: j.unit.clone(),
+                    table: Some(t.clone()),
+                    line: None,
+                    uses: if ops.is_empty() { vec![] } else { vec![(t.clone(), ops)] },
+                    subprogram: v["subprogram"].as_str().filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_uppercase()),
+                    reason: v["reason"].as_str().unwrap_or("").to_string(),
+                    model: cfg.model.clone(),
+                    input: j.input,
+                }
+            }
+            None => {
+                let uses: Vec<(String, String)> = v["tables"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|t| {
+                        let name = t["name"].as_str()?.trim().trim_matches('"').to_uppercase();
+                        let ops = clean_ops(t["ops"].as_str().unwrap_or(""));
+                        (!name.is_empty() && !ops.is_empty() && name.chars().all(|c| c.is_alphanumeric() || "_$#.".contains(c))).then_some((name, ops))
+                    })
+                    .collect();
+                Guess { unit: j.unit.clone(), table: None, line: j.line, uses, subprogram: None, reason: v["reason"].as_str().unwrap_or("").to_string(), model: cfg.model.clone(), input: j.input }
+            }
+        };
+        have.retain(|g| !(g.unit == guess.unit && g.table == guess.table && g.line == guess.line));
+        have.push(guess);
+        // 도중에 멈춰도 받은 답은 남긴다
+        if asked % PARALLEL == 0 || done == total {
+            let _ = store.write_integrated("supplement.json", &have);
+        }
+    }
+    let _ = store.write_integrated("supplement.json", &have);
     asked
 }
 

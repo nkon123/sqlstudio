@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -22,6 +22,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::oneshot;
 
+use crate::ai::Step;
 use crate::state::{AppState, ErrView};
 
 type R<T> = Result<T, ErrView>;
@@ -78,7 +79,7 @@ struct Agent {
     next: AtomicU64,
     pending: Mutex<HashMap<u64, Reply>>,
     /// 세션 → 지금 질문의 화면 채널
-    sinks: Mutex<HashMap<String, Channel<AcpEvent>>>,
+    sinks: Mutex<HashMap<String, Sink>>,
     /// 권한 요청 키 → (세션, 답할 곳). 답이 없이 버려지면 cancelled 로 답한다
     perms: Mutex<HashMap<u64, (String, PermReply)>>,
     stderr: Mutex<VecDeque<String>>,
@@ -86,15 +87,28 @@ struct Agent {
     info: Mutex<Value>,
 }
 
+/// 세션의 일을 받는 쪽 — 화면(채널), 또는 분석(답 글만 모은다 · 권한은 묻지 않고 취소)
+#[derive(Clone)]
+enum Sink {
+    Ui(Channel<AcpEvent>),
+    Collect(Arc<Mutex<String>>),
+}
+
 impl Agent {
-    async fn spawn(cfg: &AcpAgentConfig) -> R<Arc<Self>> {
+    /// 띄우고 initialize 까지 — 단계마다 `on` 으로 알린다 (띄우기 · 초기화)
+    async fn spawn(cfg: &AcpAgentConfig, on: &(impl Fn(Step) + Sync)) -> R<Arc<Self>> {
+        let t0 = Instant::now();
+        on(Step::new("spawn", "띄우기", "run", "", vec![]));
         let path = resolve(&cfg.command).ok_or_else(|| {
             let hint = if cfg.command == "opencode" { " — npm i -g opencode-ai 로 설치하세요" } else { "" };
-            ErrView::msg("acp", format!("'{}' 을(를) 찾을 수 없습니다 (PATH){hint}", cfg.command))
+            let e = format!("'{}' 을(를) 찾을 수 없습니다 (PATH){hint}", cfg.command);
+            on(Step::new("spawn", "띄우기", "fail", "못 찾음", vec![e.clone()]));
+            ErrView::msg("acp", e)
         })?;
         let cwd = work_dir(cfg)?;
+        let args = launch_args(&path, &cfg.args, cfg.pure);
         let mut c = tokio::process::Command::new(&path);
-        c.args(launch_args(&path, &cfg.args))
+        c.args(&args)
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -102,7 +116,14 @@ impl Agent {
             .kill_on_drop(true);
         #[cfg(windows)]
         c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW — 콘솔 창이 뜨지 않게
-        let mut child = c.spawn().map_err(|e| ErrView::msg("acp", format!("{} 을(를) 실행하지 못했습니다: {e}", path.display())))?;
+        let mut child = c.spawn().map_err(|e| {
+            let e = format!("{} 을(를) 실행하지 못했습니다: {e}", path.display());
+            on(Step::new("spawn", "띄우기", "fail", "실패", vec![e.clone()]));
+            ErrView::msg("acp", e)
+        })?;
+        on(Step::new("spawn", "띄우기", "ok", secs(t0), vec![format!("{} {}", path.display(), args.join(" ")), format!("작업 폴더: {}", cwd.display())]));
+        let t1 = Instant::now();
+        on(Step::new("init", "초기화", "run", "", vec![]));
         let (stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
         let a = Arc::new(Self {
             cfg: cfg.clone(),
@@ -141,10 +162,14 @@ impl Agent {
         match a.request("initialize", init, Some(START_TIMEOUT)).await {
             Ok(info) => {
                 tracing::info!("ACP {} 시작: {}", cfg.name, info.get("agentInfo").map(|v| v.to_string()).unwrap_or_default());
+                let ai = &info["agentInfo"];
+                let who = format!("{} {}", ai["name"].as_str().unwrap_or(&cfg.name), ai["version"].as_str().unwrap_or("")).trim().to_string();
+                on(Step::new("init", "초기화", "ok", secs(t1), vec![who, format!("프로토콜 {}", info["protocolVersion"])]));
                 *a.info.lk() = info;
                 Ok(a)
             }
             Err(e) => {
+                on(Step::new("init", "초기화", "fail", "실패", vec![e.message.clone()]));
                 a.shutdown();
                 Err(e)
             }
@@ -268,7 +293,7 @@ impl Agent {
         let (tx, rx) = oneshot::channel();
         let key = self.next.fetch_add(1, Ordering::Relaxed);
         match sink {
-            Some(sink) => {
+            Some(Sink::Ui(sink)) => {
                 self.perms.lk().insert(key, (sid, tx));
                 let detail = match &tool["rawInput"] {
                     Value::Null => String::new(),
@@ -277,8 +302,8 @@ impl Agent {
                 let title = tool["title"].as_str().unwrap_or("도구 실행").to_string();
                 let _ = sink.send(AcpEvent::Permission { key, title, detail, options });
             }
-            // 화면이 듣고 있지 않은 세션 — 묻지 않고 취소
-            None => drop(tx),
+            // 화면이 듣고 있지 않은 세션(분석 등) — 묻지 않고 취소
+            _ => drop(tx),
         }
         let me = self.clone();
         tokio::spawn(async move {
@@ -308,8 +333,12 @@ impl Agent {
             "usage_update" => Some(AcpEvent::Usage { used: u["used"].as_u64().unwrap_or(0), size: u["size"].as_u64().unwrap_or(0) }),
             _ => None,
         };
-        if let Some(ev) = ev {
-            let _ = sink.send(ev);
+        match (sink, ev) {
+            (Sink::Ui(ch), Some(ev)) => {
+                let _ = ch.send(ev);
+            }
+            (Sink::Collect(buf), Some(AcpEvent::Text { text })) => buf.lk().push_str(&text),
+            _ => {}
         }
     }
 }
@@ -357,10 +386,11 @@ pub struct Acp {
 
 impl Acp {
     /// 살아 있는 에이전트, 없거나 실행 설정이 바뀌었으면 새로 띄운다
-    async fn get(&self, cfg: &AcpAgentConfig) -> R<Arc<Agent>> {
+    async fn get(&self, cfg: &AcpAgentConfig, on: &(impl Fn(Step) + Sync)) -> R<Arc<Agent>> {
         let old = {
             let mut m = self.agents.lk();
             if let Some(a) = m.get(&cfg.name).filter(|a| a.alive() && same_process(&a.cfg, cfg)) {
+                on(Step::new("spawn", "띄우기", "ok", "재사용", vec!["이미 떠 있는 에이전트를 그대로 씁니다".into()]));
                 return Ok(a.clone());
             }
             m.remove(&cfg.name)
@@ -368,7 +398,7 @@ impl Acp {
         if let Some(o) = old {
             o.shutdown();
         }
-        let a = Agent::spawn(cfg).await?;
+        let a = Agent::spawn(cfg, on).await?;
         self.agents.lk().insert(cfg.name.clone(), a.clone());
         Ok(a)
     }
@@ -397,16 +427,16 @@ impl Acp {
 }
 
 fn same_process(a: &AcpAgentConfig, b: &AcpAgentConfig) -> bool {
-    a.command == b.command && a.args == b.args && a.cwd == b.cwd
+    a.command == b.command && a.args == b.args && a.cwd == b.cwd && a.pure == b.pure
 }
 
-/// 띄울 때의 인자 — opencode acp 에는 `--pure` 를 꼭 붙인다.
-/// 외부 플러그인을 읽느라 시작이 크게 늦어지고 (느린 PC 에선 수십 초), SQL 도우미로 쓰는 데엔 플러그인이 필요 없다.
-/// 예전에 `acp` 만으로 저장한 설정도 그대로 빨라지게 설정 대신 여기서 붙인다
-fn launch_args(path: &std::path::Path, args: &[String]) -> Vec<String> {
-    let mut v = args.to_vec();
-    let opencode = path.file_stem().is_some_and(|s| s.eq_ignore_ascii_case("opencode"));
-    if opencode && v.first().is_some_and(|a| a == "acp") && !v.iter().any(|a| a == "--pure") {
+/// 띄울 때의 인자 — `pure` 면 opencode acp 에 `--pure` 를 붙인다 (인자에 없어도).
+/// 외부 플러그인을 읽느라 시작이 크게 늦어지고 (느린 PC 에선 수십 초), SQL 도우미로 쓰는 데엔 대개 플러그인이 필요 없다.
+/// omo 같은 플러그인의 에이전트를 쓰려면 끈다 — 그때는 인자에 적은 `--pure` 도 뺀다
+fn launch_args(path: &std::path::Path, args: &[String], pure: bool) -> Vec<String> {
+    let opencode = path.file_stem().is_some_and(|s| s.eq_ignore_ascii_case("opencode")) && args.first().is_some_and(|a| a == "acp");
+    let mut v: Vec<String> = args.iter().filter(|a| !(opencode && !pure && *a == "--pure")).cloned().collect();
+    if opencode && pure && !v.iter().any(|a| a == "--pure") {
         v.push("--pure".into());
     }
     v
@@ -463,7 +493,7 @@ fn agents(st: &AppState) -> Vec<AcpAgentConfig> {
     v
 }
 
-fn agent_cfg(st: &AppState, name: &str) -> R<AcpAgentConfig> {
+pub(crate) fn agent_cfg(st: &AppState, name: &str) -> R<AcpAgentConfig> {
     agents(st).into_iter().find(|a| a.name == name).ok_or_else(|| ErrView::msg("invalid", format!("ACP 에이전트가 없습니다: {name}")))
 }
 
@@ -567,7 +597,7 @@ pub struct TestResult {
 #[tauri::command]
 pub async fn acp_test_agent(agent: AcpAgentConfig) -> R<TestResult> {
     let path = resolve(&agent.command).map(|p| p.display().to_string()).unwrap_or_default();
-    let a = Agent::spawn(&agent).await?;
+    let a = Agent::spawn(&agent, &|_| {}).await?;
     let info = a.info.lk().clone();
     a.shutdown();
     let auth = info["authMethods"]
@@ -587,48 +617,241 @@ pub struct NewSession {
     agent: Value,
 }
 
-/// 새 세션의 고르기 하나(model · mode)를 설정값으로 — 에이전트가 그 값을 내놓을 때만. 바꿨으면 true
-async fn apply_option(a: &Agent, session_id: &str, options: &mut Value, id: &str, value: &str) -> bool {
-    let Some(o) = options.as_array().and_then(|v| v.iter().find(|o| o["id"] == id)).cloned() else { return false };
+/// 새 세션의 고르기 하나(model · mode)를 설정값으로 맞춘 결과
+#[derive(Debug, PartialEq)]
+enum Applied {
+    /// 에이전트가 이 고르기를 내놓지 않는다 (예전 방식일 수 있다)
+    Absent,
+    /// 이미 그 값
+    Same,
+    Set,
+    /// 에이전트가 내놓는 값이 아니다 (로그아웃 등) — 기본값으로 둔다
+    Unavailable,
+    Failed(String),
+}
+
+/// 새 세션의 고르기 하나(model · mode)를 설정값으로 — 에이전트가 그 값을 내놓을 때만
+async fn apply_option(a: &Agent, session_id: &str, options: &mut Value, id: &str, value: &str) -> Applied {
+    let Some(o) = options.as_array().and_then(|v| v.iter().find(|o| o["id"] == id)).cloned() else {
+        return Applied::Absent;
+    };
     if o["currentValue"] == value {
-        return true;
+        return Applied::Same;
     }
     if !o["options"].as_array().is_some_and(|v| v.iter().any(|x| x["value"] == value)) {
         tracing::warn!("ACP {}: {id} {value} 은(는) 고를 수 없는 값이라 기본값으로 둡니다", a.cfg.name);
-        return true;
+        return Applied::Unavailable;
     }
     match a.request("session/set_config_option", json!({ "sessionId": session_id, "configId": id, "value": value }), Some(CALL_TIMEOUT)).await {
-        Ok(v) => *options = v.get("configOptions").cloned().unwrap_or(options.clone()),
-        Err(e) => tracing::warn!("ACP {}: {id} 을(를) {value} 로 바꾸지 못했습니다: {}", a.cfg.name, e.message),
-    }
-    true
-}
-
-/// 새 대화 — 필요하면 에이전트를 띄우고 세션을 연다. 설정의 모델·처음 모드로 바꿔 둔다
-#[tauri::command]
-pub async fn acp_new_session(st: State<'_, AppState>, agent: String) -> R<NewSession> {
-    let cfg = agent_cfg(&st, &agent)?;
-    let a = st.acp.get(&cfg).await?;
-    let (mcp, mcp_profiles) = mcp_servers(&st, &cfg);
-    let cwd = work_dir(&cfg)?;
-    let r = a.request("session/new", json!({ "cwd": cwd, "mcpServers": mcp }), Some(CALL_TIMEOUT)).await?;
-    let session_id = r["sessionId"].as_str().ok_or_else(|| ErrView::msg("acp", format!("{agent}: session/new 답에 sessionId 가 없습니다")))?.to_string();
-    let mut options = r.get("configOptions").cloned().unwrap_or(Value::Array(vec![]));
-    if let Some(model) = cfg.model.as_deref().filter(|m| !m.is_empty()) {
-        apply_option(&a, &session_id, &mut options, "model", model).await;
-    }
-    if let Some(mode) = cfg.mode.as_deref().filter(|m| !m.is_empty()) {
-        // configOptions 에 mode 가 없으면 예전 방식 (modes · session/set_mode)
-        if !apply_option(&a, &session_id, &mut options, "mode", mode).await
-            && r["modes"]["availableModes"].as_array().is_some_and(|v| v.iter().any(|m| m["id"] == mode))
-        {
-            if let Err(e) = a.request("session/set_mode", json!({ "sessionId": session_id, "modeId": mode }), Some(CALL_TIMEOUT)).await {
-                tracing::warn!("ACP {agent}: 처음 모드 {mode} 로 바꾸지 못했습니다: {}", e.message);
-            }
+        Ok(v) => {
+            *options = v.get("configOptions").cloned().unwrap_or(options.clone());
+            Applied::Set
+        }
+        Err(e) => {
+            tracing::warn!("ACP {}: {id} 을(를) {value} 로 바꾸지 못했습니다: {}", a.cfg.name, e.message);
+            Applied::Failed(e.message)
         }
     }
+}
+
+/// 고르기의 지금 값 이름 (opencode: "Big Pickle")
+fn current_name(options: &Value, id: &str) -> Option<String> {
+    let o = options.as_array()?.iter().find(|o| o["id"] == id)?;
+    let cur = &o["currentValue"];
+    let name = o["options"].as_array().and_then(|v| v.iter().find(|x| x["value"] == *cur)).and_then(|x| x["name"].as_str());
+    name.or(cur.as_str()).map(String::from)
+}
+
+/// 설정값을 맞춘 결과 한 줄
+fn applied_line(what: &str, value: &str, r: &Applied) -> String {
+    match r {
+        Applied::Absent => format!("{what}: 에이전트가 고르기를 내놓지 않아 기본값"),
+        Applied::Same => format!("{what}: 설정값 {value} (이미 그 값)"),
+        Applied::Set => format!("{what}: 설정값 {value} 로 바꿈"),
+        Applied::Unavailable => {
+            format!("{what}: 설정값 {value} 를 에이전트가 내놓지 않아 기본값으로 둠")
+        }
+        Applied::Failed(e) => format!("{what}: {value} 로 바꾸지 못함 — {e}"),
+    }
+}
+
+/// MCP 를 넘기지 않은 까닭 — 넘겼으면 None
+fn mcp_skip_reason(st: &AppState, cfg: &AcpAgentConfig) -> Option<&'static str> {
+    if !cfg.mcp {
+        Some("이 에이전트 설정에서 MCP 넘기기를 껐습니다")
+    } else if st.cfg.rd().mcp.allowed_connections.is_empty() {
+        Some("설정 → MCP 에서 허용한 접속이 없습니다")
+    } else {
+        Some("앱 옆에 sqlstudio-mcp 가 없습니다")
+    }
+}
+
+fn secs(t: Instant) -> String {
+    format!("{:.1}s", t.elapsed().as_secs_f32())
+}
+
+/// 새 대화 — 필요하면 에이전트를 띄우고 세션을 연다. 설정의 모델·처음 모드로 바꿔 둔다.
+/// 단계(띄우기 · 초기화 · 세션 · 모델·모드 · MCP)는 `on_step` 으로 알린다 — 느린 PC 에서 어디서 기다리는지 보이게
+#[tauri::command]
+pub async fn acp_new_session(st: State<'_, AppState>, agent: String, on_step: Channel<Step>) -> R<NewSession> {
+    let on = |s: Step| {
+        let _ = on_step.send(s);
+    };
+    let cfg = agent_cfg(&st, &agent)?;
+    let a = st.acp.get(&cfg, &on).await?;
+    let (mcp, mcp_profiles) = mcp_servers(&st, &cfg);
+    let cwd = work_dir(&cfg)?;
+    let t = Instant::now();
+    on(Step::new("session", "세션", "run", "", vec![]));
+    let r = match a.request("session/new", json!({ "cwd": cwd, "mcpServers": mcp }), Some(CALL_TIMEOUT)).await {
+        Ok(r) => r,
+        Err(e) => {
+            on(Step::new("session", "세션", "fail", "실패", vec![e.message.clone()]));
+            return Err(e);
+        }
+    };
+    let session_id = r["sessionId"].as_str().ok_or_else(|| ErrView::msg("acp", format!("{agent}: session/new 답에 sessionId 가 없습니다")))?.to_string();
+    on(Step::new("session", "세션", "ok", secs(t), vec![format!("세션 {session_id}"), format!("작업 폴더: {}", cwd.display())]));
+
+    let mut options = r.get("configOptions").cloned().unwrap_or(Value::Array(vec![]));
+    let mut lines = Vec::new();
+    let mut warn = false;
+    if cfg.model.is_some() || cfg.mode.is_some() {
+        on(Step::new("options", "모델·모드", "run", "", vec![]));
+    }
+    if let Some(model) = cfg.model.as_deref().filter(|m| !m.is_empty()) {
+        let res = apply_option(&a, &session_id, &mut options, "model", model).await;
+        warn |= matches!(res, Applied::Unavailable | Applied::Failed(_));
+        lines.push(applied_line("모델", model, &res));
+    } else {
+        lines.push("모델: 설정값 없음 — 에이전트 기본값".into());
+    }
+    if let Some(mode) = cfg.mode.as_deref().filter(|m| !m.is_empty()) {
+        let res = apply_option(&a, &session_id, &mut options, "mode", mode).await;
+        // configOptions 에 mode 가 없으면 예전 방식 (modes · session/set_mode)
+        if res == Applied::Absent && r["modes"]["availableModes"].as_array().is_some_and(|v| v.iter().any(|m| m["id"] == mode)) {
+            match a.request("session/set_mode", json!({ "sessionId": session_id, "modeId": mode }), Some(CALL_TIMEOUT)).await {
+                Ok(_) => lines.push(format!("모드: 처음 모드 {mode} 로 바꿈")),
+                Err(e) => {
+                    tracing::warn!("ACP {agent}: 처음 모드 {mode} 로 바꾸지 못했습니다: {}", e.message);
+                    warn = true;
+                    lines.push(format!("모드: {mode} 로 바꾸지 못함 — {}", e.message));
+                }
+            }
+        } else {
+            warn |= matches!(res, Applied::Unavailable | Applied::Failed(_));
+            lines.push(applied_line("모드", mode, &res));
+        }
+    } else {
+        lines.push("모드: 처음 모드 없음 — 에이전트 기본값".into());
+    }
+    let summary = [current_name(&options, "model"), current_name(&options, "mode")].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+    on(Step::new("options", "모델·모드", if warn { "warn" } else { "ok" }, summary, lines));
+
+    let explain = st.cfg.rd().mcp.allow_explain;
+    on(if mcp_profiles.is_empty() {
+        Step::new("mcp", "MCP", "skip", "안 넘김", vec![mcp_skip_reason(&st, &cfg).unwrap_or_default().into(), "에이전트가 DB 사전을 볼 수 없습니다".into()])
+    } else {
+        Step::new(
+            "mcp",
+            "MCP",
+            "ok",
+            mcp_profiles.join(", "),
+            vec![
+                format!("sqlstudio-mcp 로 넘긴 접속: {}", mcp_profiles.join(", ")),
+                format!("explain_plan 도구: {}", if explain { "켜짐" } else { "꺼짐 (설정 → MCP 에서 켬)" }),
+                "사전 조회만 — SQL 실행·데이터 반환 없음".into(),
+            ],
+        )
+    });
     let agent_info = a.info.lk()["agentInfo"].clone();
     Ok(NewSession { session_id, options, mcp_profiles, agent: agent_info })
+}
+
+/// 분석이 ACP 에이전트에게 묻는 길 (주소가 `acp://<이름>` 인 공급자) — 조각마다 새 세션이라 앞 조각의 답이 섞이지 않고,
+/// MCP 없이 plan 모드로 글만 보고 답하게 한다. 권한을 물으면 취소한다
+pub struct AnalysisChat {
+    pub app: tauri::AppHandle,
+}
+
+impl sqls_llm::ExternalChat for AnalysisChat {
+    fn chat<'a>(
+        &'a self,
+        cfg: &'a sqls_llm::ProviderConfig,
+        req: &'a sqls_llm::ChatRequest,
+    ) -> sqls_llm::BoxFuture<'a, sqls_llm::Result<sqls_llm::ChatResponse>> {
+        Box::pin(async move {
+            let name = cfg.acp_agent().unwrap_or_default();
+            let st = tauri::Manager::state::<AppState>(&self.app);
+            let acfg = agent_cfg(&st, name).map_err(|e| sqls_llm::Error::Protocol(format!("ACP {name}: {}", e.message)))?;
+            ask_agent(&st.acp, &acfg, cfg, req).await
+        })
+    }
+}
+
+/// 에이전트에게 한 번 묻고 답 글을 받는다 — 새 세션 · MCP 없음 · plan 모드
+async fn ask_agent(acp: &Acp, acfg: &AcpAgentConfig, cfg: &sqls_llm::ProviderConfig, req: &sqls_llm::ChatRequest) -> sqls_llm::Result<sqls_llm::ChatResponse> {
+    let name = acfg.name.as_str();
+    let err = |e: ErrView| sqls_llm::Error::Protocol(format!("ACP {name}: {}", e.message));
+    let a = acp.get(acfg, &|_| {}).await.map_err(err)?;
+    let r = a.request("session/new", json!({ "cwd": work_dir(acfg).map_err(err)?, "mcpServers": [] }), Some(CALL_TIMEOUT)).await.map_err(err)?;
+    let sid = r["sessionId"].as_str().ok_or_else(|| sqls_llm::Error::Protocol(format!("ACP {name}: session/new 답에 sessionId 가 없습니다")))?.to_string();
+    let mut options = r.get("configOptions").cloned().unwrap_or(Value::Array(vec![]));
+    if let Some(m) = acfg.model.as_deref().filter(|m| !m.is_empty()) {
+        apply_option(&a, &sid, &mut options, "model", m).await;
+    }
+    // 분석은 읽기만 — 편집 도구를 막는 plan (설정의 처음 모드가 있으면 그것)
+    apply_option(&a, &sid, &mut options, "mode", acfg.mode.as_deref().filter(|m| !m.is_empty()).unwrap_or("plan")).await;
+    let buf = Arc::new(Mutex::new(String::new()));
+    a.sinks.lk().insert(sid.clone(), Sink::Collect(buf.clone()));
+    let limit = Duration::from_secs(cfg.idle_timeout_secs.max(60) * 2);
+    let done = a.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": analysis_text(req) }] }), Some(limit)).await;
+    a.sinks.lk().remove(&sid);
+    if done.is_err() {
+        let _ = a.notify("session/cancel", json!({ "sessionId": sid })).await;
+    }
+    let done = done.map_err(err)?;
+    let text = std::mem::take(&mut *buf.lk());
+    Ok(sqls_llm::ChatResponse {
+        text,
+        stop_reason: Some(done["stopReason"].as_str().unwrap_or("end_turn").to_string()),
+        model: current_name(&options, "model").map(|m| format!("{name} · {m}")),
+        input_tokens: done["usage"]["inputTokens"].as_u64(),
+        output_tokens: done["usage"]["outputTokens"].as_u64(),
+        thinking_chars: 0,
+    })
+}
+
+/// 분석 요청을 에이전트에게 보낼 글 하나로 — 지시문 · (형식을 고쳐 다시 물을 때) 앞의 답 · 요청
+fn analysis_text(req: &sqls_llm::ChatRequest) -> String {
+    let mut s = String::from(
+        "[SQLStudio 코드 분석 — 파일을 읽거나 도구를 쓰지 말고, 아래 글만 보고 답한다]
+
+",
+    );
+    s.push_str(&req.system);
+    for m in &req.messages {
+        s.push_str(
+            "
+
+",
+        );
+        if m.role == sqls_llm::Role::Assistant {
+            s.push_str(
+                "[앞의 답]
+",
+            );
+        }
+        s.push_str(&m.content);
+    }
+    if req.json_schema.is_some() {
+        s.push_str(
+            "
+
+Reply with ONLY the JSON object — no code fences, no other text.",
+        );
+    }
+    s
 }
 
 /// 모델·모드 바꾸기 — 바뀐 전체 목록을 돌려준다. 모델은 설정에도 남겨 다음 대화·다음 실행에서 그대로 쓴다
@@ -668,7 +891,7 @@ pub async fn acp_prompt(st: State<'_, AppState>, agent: String, session_id: Stri
         return Err(ErrView::msg("remote_consent", format!("'{agent}' 은 받은 내용을 에이전트의 모델(대개 외부 서버)로 보냅니다. 전송 동의가 필요합니다.")));
     }
     let a = st.acp.running(&agent)?;
-    a.sinks.lk().insert(session_id.clone(), on_event);
+    a.sinks.lk().insert(session_id.clone(), Sink::Ui(on_event));
     let r = a.request("session/prompt", json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": text }] }), None).await;
     a.sinks.lk().remove(&session_id);
     a.perms.lk().retain(|_, (s, _)| *s != session_id);
@@ -708,16 +931,57 @@ mod tests {
     fn opencode_always_pure() {
         let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let oc = std::path::Path::new(r"C:\npm\opencode.cmd");
-        assert_eq!(launch_args(oc, &args(&["acp"])), args(&["acp", "--pure"]));
-        assert_eq!(launch_args(oc, &args(&["acp", "--pure", "--log-level", "WARN"])), args(&["acp", "--pure", "--log-level", "WARN"]));
-        assert_eq!(launch_args(oc, &args(&["--version"])), args(&["--version"]));
-        assert_eq!(launch_args(std::path::Path::new("gemini.exe"), &args(&["acp"])), args(&["acp"]));
+        assert_eq!(launch_args(oc, &args(&["acp"]), true), args(&["acp", "--pure"]));
+        assert_eq!(launch_args(oc, &args(&["acp", "--pure", "--log-level", "WARN"]), true), args(&["acp", "--pure", "--log-level", "WARN"]));
+        assert_eq!(launch_args(oc, &args(&["--version"]), true), args(&["--version"]));
+        assert_eq!(launch_args(std::path::Path::new("gemini.exe"), &args(&["acp"]), true), args(&["acp"]));
+        // 플러그인(omo 등)을 쓰려고 끄면 인자에 적은 --pure 도 뺀다
+        assert_eq!(launch_args(oc, &args(&["acp", "--pure"]), false), args(&["acp"]));
+        assert_eq!(launch_args(std::path::Path::new("gemini.exe"), &args(&["x", "--pure"]), false), args(&["x", "--pure"]));
     }
 
     #[test]
     fn resolve_rejects_missing_paths() {
         assert!(resolve(r"C:\없는\폴더\agent.exe").is_none());
         assert!(resolve("sqlstudio-없는-에이전트").is_none());
+    }
+
+    /// 분석이 ACP 에이전트로 묻는 길 — 실제 opencode 에게 분석 요청(JSON 답)을 보내 하네스가 읽을 수 있는지.
+    /// `cargo test -p sqlstudio acp_live_analysis -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn acp_live_analysis() {
+        struct Direct(Acp, AcpAgentConfig);
+        impl sqls_llm::ExternalChat for Direct {
+            fn chat<'a>(&'a self, cfg: &'a sqls_llm::ProviderConfig, req: &'a sqls_llm::ChatRequest) -> sqls_llm::BoxFuture<'a, sqls_llm::Result<sqls_llm::ChatResponse>> {
+                Box::pin(ask_agent(&self.0, &self.1, cfg, req))
+            }
+        }
+        let acfg = AcpAgentConfig::opencode();
+        let client = sqls_llm::Client::new();
+        let d = Arc::new(Direct(Acp::default(), acfg.clone()));
+        client.set_external(d.clone());
+        let mut cfg = sqls_llm::ProviderConfig::new("acp:opencode", sqls_llm::ProviderKind::OpenaiCompatible, "에이전트 기본 모델");
+        cfg.base_url = Some("acp://opencode".into());
+        assert!(cfg.is_remote(), "ACP 공급자는 외부로 본다 (분석이 전송 동의를 묻게)");
+        let body = "Unit: PROCEDURE APP.P_CLOSE_DAY
+Lines 1-6:
+BEGIN
+  UPDATE orders SET status = 'CLOSED' WHERE order_dt < TRUNC(SYSDATE);
+  INSERT INTO close_log(dt) VALUES (SYSDATE);
+  COMMIT;
+END;";
+        let r = sqls_analyze::llm::ask_summary(&client, &cfg, sqls_analyze::llm::rollup_system(sqls_analyze::llm::Lang::Ko, "a procedure"), body.into()).await;
+        d.0.shutdown_all();
+        match r {
+            Ok((ins, meta)) => {
+                eprintln!("요약: {}
+단계: {:?}
+모델: {:?} · 시도 {} · {}ms", ins.summary, ins.steps, meta.answered_by, meta.attempts, meta.elapsed_ms);
+                assert!(!ins.summary.is_empty());
+            }
+            Err(e) => panic!("분석 답을 읽지 못함: {e:?}"),
+        }
     }
 
     /// 실제 opencode 로 끝까지 — 띄우기 · 세션 · plan 모드 · 질문 · 글자 이벤트 · 끝내기.
@@ -731,7 +995,11 @@ mod tests {
         let dir = std::env::temp_dir().join("sqlstudio-acp-live");
         std::fs::create_dir_all(&dir).unwrap();
         cfg.cwd = Some(dir.display().to_string());
-        let a = Agent::spawn(&cfg).await.expect("opencode acp 를 띄우지 못함");
+        let started = Mutex::new(Vec::<Step>::new());
+        let a = Agent::spawn(&cfg, &|s| started.lk().push(s)).await.expect("opencode acp 를 띄우지 못함");
+        // 띄우기 · 초기화 단계가 run → ok 로 왔다
+        let got: Vec<(&str, &str)> = started.lk().iter().map(|s| (s.id, s.state)).collect();
+        assert_eq!(got, [("spawn", "run"), ("spawn", "ok"), ("init", "run"), ("init", "ok")]);
         assert!(a.info.lk()["agentInfo"]["name"].is_string());
 
         let mcp_exe = std::env::current_dir().unwrap().join("../../target/release/sqlstudio-mcp.exe");
@@ -749,10 +1017,10 @@ mod tests {
         let current = |o: &Value, id: &str| o.as_array().unwrap().iter().find(|x| x["id"] == id).map(|x| x["currentValue"].clone()).unwrap();
         // 설정의 모델 — 없는 값은 건너뛰고, 있는 값은 그대로
         let model = current(&options, "model").as_str().unwrap().to_string();
-        assert!(apply_option(&a, &sid, &mut options, "model", "없는/모델").await);
+        assert_eq!(apply_option(&a, &sid, &mut options, "model", "없는/모델").await, Applied::Unavailable);
         assert_eq!(current(&options, "model"), model.as_str());
-        assert!(apply_option(&a, &sid, &mut options, "model", &model).await);
-        assert!(apply_option(&a, &sid, &mut options, "mode", "plan").await);
+        assert_eq!(apply_option(&a, &sid, &mut options, "model", &model).await, Applied::Same);
+        assert_ne!(apply_option(&a, &sid, &mut options, "mode", "plan").await, Applied::Absent);
         assert_eq!(current(&options, "mode"), "plan");
 
         let events = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -763,7 +1031,7 @@ mod tests {
             }
             Ok(())
         });
-        a.sinks.lk().insert(sid.clone(), ch);
+        a.sinks.lk().insert(sid.clone(), Sink::Ui(ch));
         // MCP 없이 도구 이름을 물으면 모델이 설정 파일을 뒤지러 나선다 — 그때는 짧은 답만
         let ask = if with_mcp { "MCP 서버 'sqlstudio' 의 도구 이름을 쉼표로 나열하라. 도구는 부르지 말고 이름만. 없으면 NONE 이라고만." } else { "도구를 쓰지 말고 정확히 pong 이라고만 답하라." };
         let done = a.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": ask }] }), Some(Duration::from_secs(180))).await;

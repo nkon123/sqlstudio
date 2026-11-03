@@ -13,6 +13,7 @@ pub mod sse;
 
 use std::time::Duration;
 
+pub use futures_util::future::BoxFuture;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -209,6 +210,11 @@ impl ProviderConfig {
         }
     }
 
+    /// `acp://<이름>` 이면 그 ACP 에이전트 이름 — HTTP 대신 앱이 에이전트에게 묻는다
+    pub fn acp_agent(&self) -> Option<&str> {
+        self.base_url.as_deref().and_then(|u| u.strip_prefix("acp://")).filter(|n| !n.is_empty())
+    }
+
     /// 외부 공급자면 지금 주소로 동의를 받았는지
     pub fn remote_ok(&self) -> bool {
         !self.is_remote() || self.remote_ack.as_deref() == Some(self.base_url().as_str())
@@ -270,6 +276,12 @@ impl ChatResponse {
     }
 }
 
+/// 앱이 끼워 넣는 다른 대화 경로 — 주소가 `acp://<에이전트>` 인 공급자는 HTTP 대신 이것으로 묻는다
+/// (ACP 에이전트로 분석하기. 이 크레이트는 에이전트를 띄우는 법을 모른다)
+pub trait ExternalChat: Send + Sync {
+    fn chat<'a>(&'a self, cfg: &'a ProviderConfig, req: &'a ChatRequest) -> BoxFuture<'a, Result<ChatResponse>>;
+}
+
 /// HTTP 클라이언트 하나를 재사용한다 (연결 풀).
 #[derive(Clone)]
 pub struct Client {
@@ -277,6 +289,8 @@ pub struct Client {
     http: reqwest::Client,
     /// 프록시를 거치지 않는 것 (사내 LLM 서버)
     direct: reqwest::Client,
+    /// `acp://` 공급자를 받는 쪽 (앱이 시작할 때 넣는다)
+    external: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<dyn ExternalChat>>>>,
 }
 
 impl Default for Client {
@@ -295,7 +309,12 @@ impl Client {
         };
         let http = builder().build().expect("reqwest client");
         let direct = builder().no_proxy().build().expect("reqwest client");
-        Self { http, direct }
+        Self { http, direct, external: Default::default() }
+    }
+
+    /// `acp://` 공급자를 받을 쪽을 넣는다
+    pub fn set_external(&self, e: std::sync::Arc<dyn ExternalChat>) {
+        *self.external.write().unwrap_or_else(|p| p.into_inner()) = Some(e);
     }
 
     fn client_for(&self, cfg: &ProviderConfig) -> &reqwest::Client {
@@ -314,6 +333,13 @@ impl Client {
         req: &ChatRequest,
         mut on_delta: impl FnMut(&str) + Send,
     ) -> Result<ChatResponse> {
+        if cfg.acp_agent().is_some() {
+            let ext = self.external.read().unwrap_or_else(|p| p.into_inner()).clone();
+            let ext = ext.ok_or_else(|| Error::Config("ACP 에이전트로 물을 수 없습니다 (앱 밖에서는 쓸 수 없음)".into()))?;
+            let r = ext.chat(cfg, req).await?;
+            on_delta(&r.text);
+            return Ok(r);
+        }
         let (url, body, headers) = build_request(cfg, req)?;
         let resp = match self.send_with_retry(cfg, &url, &body, &headers).await {
             // 생각 조절을 모르는 모델 ("does not support thinking") — think 없이 다시

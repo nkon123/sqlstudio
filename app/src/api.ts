@@ -1,5 +1,6 @@
 // Rust 명령의 타입 있는 껍데기. 명령 이름·인자는 src-tauri/src/*.rs 와 같아야 한다.
 import { Channel, invoke } from "@tauri-apps/api/core";
+import type { Step } from "./steps";
 
 export interface ErrView { kind: string; message: string; ora_code?: number; offset?: number }
 
@@ -79,8 +80,8 @@ export type Task = "generate" | "explain" | "optimize" | "fix" | "chat" | "trace
 export interface ChatMsg { role: "user" | "assistant"; content: string }
 export type AiEvent =
   | { type: "status"; text: string }
-  | { type: "context"; tables: string[]; plan: boolean; remote: boolean; guides?: string[]; tokens?: number; budget?: number; trimmed?: string[];
-      /** 테이블을 하네스가 골랐으면 어떻게 */ picked?: "ai" | "keyword" | null; /** 넣은 내 쿼리 예시의 질문 */ examples?: string[] }
+  /** 하네스 단계 (답 위 칩) — 같은 id 는 덮어쓴다 */
+  | ({ type: "step" } & Step)
   | { type: "delta"; text: string }
   | { type: "reset" };
 /** 답의 SQL 확인 — ok: 서버 파싱까지 · static: 앱 안의 검사만 · failed: 고치지 못함 · none: SQL 없음 */
@@ -100,7 +101,7 @@ export interface CompletionStatus { profile: string; phase: string; objects: num
 export interface McpSettings { allowed_connections: string[]; call_timeout_secs: number; allow_explain: boolean }
 /** ACP 에이전트 (opencode 등) — 설정의 [[acp]] */
 export interface AcpAgent {
-  name: string; command: string; args: string[]; cwd?: string | null; mcp: boolean; mode?: string | null; model?: string | null; remote_ack?: boolean;
+  name: string; command: string; args: string[]; cwd?: string | null; mcp: boolean; pure?: boolean; mode?: string | null; model?: string | null; remote_ack?: boolean;
   /** 실행 파일을 찾았는지 · 지금 띄워져 있는지 (읽을 때만) */
   available?: boolean; running?: boolean;
 }
@@ -196,7 +197,15 @@ export const api = {
   acpAckRemote: (name: string) => invoke<void>("acp_ack_remote", { name }),
   /** 저장하지 않은 설정으로 따로 띄워 initialize 만 — 에이전트 이름·버전, 로그인 방법 */
   acpTestAgent: (agent: AcpAgent) => invoke<{ agent: { name?: string; version?: string } | null; auth: string[]; path: string }>("acp_test_agent", { agent }),
-  acpNewSession: (agent: string) => invoke<AcpSession>("acp_new_session", { agent }),
+  /** 새 대화 — 띄우기 · 초기화 · 세션 · 모델·모드 · MCP 단계를 onStep 으로 */
+  acpNewSession: (agent: string, onStep: (s: Step) => void = () => {}) => {
+    const ch = new Channel<Step>();
+    ch.onmessage = onStep;
+    return invoke<AcpSession>("acp_new_session", { agent, onStep: ch });
+  },
+  /** ACP 답의 SQL 확인 — 걸리면 repair 에 에이전트에게 보낼 고쳐 달라는 글 */
+  acpCheckSql: (sessionId: number | undefined, task: Task, text: string, repairs: number, firstProblem: string | null) =>
+    invoke<{ step: Step; repair?: string | null; problem?: string | null }>("acp_check_sql", { sessionId: sessionId ?? null, task, text, repairs, firstProblem }),
   acpSetOption: (agent: string, sessionId: string, configId: string, value: string) =>
     invoke<AcpConfigOption[]>("acp_set_option", { agent, sessionId, configId, value }),
   acpPrompt: (agent: string, sessionId: string, text: string, onEvent: (e: AcpEvent) => void) => {

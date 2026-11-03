@@ -304,6 +304,8 @@ pub fn run() {
             ai::ai_harness_opts,
             ai::set_ai_harness_opts,
             ai::ai_examples_clear,
+            ai::acp_check_sql,
+            ai::ai_harness_plan,
             acp::acp_agents,
             acp::acp_save_agent,
             acp::acp_delete_agent,
@@ -362,6 +364,9 @@ pub fn run() {
         })
         // 메인 창은 여기서 만든다 — 포터블이면 WebView 데이터(화면 설정·바인드 이력)도 실행 파일 옆 data 에 두도록
         .setup(|app| {
+            // 분석이 `acp://` 공급자(ACP 에이전트)로 물으면 에이전트에게 넘긴다
+            let st = tauri::Manager::state::<AppState>(app);
+            st.llm.set_external(std::sync::Arc::new(acp::AnalysisChat { app: app.handle().clone() }));
             let cfg = app.config().app.windows.iter().find(|w| w.label == "main").cloned().ok_or("main 창 설정이 없습니다")?;
             let mut b = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?.additional_browser_args(WEBVIEW_ARGS);
             if let Some(dir) = webview_dir() {

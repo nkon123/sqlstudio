@@ -493,13 +493,46 @@ const LOCAL: Record<string, (a: Args) => unknown> = {
   },
   ai_guides_info: () => ({ path: "(가짜)/oracle-guides.md", exists: false, builtin: 24, custom: 0 }),
   ai_guide_select: () => "auto",
+  ai_harness_plan: () => ({ local: true, routing: true, think: true, repairs: 2, tables: 4, tok_per_sec: 22.4, slow_below: 8, budget: 8000, user_think: null, user_temperature: null }),
+  // ACP 흉내: 연결 단계 → 도구 두 번 → 답 → 검증
+  acp_agents: () => [{ name: "opencode", command: "opencode", args: ["acp", "--pure"], mcp: true, mode: "plan", model: null, remote_ack: true, available: true, running: false }],
+  acp_new_session: async (a) => {
+    const ch = a.onStep as Channel<unknown>;
+    const step = (id: string, label: string, state: string, summary: string, detail: string[] = []) => ch.onmessage({ id, label, state, summary, detail });
+    step("spawn", "띄우기", "run", ""); await sleep(300);
+    step("spawn", "띄우기", "ok", "0.3s", ["opencode.cmd acp --pure"]); step("init", "초기화", "run", ""); await sleep(1200);
+    step("init", "초기화", "ok", "3.4s", ["opencode 1.18.30", "프로토콜 1"]); step("session", "세션", "run", ""); await sleep(400);
+    step("session", "세션", "ok", "0.4s", ["세션 ses_가짜"]);
+    step("options", "모델·모드", "ok", "Big Pickle · plan", ["모델: 설정값 없음 — 에이전트 기본값", "모드: 설정값 plan 로 바꿈"]);
+    step("mcp", "MCP", "ok", "가짜 DB", ["sqlstudio-mcp 로 넘긴 접속: 가짜 DB", "explain_plan 도구: 꺼짐 (설정 → MCP 에서 켬)"]);
+    return { session_id: "ses_가짜", mcp_profiles: ["가짜 DB"], agent: { name: "opencode", version: "1.18.30" },
+      options: [{ id: "model", name: "Model", currentValue: "opencode/big-pickle", options: [{ value: "opencode/big-pickle", name: "Big Pickle" }] },
+        { id: "mode", name: "Mode", currentValue: "plan", options: [{ value: "build", name: "build" }, { value: "plan", name: "plan" }] }] };
+  },
+  acp_set_option: () => [],
+  acp_ack_remote: () => null,
+  acp_cancel: () => null,
+  acp_prompt: async (a) => {
+    const ch = a.onEvent as Channel<unknown>;
+    ch.onmessage({ type: "thought", text: "함수 때문에 인덱스를 못 쓰는지 테이블 구조를 먼저 본다." });
+    for (const [id, title] of [["t1", "sqlstudio_describe_table EMP"], ["t2", "sqlstudio_describe_table DEPT"]]) {
+      ch.onmessage({ type: "tool", id, title, kind: "read", status: "in_progress" }); await sleep(400);
+      ch.onmessage({ type: "tool", id, status: "completed" });
+    }
+    const text = "HIREDATE 에 함수를 씌워 인덱스를 못 탑니다. 범위 조건으로 바꾸세요.\n```sql\nSELECT e.ename, d.dname\n  FROM emp e JOIN dept d ON d.deptno = e.deptno\n WHERE e.hiredate >= DATE '2024-01-01' AND e.hiredate < DATE '2025-01-01'\n```";
+    for (const w of text.match(/[\s\S]{1,6}/g) ?? []) { ch.onmessage({ type: "text", text: w }); await sleep(10); }
+    ch.onmessage({ type: "usage", used: 18204, size: 200000 });
+    return { stop_reason: "end_turn", usage: null };
+  },
+  acp_check_sql: async () => { await sleep(300); return { step: { id: "verify", label: "검증", state: "ok", summary: "파싱 ✓", detail: ["버전 문법 검사와 서버 파싱을 통과했습니다 (실행은 하지 않음)"] } }; },
   save_provider: () => null,
   // 하네스 흉내: 문맥 → 첫 답(없는 컬럼) → 지우고 고친 답 → 서버 파싱 통과
   ai_ask: async (a) => {
     const ch = a.onEvent as Channel<unknown>;
     const say = async (t: string) => { for (const w of t.match(/[\s\S]{1,6}/g) ?? []) { ch.onmessage({ type: "delta", text: w }); await sleep(15); } };
     if ((a.args as { task?: string }).task === "trace") {
-      ch.onmessage({ type: "context", tables: [], plan: false, remote: false, guides: [], tokens: 640, budget: 8000, trimmed: [] });
+      ch.onmessage({ type: "step", id: "budget", label: "예산", state: "ok", summary: "640/8,000", detail: ["줄인 것 없이 다 넣었습니다"] });
+      ch.onmessage({ type: "step", id: "verify", label: "검증", state: "skip", summary: "설명이라 안 함", detail: [] });
       await sleep(900);
       const text = "1) 출처 경로: ORD_SUM.TOT_AMT(ORD_NO=A123) = 0 ← PKG_ORD.P_INIT 88줄 INSERT … SELECT [NVL(SUM(D.AMT), 0)] ← ORD_DTL.AMT(A123, 1·2) = NULL ← PKG_IF.P_LOAD_DTL 41줄 ← IF_ORD_DTL.AMT_TXT\n" +
         "2) IF_ORD_DTL.AMT_TXT 가 NULL 로 적재되어 ORD_DTL.AMT 두 행이 모두 NULL → SUM 이 NULL → NVL 로 0 이 되어 TOT_AMT 에 들어갔습니다.\n" +
@@ -507,14 +540,21 @@ const LOCAL: Record<string, (a: Args) => unknown> = {
       await say(text);
       return { text, model: "qwen3.5:4b", refused: false, truncated: false, user_message: "", verify: { state: "none", repairs: 0 }, warnings: [] };
     }
-    ch.onmessage({ type: "context", tables: ["SCOTT.EMP", "SCOTT.DEPT"], plan: false, remote: false, guides: ["ROWNUM 페이징"], tokens: 2140, budget: 8000, trimmed: ["컬럼 많은 테이블은 관련 컬럼만"],
-      picked: "ai", examples: ["부서별 사원 수"] });
+    const step = (id: string, label: string, state: string, summary: string, detail: string[] = []) => ch.onmessage({ type: "step", id, label, state, summary, detail });
+    step("tables", "테이블", "ok", "2 · AI 고름", ["후보 14개 중에서 AI 가 골랐습니다", "SCOTT.EMP", "SCOTT.DEPT"]);
+    step("guides", "문법 카드", "ok", "1", ["ROWNUM 페이징", "낱말로 충분해 AI 고르기를 건너뛰었습니다"]);
+    step("examples", "예시", "ok", "1", ["부서별 사원 수"]);
+    step("budget", "예산", "warn", "2,140/8,000", ["보낸 문맥 약 2,140 토큰 · 예산 8,000 토큰", "컬럼 많은 테이블은 관련 컬럼만"]);
+    step("query", "질의", "run", "생각 끔");
     await say("부서별 급여 합계입니다.\n```sql\nSELECT dept_no, SUM(sal) FROM emp GROUP BY dept_no;\n```");
+    step("query", "질의", "ok", "생각 끔 · 1.2s", ["모델: qwen3.5:4b", "생각(think): off", "temperature: 0.2"]);
+    step("verify", "검증", "run", "고쳐 묻는 중 1/2", ["ORA-00904: \"DEPT_NO\": invalid identifier"]);
     ch.onmessage({ type: "status", text: "확인에서 걸렸습니다 (ORA-00904: \"DEPT_NO\": invalid identifier) — 고쳐 달라고 다시 묻는 중 (1/2)" });
     await sleep(300);
     ch.onmessage({ type: "reset" });
     const text = "DEPT_NO 를 DEPTNO 로 고쳤습니다.\n```sql\nSELECT deptno, SUM(sal) AS total_sal\n  FROM emp\n GROUP BY deptno;\n```";
     await say(text);
+    step("verify", "검증", "ok", "파싱 ✓ · 1번 고침", ["처음 답: ORA-00904: \"DEPT_NO\": invalid identifier", "고쳐 달라고 1번 다시 물었습니다 (최대 2번)", "버전 문법 검사와 서버 파싱을 통과했습니다 (실행은 하지 않음)"]);
     return { text, sql: "SELECT deptno, SUM(sal) AS total_sal FROM emp GROUP BY deptno;", model: "qwen3.5:4b", refused: false, truncated: false, output_tokens: 42, user_message: "## 요청\n" + (a.args as { question?: string }).question,
       verify: { state: "ok", repairs: 1, first_problem: "ORA-00904: \"DEPT_NO\": invalid identifier" }, warnings: [] };
   },

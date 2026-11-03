@@ -294,9 +294,15 @@ export class AnalysisView {
     try {
       this.providers = await api.listProviders();
     } catch { this.providers = []; }
+    // ACP 에이전트(opencode 등)도 공급자처럼 — "acp:<이름>", 조각마다 에이전트에게 묻는다 (에이전트의 모델은 대개 외부)
+    const agents = (await api.acpAgents().catch(() => [])).filter((a) => a.available);
+    const acp: Provider[] = agents.map((a) => ({ name: `acp:${a.name}`, kind: "openai_compatible", model: a.model || "에이전트 기본 모델", remote: true }));
+    this.providers.push(...acp);
     const prev = this.provSel.value;
+    const opt = (p: Provider, label: string) => h("option", { value: p.name, selected: p.name === prev }, label);
     this.provSel.replaceChildren(h("option", { value: "" }, "모델 없이 (정적 분석만)"),
-      ...this.providers.map((p) => h("option", { value: p.name, selected: p.name === prev }, `${p.name} · ${p.model}`)));
+      ...this.providers.filter((p) => !p.name.startsWith("acp:")).map((p) => opt(p, `${p.name} · ${p.model}`)),
+      ...(acp.length ? [h("optgroup", { label: "ACP 에이전트" }, ...acp.map((p) => opt(p, `${p.name.slice(4)} (ACP) · ${p.model}`)))] : []));
     if (!prev) {
       const local = this.providers.find((p) => !p.remote);
       if (local) this.provSel.value = local.name;
@@ -759,7 +765,10 @@ export class AnalysisView {
     const p = this.provider();
     if (p?.remote) {
       const ok = await confirmBox("외부로 소스 전송",
-        `'${p.name}' 은 외부 서버입니다. 선택한 ${units.length}개 단위의 PL/SQL 소스가 이 PC 밖으로 나갑니다.\n\n` +
+        (p.name.startsWith("acp:")
+          ? `ACP 에이전트 '${p.name.slice(4)}' 에게 조각마다 묻습니다. 선택한 ${units.length}개 단위의 PL/SQL 소스가 에이전트의 모델(대개 이 PC 밖의 서버)로 갑니다.\n` +
+            "에이전트는 조각마다 새 대화로 시작하고, 파일·도구를 쓰지 않고 글만 보고 답합니다 (HTTP 모델보다 느립니다).\n\n"
+          : `'${p.name}' 은 외부 서버입니다. 선택한 ${units.length}개 단위의 PL/SQL 소스가 이 PC 밖으로 나갑니다.\n\n`) +
         "사내 규정상 허용된 경우에만 진행하세요. 로컬 모델(Ollama 등)을 쓰면 밖으로 나가지 않습니다.", "보내고 분석");
       if (!ok) return;
     }

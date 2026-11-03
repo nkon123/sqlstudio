@@ -3,6 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { api, errOf, type AcpAgent, type AcpConfigOption, type AcpEvent, type AiVerify, type ChatMsg, type Provider, type Task } from "./api";
 import { glowProgress } from "./glow";
+import { StepStrip, type StepState } from "./steps";
 import { confirmBox, h, modal, toast } from "./ui";
 
 export interface AiHost {
@@ -187,29 +188,54 @@ export class AiPanel {
     this.acpOpts.replaceChildren();
   }
 
-  /** 에이전트 대화를 연다 (처음이면 에이전트를 띄운다) — 이미 열려 있으면 그것 */
+  /** 에이전트 대화를 연다 (처음이면 에이전트를 띄운다) — 이미 열려 있으면 그것.
+   *  대화 칸에 연결 카드를 두고 띄우기 · 초기화 · 세션 · 모델·모드 · MCP 를 단계 칩으로 보인다 */
   private ensureAcp(name: string): Promise<AcpChat> {
     if (this.acp?.agent === name) return Promise.resolve(this.acp);
     if (this.acpStarting) return this.acpStarting;
+    const strip = new StepStrip();
+    const took = h("span", {});
+    const note = h("div", { class: "ai-start-note" });
+    const card = h("div", { class: "ai-start" }, h("div", { class: "ai-start-head" }, h("b", {}, `${name} 연결`), took), strip.el, note);
+    this.log.append(card);
+    this.log.scrollTop = this.log.scrollHeight;
     // 몇 초 걸렸는지 보여 준다 (느린 PC 에선 1분 가까이 걸려 멈춘 것처럼 보이지 않게)
     const t0 = Date.now();
     const tick = () => {
-      if (this.acpStarting === start && this.running == null) this.statusEl.textContent = `${name} 시작 중… ${Math.round((Date.now() - t0) / 1000)}초`;
+      if (this.acpStarting !== start) return;
+      const sec = Math.round((Date.now() - t0) / 1000);
+      took.textContent = `${sec}초`;
+      if (this.running == null) this.statusEl.textContent = `${name} 시작 중… ${sec}초`;
     };
     const timer = window.setInterval(tick, 1000);
-    const start: Promise<AcpChat> = api.acpNewSession(name).finally(() => window.clearInterval(timer)).then((s) => {
-      if (this.acpStarting !== start) throw new Error("다른 대화로 바뀌었습니다");
+    const start: Promise<AcpChat> = api.acpNewSession(name, (st) => strip.set(st)).finally(() => window.clearInterval(timer)).then((s) => {
+      if (this.acpStarting !== start) {
+        card.remove();
+        throw new Error("다른 대화로 바뀌었습니다");
+      }
       const chat: AcpChat = { agent: name, session: s.session_id, mcp: s.mcp_profiles, sent: false };
       this.acp = chat;
       this.acpStarting = null;
       this.renderAcpOpts(chat, s.options);
+      took.textContent = `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+      // 오래 걸렸으면 어디서 기다렸는지
+      const slow = ["spawn", "init", "session"]
+        .map((id) => strip.get(id))
+        .filter((x) => x != null && parseFloat(x.summary) >= 3)
+        .sort((x, y) => parseFloat(y!.summary) - parseFloat(x!.summary))[0];
+      note.textContent = slow ? `가장 오래 걸린 곳: ${slow.label} ${slow.summary}` : "";
       if (this.running == null) {
         this.statusEl.textContent = `${s.agent?.name ?? name} ${s.agent?.version ?? ""} — ` +
           (s.mcp_profiles.length ? `DB 사전 조회(MCP): ${s.mcp_profiles.join(", ")}` : "DB 사전 조회 없음 (설정 → MCP 에서 접속을 허용하면 에이전트가 스키마를 직접 봅니다)");
       }
       return chat;
     }, (e) => {
-      if (this.acpStarting === start) this.acpStarting = null;
+      if (this.acpStarting === start) {
+        this.acpStarting = null;
+        strip.settle("fail", "실패");
+        took.textContent = "실패";
+        note.textContent = errOf(e).message;
+      } else card.remove();
       throw e;
     });
     this.acpStarting = start;
@@ -281,9 +307,9 @@ export class AiPanel {
     const label = { generate: "SQL 생성", explain: "설명", optimize: "튜닝", fix: "오류 수정", chat: "질문", trace: "출처 설명" }[task];
     this.log.append(h("div", { class: "msg user" }, h("small", {}, label), question || (ctx.sql ?? "").slice(0, 300)));
     const out = h("div", { class: "msg assistant streaming" });
-    const meta = h("small", {});
+    const steps = new StepStrip(["tables", "plan", "guides", "examples", "budget", "query", "verify"]);
     const body = h("div", { class: "md" });
-    out.append(meta, body);
+    out.append(h("small", {}, p.model), steps.el, body);
     this.log.append(out);
     this.input.value = "";
     let text = "";
@@ -304,18 +330,8 @@ export class AiPanel {
         history: this.history,
       }, (ev) => {
         if (ev.type === "status") this.statusEl.textContent = ev.text;
-        else if (ev.type === "context") {
-          const by = ev.picked === "ai" ? " (AI 가 고름)" : ev.picked === "keyword" ? " (낱말로 고름)" : "";
-          meta.textContent = `문맥: ${ev.tables.length ? ev.tables.join(", ") + by : "테이블 없음"}${ev.plan ? " + 실행계획" : ""}${ev.remote ? " · 외부" : ""}` +
-            (ev.guides?.length ? ` · 참고 문법: ${ev.guides.join(", ")}` : "") +
-            (ev.examples?.length ? ` · 내 쿼리 예시 ${ev.examples.length}개` : "") +
-            (ev.tokens ? ` · 약 ${ev.tokens.toLocaleString()}/${(ev.budget ?? 0).toLocaleString()} 토큰` : "");
-          meta.title = [
-            ev.trimmed?.length ? `예산에 맞추느라 줄인 것: ${ev.trimmed.join(" · ")}` : "",
-            ev.examples?.length ? `참고로 넣은 예시: ${ev.examples.join(" / ")}` : "",
-          ].filter(Boolean).join("\n");
-          if (ev.trimmed?.length) meta.textContent += " (줄임)";
-        } else if (ev.type === "reset") {
+        else if (ev.type === "step") steps.set(ev);
+        else if (ev.type === "reset") {
           // 다시 묻는 중 — 앞의 답을 지우고 새 답을 받는다
           text = "";
           body.replaceChildren();
@@ -336,7 +352,7 @@ export class AiPanel {
         ? (code: string) => { api.aiRememberExample(ctx.sessionId!, question, code).catch(() => {}); }
         : undefined;
       render(body, ans.text, this.host, remember);
-      const v = verifyLine(ans.verify, ans.warnings ?? []);
+      const v = verifyLine(ans.verify);
       if (v) out.append(v);
       out.classList.remove("streaming");
       const secs = ((performance.now() - started) / 1000).toFixed(1);
@@ -355,6 +371,7 @@ export class AiPanel {
       out.classList.remove("streaming");
       out.classList.add("error");
       body.textContent = (text ? text + "\n\n" : "") + err.message;
+      steps.settle(err.kind === "cancelled" ? "skip" : "fail", err.kind === "cancelled" ? "취소" : "실패");
       this.statusEl.textContent = err.kind === "cancelled" ? "취소했습니다" : "실패";
     } finally {
       clearInterval(tick);
@@ -374,7 +391,7 @@ export class AiPanel {
     if (!a.remote_ack) {
       const ok = await confirmBox("ACP 에이전트로 전송",
         `${name} 은(는) 받은 내용을 에이전트에 설정된 모델(대개 이 PC 밖의 서버)로 보냅니다.\n\n` +
-        "전송되는 것: 질문, 에디터의 SQL, 오류 메시지, (MCP 를 켰으면) 에이전트가 조회한 테이블 구조\n" +
+        "전송되는 것: 질문, 에디터의 SQL, 오류 메시지, (튜닝이면) 실행계획, (MCP 를 켰으면) 에이전트가 조회한 테이블 구조\n" +
         "전송되지 않는 것: 조회 결과 데이터, 비밀번호\n\n회사 보안 정책에 맞는지 확인하세요.", "계속", false);
       if (!ok) return;
       try {
@@ -396,9 +413,10 @@ export class AiPanel {
     const label = { generate: "SQL 생성", explain: "설명", optimize: "튜닝", fix: "오류 수정", chat: "질문", trace: "출처 설명" }[task];
     this.log.append(h("div", { class: "msg user" }, h("small", {}, label), question || (ctx.sql ?? "").slice(0, 300)));
     const out = h("div", { class: "msg assistant streaming" });
+    const steps = new StepStrip(["plan", "sent", "agent", "verify", "guides"]);
     const tools = h("div", { class: "ai-tools" });
     const body = h("div", { class: "md" });
-    out.append(h("small", {}, `${name} (ACP)`), tools, body);
+    out.append(h("small", {}, `${name} (ACP)`), steps.el, tools, body);
     this.log.append(out);
     this.input.value = "";
     let text = "";
@@ -407,7 +425,25 @@ export class AiPanel {
     const started = performance.now();
     const glow = glowProgress("", { compact: true });
     this.statusEl.before(glow.el);
-    const toolEls = new Map<string, { el: HTMLElement; title: string; kind: string; status: string }>();
+
+    // 에이전트가 한 일 — 도구 호출은 바뀐 칸만 오므로 모아 두고, 칩의 자세히에 줄로 보인다
+    const toolLog = new Map<string, { title: string; kind: string; status: string }>();
+    let thought = "";
+    let agentAt = performance.now();
+    const agentStep = (state: StepState, summary?: string) => {
+      const list = [...toolLog.values()];
+      const lines = list.map((t) => `${TOOL_KIND[t.kind] ?? "도구"} ${shortTitle(t.title)} — ${TOOL_STATUS[t.status] ?? t.status}`);
+      const th = thought.trim();
+      if (th) lines.unshift(`생각: ${th.slice(0, 400)}${th.length > 400 ? "…" : ""}`);
+      if (usage) lines.push(usage);
+      const secs = ((performance.now() - agentAt) / 1000).toFixed(1);
+      const failed = list.filter((t) => t.status === "failed").length;
+      steps.set({
+        id: "agent", label: "에이전트", state: state === "ok" && failed ? "warn" : state,
+        summary: summary ?? `도구 ${list.length}${failed ? ` (실패 ${failed})` : ""}${state === "run" ? "" : ` · ${secs}s`}`,
+        detail: lines.length ? lines : ["도구를 쓰지 않고 답했습니다"],
+      });
+    };
     let planEl: HTMLElement | null = null;
     const onEvent = (ev: AcpEvent) => {
       if (ev.type === "text") {
@@ -419,23 +455,17 @@ export class AiPanel {
           requestAnimationFrame(() => { pending = false; render(body, text, this.host); this.log.scrollTop = this.log.scrollHeight; });
         }
       } else if (ev.type === "thought") {
+        thought += ev.text;
         this.statusEl.textContent = "생각하는 중…";
       } else if (ev.type === "tool") {
-        let t = toolEls.get(ev.id);
-        if (!t) {
-          t = { el: h("div", { class: "ai-tool" }), title: "", kind: "", status: "pending" };
-          toolEls.set(ev.id, t);
-          tools.append(t.el);
-        }
+        const t = toolLog.get(ev.id) ?? { title: "", kind: "", status: "pending" };
         // 바뀔 때(tool_call_update)는 바뀐 칸만 온다
         t.title = ev.title ?? t.title;
         t.kind = ev.kind ?? t.kind;
         t.status = ev.status ?? t.status;
-        const what = `${TOOL_KIND[t.kind] ?? "도구"} ${shortTitle(t.title)}`;
-        t.el.dataset.status = t.status;
-        t.el.textContent = `${what} — ${TOOL_STATUS[t.status] ?? t.status}`;
-        t.el.title = t.title;
-        if (t.status === "in_progress") this.statusEl.textContent = `${what} …`;
+        toolLog.set(ev.id, t);
+        agentStep("run");
+        if (t.status === "in_progress") this.statusEl.textContent = `${TOOL_KIND[t.kind] ?? "도구"} ${shortTitle(t.title)} …`;
       } else if (ev.type === "plan") {
         planEl ??= tools.appendChild(h("div", { class: "ai-plan" }));
         planEl.replaceChildren(...ev.entries.map((e) => h("div", {}, `${e.status === "completed" ? "✓" : e.status === "in_progress" ? "…" : "○"} ${e.content}`)));
@@ -448,13 +478,39 @@ export class AiPanel {
     };
 
     try {
+      // ACP 에서는 앱의 테이블 고르기·문법 카드·예산 맞추기를 쓰지 않는다 — 칩으로 그렇다고 알린다
+      steps.set({
+        id: "guides", label: "문법 카드", state: "skip", summary: "에이전트 몫",
+        detail: ["ACP 에서는 에이전트가 MCP 로 스키마를 직접 봅니다", "앱의 테이블 고르기 · 문법 카드 · 예산 맞추기는 쓰지 않습니다"],
+      });
+      // 튜닝이면 앱이 실행계획을 만들어 함께 보낸다 (에이전트가 explain_plan 도구를 부를지에 맡기지 않는다)
+      let plan: string[] | undefined;
+      if (task === "optimize") {
+        if (ctx.sessionId != null && ctx.sql) {
+          steps.set({ id: "plan", label: "실행계획", state: "run", summary: "만드는 중", detail: [] });
+          try {
+            plan = await api.explain(ctx.sessionId, ctx.sql);
+            steps.set({ id: "plan", label: "실행계획", state: "ok", summary: `${plan.length}줄`, detail: plan });
+          } catch (e) {
+            steps.set({ id: "plan", label: "실행계획", state: "fail", summary: "못 만듦", detail: [errOf(e).message, "실행계획 없이 보냅니다"] });
+          }
+        } else {
+          steps.set({ id: "plan", label: "실행계획", state: "skip", summary: "접속 없음", detail: ["편집 탭이 접속해 있어야 EXPLAIN PLAN 을 만듭니다"] });
+        }
+      }
+
       let done: Awaited<ReturnType<typeof api.acpPrompt>> | null = null;
+      let chat: AcpChat | null = null;
       for (let attempt = 0; !done; attempt++) {
-        const chat = await this.ensureAcp(name);
+        chat = await this.ensureAcp(name);
         this.acpBusy = chat;
         this.statusEl.textContent = "에이전트가 일하는 중…";
+        const ask = acpPrompt(task, ctx, question, chat.mcp, !chat.sent, plan);
+        steps.set({ id: "sent", label: "보낸 문맥", state: "ok", summary: sentSummary(task, ctx, plan, chat.mcp), detail: ask.split("\n") });
+        agentAt = performance.now();
+        agentStep("run", "일하는 중");
         try {
-          done = await api.acpPrompt(name, chat.session, acpPrompt(task, ctx, question, chat.mcp, !chat.sent), onEvent);
+          done = await api.acpPrompt(name, chat.session, ask, onEvent);
           chat.sent = true;
         } catch (e) {
           // 에이전트가 끝났다 — 새로 띄워 새 대화로 한 번 더
@@ -466,17 +522,50 @@ export class AiPanel {
         }
       }
       render(body, text, this.host);
+      const cancelled = done.stop_reason === "cancelled";
+      agentStep(cancelled ? "skip" : done.stop_reason === "end_turn" ? "ok" : "warn", cancelled ? "취소" : undefined);
+
+      // 답의 SQL 을 일반 AI 와 같이 확인한다 (버전 문법 → 서버 파싱). 걸리면 같은 대화로 한 번 고쳐 달라고 묻는다
+      if (!cancelled && chat) {
+        let repairs = 0;
+        let first: string | null = null;
+        for (;;) {
+          steps.set({ id: "verify", label: "검증", state: "run", summary: "확인 중", detail: [] });
+          this.statusEl.textContent = "답의 SQL 을 확인하는 중…";
+          const c = await api.acpCheckSql(ctx.sessionId, task, text, repairs, first);
+          steps.set(c.step);
+          if (!c.repair) break;
+          first ??= c.problem ?? null;
+          repairs++;
+          this.statusEl.textContent = `확인에서 걸렸습니다 — 고쳐 달라고 다시 묻는 중 (${repairs}/1)`;
+          text = "";
+          body.replaceChildren();
+          agentAt = performance.now();
+          agentStep("run", "고치는 중");
+          const again = await api.acpPrompt(name, chat.session, c.repair, onEvent);
+          render(body, text, this.host);
+          if (again.stop_reason === "cancelled") {
+            agentStep("skip", "취소");
+            steps.set({ id: "verify", label: "검증", state: "skip", summary: "취소", detail: [] });
+            break;
+          }
+          agentStep(again.stop_reason === "end_turn" ? "ok" : "warn");
+        }
+      } else {
+        steps.settle("skip", "취소");
+      }
       out.classList.remove("streaming");
       const secs = ((performance.now() - started) / 1000).toFixed(1);
       const notes = [`${name} · ${secs}s`];
       if (usage) notes.push(usage);
-      if (done.stop_reason === "cancelled") notes.push("취소했습니다");
+      if (cancelled) notes.push("취소했습니다");
       else if (done.stop_reason === "refusal") notes.push("⚠ 에이전트가 답을 거절했습니다");
       else if (done.stop_reason === "max_tokens" || done.stop_reason === "max_turn_requests") notes.push("⚠ 한도에 걸려 멈췄습니다");
       this.statusEl.textContent = notes.join(" · ");
     } catch (e) {
       const err = errOf(e);
       if (err.kind === "remote_consent") a.remote_ack = false;
+      steps.settle("fail", "실패");
       out.classList.remove("streaming");
       out.classList.add("error");
       body.textContent = (text ? text + "\n\n" : "") + err.message;
@@ -504,7 +593,7 @@ function shortTitle(t: string) {
 }
 
 /** 에이전트에게 보낼 글 — 첫 질문에만 이 앱에서 묻는다는 것과 규칙을 붙인다 (에이전트가 대화를 기억한다) */
-export function acpPrompt(task: Task, ctx: ReturnType<AiHost["context"]>, question: string, mcp: string[], first: boolean): string {
+export function acpPrompt(task: Task, ctx: ReturnType<AiHost["context"]>, question: string, mcp: string[], first: boolean, plan?: string[]): string {
   const parts: string[] = [];
   if (first) {
     parts.push("[SQLStudio — Oracle SQL 편집기의 AI 패널에서 보낸 질문]\n" +
@@ -527,24 +616,25 @@ export function acpPrompt(task: Task, ctx: ReturnType<AiHost["context"]>, questi
   if (ctx.tables.length) parts.push(`참고할 테이블: ${ctx.tables.join(", ")}`);
   if (task !== "generate" && ctx.sql) parts.push("SQL:\n```sql\n" + ctx.sql + "\n```");
   if (task === "fix" && ctx.error) parts.push("오류:\n" + ctx.error);
+  if (plan?.length) parts.push("지금 접속에서 만든 실행계획 (EXPLAIN PLAN, 실행하지 않음):\n```\n" + plan.join("\n") + "\n```\n계획의 비싼 단계(FULL 스캔·큰 비용·카디널리티)를 근거로 고쳐 줘.");
   return parts.join("\n\n");
 }
 
-/** 답 아래 한 줄 — SQL 을 어디까지 확인했는지, 고쳤으면 무엇을, 하네스가 알릴 것 */
-function verifyLine(v: AiVerify | undefined, warnings: string[]): HTMLElement | null {
-  const parts: [string, string][] = [];
-  const fixed = v?.repairs ? ` · ${v.repairs}번 고침${v.first_problem ? ` (처음 답: ${firstLine(v.first_problem)})` : ""}` : "";
-  if (v?.state === "ok") parts.push(["ok", `✓ 서버에서 파싱 확인${fixed}`]);
-  else if (v?.state === "static") parts.push(["dim", `버전 문법만 확인 — ${v.note ?? ""}${fixed}`]);
-  else if (v?.state === "failed") parts.push(["err", `⚠ 확인에서 걸림${v.repairs ? ` (${v.repairs}번 고쳐도)` : ""}: ${v.note ?? ""}`]);
-  for (const w of warnings) parts.push(["warn", `⚠ ${w}`]);
-  if (!parts.length) return null;
-  return h("div", { class: "ai-verify" }, ...parts.map(([k, t]) => h("div", { class: k }, t)));
+/** 보낸 문맥 칩의 짧은 말 — 무엇이 함께 갔는지 */
+function sentSummary(task: Task, ctx: ReturnType<AiHost["context"]>, plan: string[] | undefined, mcp: string[]): string {
+  const parts: string[] = [];
+  if (task !== "generate" && ctx.sql) parts.push("SQL");
+  if (task === "fix" && ctx.error) parts.push("오류");
+  if (plan?.length) parts.push("실행계획");
+  if (ctx.tables.length) parts.push(`테이블 ${ctx.tables.length}`);
+  if (mcp.length) parts.push(`MCP ${mcp.join(", ")}`);
+  return parts.join(" · ") || "질문만";
 }
 
-function firstLine(s: string) {
-  const l = s.split("\n")[0];
-  return l.length > 80 ? l.slice(0, 80) + "…" : l;
+/** 답 아래 한 줄 — 확인에서 걸린 SQL 은 칩만으로는 놓치기 쉬워 답 밑에도 (통과·알림은 단계 칩에) */
+function verifyLine(v: AiVerify | undefined): HTMLElement | null {
+  if (v?.state !== "failed") return null;
+  return h("div", { class: "ai-verify" }, h("div", { class: "err" }, `⚠ 확인에서 걸림${v.repairs ? ` (${v.repairs}번 고쳐도)` : ""}: ${v.note ?? ""}`));
 }
 
 /** 아주 작은 마크다운: 코드 블록만 따로 그리고 나머지는 글자 그대로 */

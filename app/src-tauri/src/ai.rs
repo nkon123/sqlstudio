@@ -150,6 +150,13 @@ pub fn set_api_key(st: State<'_, AppState>, provider: String, key: String, remem
 }
 
 pub(crate) fn provider(st: &AppState, name: &str) -> R<ProviderConfig> {
+    // "acp:<이름>" — ACP 에이전트를 공급자처럼 (분석에서). 주소 acp://<이름> 이면 HTTP 대신 에이전트에게 묻는다
+    if let Some(agent) = name.strip_prefix("acp:") {
+        let a = crate::acp::agent_cfg(st, agent)?;
+        let mut p = ProviderConfig::new(name, sqls_llm::ProviderKind::OpenaiCompatible, a.model.as_deref().unwrap_or("에이전트 기본 모델"));
+        p.base_url = Some(format!("acp://{agent}"));
+        return Ok(p);
+    }
     let mut p = st
         .providers
         .read()
@@ -210,22 +217,31 @@ pub struct AskArgs {
 pub enum AiEvent {
     /// 무엇을 하는 중인지 (로컬 모델은 오래 걸린다 — 멈춘 것과 구분되게)
     Status { text: String },
-    /// 밖으로 보낸 문맥 요약 (투명성) — 어림 토큰 수와 예산, 예산에 맞추느라 줄인 것.
-    /// `picked`: 테이블을 하네스가 골랐으면 어떻게 (ai · keyword), `examples`: 넣은 내 쿼리 예시의 질문
-    Context {
-        tables: Vec<String>,
-        plan: bool,
-        remote: bool,
-        guides: Vec<String>,
-        tokens: usize,
-        budget: usize,
-        trimmed: Vec<String>,
-        picked: Option<&'static str>,
-        examples: Vec<String>,
-    },
+    /// 하네스 단계 하나 (답 위 칩) — 무엇을 모아 보냈고, 무엇을 건너뛰었고, 답을 어떻게 확인했는지 (투명성)
+    Step(Step),
     Delta { text: String },
     /// 지금까지 보낸 답을 지운다 (다시 묻는 중 — 이어서 새 답이 온다)
     Reset,
+}
+
+/// 하네스 단계 — 같은 id 가 다시 오면 화면이 덮어쓴다 (run → ok)
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Step {
+    /// tables · plan · guides · examples · budget · query · verify (ACP: connect · session · sent · agent)
+    pub id: &'static str,
+    /// run · ok · skip · warn · fail
+    pub state: &'static str,
+    pub label: &'static str,
+    /// 칩에 붙는 짧은 말
+    pub summary: String,
+    /// 펼쳤을 때 줄들
+    pub detail: Vec<String>,
+}
+
+impl Step {
+    pub fn new(id: &'static str, label: &'static str, state: &'static str, summary: impl Into<String>, detail: Vec<String>) -> Self {
+        Self { id, state, label, summary: summary.into(), detail }
+    }
 }
 
 /// 답의 SQL 을 확인한 결과
@@ -268,6 +284,9 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
     let status = |t: &str| {
         let _ = on_event.send(AiEvent::Status { text: t.into() });
     };
+    let step = |s: Step| {
+        let _ = on_event.send(AiEvent::Step(s));
+    };
 
     // ── 문맥 모으기 ───────────────────────────────────
     let mut ctx = Context {
@@ -283,6 +302,9 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
     let session = args.session_id.and_then(|id| st.session(id).ok().map(|(s, _, _)| (id, s)));
     let mut descs: Vec<meta::TableDesc> = Vec::new();
     let mut tables_by: Option<&'static str> = None;
+    // 테이블 고르기에 보인 후보 수 · 실행계획을 못 만든 까닭 (단계 칩에 보인다)
+    let mut cand_n = 0usize;
+    let mut plan_err: Option<String> = None;
     {
         if let Some((_, s)) = &session {
             ctx.server_version = Some(s.info().server_version.clone());
@@ -299,9 +321,11 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
             if names.is_empty() && args.task == Task::Generate && sel.table_pick != "off" {
                 if let Some(q) = ctx.question.clone() {
                     status("쓸 테이블을 찾는 중…");
+                    step(Step::new("tables", "테이블", "run", "후보 찾는 중", vec![]));
                     let words = harness::focus_words(&q);
                     match tokio::time::timeout(std::time::Duration::from_secs(10), meta::find_tables(s, &words, MAX_PICK_CANDIDATES)).await {
                         Ok(Ok(hits)) if !hits.is_empty() => {
+                            cand_n = hits.len();
                             let (chosen, by) = pick_tables(&st, args.request_id, &p, &plan, &sel, &q, &hits, &status).await?;
                             names = chosen;
                             tables_by = Some(by);
@@ -325,9 +349,13 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
             if args.task == Task::Optimize {
                 if let Some(sql) = &ctx.sql {
                     status("실행계획을 만드는 중…");
+                    step(Step::new("plan", "실행계획", "run", "만드는 중", vec![]));
                     match s.explain(sql).await {
                         Ok(lines) => ctx.plan = Some(lines.join("\n")),
-                        Err(e) => ctx.error.get_or_insert_with(|| format!("실행계획 실패: {e}")).push('\n'),
+                        Err(e) => {
+                            plan_err = Some(e.to_string());
+                            ctx.error.get_or_insert_with(|| format!("실행계획 실패: {e}")).push('\n')
+                        }
                     }
                 }
             }
@@ -344,16 +372,21 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
         _ => plan.routing && !sqls_llm::guides::keyword_strong(&all, args.task, &text, major),
     };
     let mut ai_ids: Vec<String> = Vec::new();
+    let mut route_note: Option<String> = None;
     if route {
         if let Some(mut req) = sqls_llm::guides::route_request(&all, args.task, &text, major) {
             status("참고할 문법 카드를 고르는 중…");
+            step(Step::new("guides", "문법 카드", "run", "AI 가 고르는 중", vec![]));
             if !plan.json {
                 req.json_schema = None;
             }
             let limit = std::time::Duration::from_secs(sel.guide_select_timeout_secs.max(1));
             match side_chat(&st, args.request_id, &side_provider(&p, &plan), req, limit).await? {
                 Ok(t) => ai_ids = sqls_llm::guides::parse_route(&t, &all),
-                Err(why) => tracing::warn!("문법 카드 고르기 {why} — 낱말로 고른 것만 씁니다"),
+                Err(why) => {
+                    tracing::warn!("문법 카드 고르기 {why} — 낱말로 고른 것만 씁니다");
+                    route_note = Some(format!("AI 고르기 {why} — 낱말로 고른 것만 넣었습니다"));
+                }
             }
         }
     }
@@ -371,11 +404,38 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
     let budget = harness::context_budget(&p);
     let words = harness::focus_words(&text);
     let fit = fit_context(&mut ctx, &descs, &mut cards, &args.history, budget, &words);
-    let _ = on_event.send(AiEvent::Context {
-        tables: fit.tables.clone(),
-        plan: ctx.plan.is_some(),
-        remote: p.is_remote(),
-        guides: picked
+    let mut warnings = Vec::new();
+    if p.kind == sqls_llm::ProviderKind::Ollama {
+        let ctx_len = p.num_ctx.unwrap_or(16384) as usize;
+        if fit.tokens + 512 > ctx_len {
+            warnings.push(format!("문맥(약 {} 토큰)이 num_ctx({ctx_len})를 넘어 앞부분이 잘릴 수 있습니다 — 공급자 설정에서 num_ctx 를 늘리세요", fit.tokens));
+        }
+    }
+
+    // ── 모은 문맥을 단계 칩으로 ───────────────────────
+    step(match (&session, fit.tables.is_empty()) {
+        (None, _) => Step::new("tables", "테이블", "skip", "접속 없음", vec!["편집 탭이 접속해 있지 않아 스키마 없이 묻습니다".into()]),
+        (Some(_), true) => Step::new("tables", "테이블", "skip", "없음", vec!["SQL 에 테이블이 없고, 질문으로 고른 테이블도 없습니다".into()]),
+        (Some(_), false) => {
+            let (by, how) = match tables_by {
+                Some("ai") => (" · AI 고름", format!("후보 {cand_n}개 중에서 AI 가 골랐습니다")),
+                Some(_) => (" · 낱말", format!("후보 {cand_n}개를 질문 낱말 점수로 골랐습니다")),
+                None => ("", "SQL 에 나온 테이블과 탐색기에서 고른 테이블입니다".into()),
+            };
+            let mut d = vec![how];
+            d.extend(fit.tables.iter().cloned());
+            Step::new("tables", "테이블", "ok", format!("{}{by}", fit.tables.len()), d)
+        }
+    });
+    if args.task == Task::Optimize {
+        step(match (&ctx.plan, &plan_err) {
+            (Some(pl), _) => Step::new("plan", "실행계획", "ok", format!("{}줄", pl.lines().count()), pl.lines().take(60).map(String::from).collect()),
+            (None, Some(e)) => Step::new("plan", "실행계획", "fail", "못 만듦", vec![e.clone()]),
+            (None, None) => Step::new("plan", "실행계획", "skip", "접속 없음", vec!["편집 탭이 접속해 있어야 EXPLAIN PLAN 을 만듭니다".into()]),
+        });
+    }
+    if args.task != Task::Trace {
+        let names: Vec<String> = picked
             .iter()
             .filter(|(g, _)| cards.iter().any(|c| c.id == g.id))
             .map(|(g, why)| match why {
@@ -383,19 +443,47 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
                 sqls_llm::guides::Why::Both => format!("{} (낱말+AI)", g.title),
                 _ => g.title.clone(),
             })
-            .collect(),
-        tokens: fit.tokens,
-        budget,
-        trimmed: fit.trimmed.clone(),
-        picked: tables_by,
-        examples: ctx.examples.iter().map(|(q, _)| q.clone()).collect(),
-    });
-    let mut warnings = Vec::new();
-    if p.kind == sqls_llm::ProviderKind::Ollama {
-        let ctx_len = p.num_ctx.unwrap_or(16384) as usize;
-        if fit.tokens + 512 > ctx_len {
-            warnings.push(format!("문맥(약 {} 토큰)이 num_ctx({ctx_len})를 넘어 앞부분이 잘릴 수 있습니다 — 공급자 설정에서 num_ctx 를 늘리세요", fit.tokens));
+            .collect();
+        let mut d = names.clone();
+        if !route {
+            d.push(match sel.guide_select.as_str() {
+                "off" => "AI 고르기 꺼짐 — 낱말로만 골랐습니다".into(),
+                _ if !plan.routing => "느린 모델이라 AI 고르기를 건너뛰고 낱말로만 골랐습니다".into(),
+                _ => "낱말로 충분해 AI 고르기를 건너뛰었습니다".to_string(),
+            });
         }
+        if let Some(n) = &route_note {
+            d.push(n.clone());
+        }
+        if picked.len() > names.len() {
+            d.push(format!("예산에 맞추느라 {}장 뺐습니다", picked.len() - names.len()));
+        }
+        step(if names.is_empty() {
+            Step::new("guides", "문법 카드", "skip", "없음", d)
+        } else {
+            Step::new("guides", "문법 카드", if route_note.is_some() { "warn" } else { "ok" }, names.len().to_string(), d)
+        });
+    }
+    if matches!(args.task, Task::Generate | Task::Chat) {
+        step(if !local {
+            Step::new("examples", "예시", "skip", "외부라 안 씀", vec!["사내 SQL 을 밖으로 보내지 않으려고 로컬 모델에서만 씁니다".into()])
+        } else if !sel.examples {
+            Step::new("examples", "예시", "skip", "꺼짐", vec!["설정 → AI 에서 켭니다".into()])
+        } else if ctx.examples.is_empty() {
+            Step::new("examples", "예시", "skip", "없음", vec!["비슷한 질문의 내 쿼리 예시가 없습니다".into()])
+        } else {
+            Step::new("examples", "예시", "ok", ctx.examples.len().to_string(), ctx.examples.iter().map(|(q, _)| q.clone()).collect())
+        });
+    }
+    {
+        let mut d: Vec<String> = fit.trimmed.clone();
+        d.extend(warnings.iter().cloned());
+        let state = if d.is_empty() { "ok" } else { "warn" };
+        if d.is_empty() {
+            d.push("줄인 것 없이 다 넣었습니다".into());
+        }
+        d.insert(0, format!("보낸 문맥 약 {} 토큰 · 예산 {} 토큰", thousands(fit.tokens), thousands(budget)));
+        step(Step::new("budget", "예산", state, format!("{}/{}", thousands(fit.tokens), thousands(budget)), d));
     }
 
     let req = prompts::build(args.task, &ctx, &fit.history);
@@ -413,8 +501,17 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
 
     // ── 질의 ─────────────────────────────────────────
     status(if p.is_remote() { "응답을 기다리는 중…" } else { "로컬 모델이 생각하는 중… (첫 응답은 모델 로딩으로 오래 걸릴 수 있습니다)" });
+    let think_note = |m: &ProviderConfig| match m.think.as_deref() {
+        Some("off") => "생각 끔 · ",
+        Some(_) => "생각 켬 · ",
+        None => "",
+    };
+    step(Step::new("query", "질의", "run", think_note(&mp).trim_end_matches(" · ").to_string(), vec![]));
+    let asked = std::time::Instant::now();
+    let mut retried = false;
     let mut resp = match stream_chat(&st, args.request_id, &mp, &req, &on_event).await? {
         Err(sqls_llm::Error::Repetition) if mp.think.as_deref() != Some("off") || !plan.think => {
+            retried = true;
             let _ = on_event.send(AiEvent::Reset);
             status("같은 말을 되풀이해 끊었습니다 — 생각을 끈 채로 다시 묻는 중…");
             warnings.push("생각하다가 같은 말을 되풀이해, 생각을 끄고 다시 물었습니다".into());
@@ -426,6 +523,23 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
         }
         r => r?,
     };
+    {
+        let mut d = vec![format!("모델: {}", resp.model.as_deref().unwrap_or(&p.model))];
+        if let Some(t) = &mp.think {
+            d.push(format!("생각(think): {t}"));
+        }
+        if let Some(t) = mp.temperature {
+            d.push(format!("temperature: {t}"));
+        }
+        if let Some(n) = resp.output_tokens {
+            d.push(format!("답 {n} 토큰"));
+        }
+        if retried {
+            d.push("생각하다가 같은 말을 되풀이해 끊고, 생각을 끈 채로 다시 물었습니다".into());
+        }
+        let secs = asked.elapsed().as_secs_f32();
+        step(Step::new("query", "질의", if retried { "warn" } else { "ok" }, format!("{}{secs:.1}s", think_note(&mp)), d));
+    }
 
     // ── 검증·수리 ────────────────────────────────────
     // 답의 SQL 을 앱 안에서(버전 문법) → 서버에서(파싱만) 확인하고, 걸리면 오류와 전체 컬럼을 주고 다시 묻는다
@@ -436,6 +550,7 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
         let mut known: Vec<meta::TableDesc> = descs.clone();
         while let Some(sql) = prompts::extract_sql(&resp.text) {
             status("답의 SQL 을 확인하는 중…");
+            step(Step::new("verify", "검증", "run", "확인 중", vec![]));
             match check_sql(&st, session.as_ref(), &sql, major).await {
                 Check::Problem(problem) if verify.repairs < plan.repairs => {
                     verify.first_problem.get_or_insert_with(|| problem.clone());
@@ -446,6 +561,13 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
                     verify.repairs += 1;
                     let _ = on_event.send(AiEvent::Reset);
                     status(&format!("확인에서 걸렸습니다 ({}) — 고쳐 달라고 다시 묻는 중 ({}/{})", first_line(&problem), verify.repairs, plan.repairs));
+                    step(Step::new(
+                        "verify",
+                        "검증",
+                        "run",
+                        format!("고쳐 묻는 중 {}/{}", verify.repairs, plan.repairs),
+                        vec![first_line(&problem).to_string()],
+                    ));
                     let mut rp = mp.clone();
                     if local && p.think.is_none() {
                         rp.think = plan.think.then(|| "off".into());
@@ -480,6 +602,7 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
             }
         }
     }
+    step(verify_step(&verify, args.task, plan.repairs));
 
     Ok(AiAnswer {
         sql: prompts::extract_sql(&resp.text),
@@ -494,6 +617,100 @@ pub async fn ai_ask(st: State<'_, AppState>, args: AskArgs, on_event: Channel<Ai
         verify,
         warnings,
     })
+}
+
+/// ACP 에이전트의 답을 하네스가 확인한 결과
+#[derive(Serialize)]
+pub struct AcpCheck {
+    step: Step,
+    /// 걸렸고 더 고쳐 물을 수 있으면 — 에이전트에게 보낼 고쳐 달라는 글 (오류 + 전체 컬럼)
+    repair: Option<String>,
+    /// 걸린 문제 (다음 확인에 처음 문제로 넘긴다)
+    problem: Option<String>,
+}
+
+/// ACP 에이전트 답의 SQL 확인 — 일반 AI 와 같은 검사 (버전 문법 → 서버 파싱, 실행 안 함).
+/// 고쳐 묻기는 화면이 같은 세션으로 보낸다 (에이전트가 대화를 기억한다). `repairs`: 지금까지 고쳐 물은 수
+#[tauri::command]
+pub async fn acp_check_sql(
+    st: State<'_, AppState>,
+    session_id: Option<u64>,
+    task: Task,
+    text: String,
+    repairs: u32,
+    first_problem: Option<String>,
+) -> R<AcpCheck> {
+    const MAX: u32 = 1;
+    let mut v = Verify { state: "none", repairs, first_problem, ..Default::default() };
+    let none = |v: &Verify| AcpCheck { step: verify_step(v, task, MAX), repair: None, problem: None };
+    if matches!(task, Task::Explain | Task::Trace) {
+        return Ok(none(&v));
+    }
+    let Some(sql) = prompts::extract_sql(&text) else {
+        return Ok(none(&v));
+    };
+    let session = session_id.and_then(|id| st.session(id).ok().map(|(s, _, _)| (id, s)));
+    let major = session.as_ref().and_then(|(_, s)| prompts::major_version(&s.info().server_version));
+    match check_sql(&st, session.as_ref(), &sql, major).await {
+        Check::Ok => v.state = "ok",
+        Check::Static(why) => {
+            v.state = "static";
+            v.note = Some(why);
+        }
+        Check::Problem(problem) if repairs < MAX => {
+            let schema = repair_schema(session.as_ref(), &sql, &mut Vec::new()).await;
+            let step = Step::new("verify", "검증", "run", format!("고쳐 묻는 중 {}/{MAX}", repairs + 1), vec![first_line(&problem)]);
+            return Ok(AcpCheck { step, repair: Some(prompts::repair_message(&problem, &schema)), problem: Some(problem) });
+        }
+        Check::Problem(problem) => {
+            v.state = "failed";
+            v.note = Some(problem);
+        }
+    }
+    Ok(none(&v))
+}
+
+/// 검증 결과를 단계 칩으로 — ACP 답을 확인할 때도 쓴다
+pub(crate) fn verify_step(v: &Verify, task: Task, max_repairs: u32) -> Step {
+    if matches!(task, Task::Explain | Task::Trace) {
+        return Step::new("verify", "검증", "skip", "설명이라 안 함", vec!["설명은 SQL 을 내지 않아 확인하지 않습니다".into()]);
+    }
+    let mut d = Vec::new();
+    if let Some(fp) = &v.first_problem {
+        d.push(format!("처음 답: {}", first_line(fp)));
+    }
+    if v.repairs > 0 {
+        d.push(format!("고쳐 달라고 {}번 다시 물었습니다 (최대 {max_repairs}번)", v.repairs));
+    }
+    let fixed = if v.repairs > 0 { format!(" · {}번 고침", v.repairs) } else { String::new() };
+    match v.state {
+        "ok" => {
+            d.push("버전 문법 검사와 서버 파싱을 통과했습니다 (실행은 하지 않음)".into());
+            Step::new("verify", "검증", "ok", format!("파싱 ✓{fixed}"), d)
+        }
+        "static" => {
+            d.push(format!("버전 문법만 확인했습니다 — {}", v.note.as_deref().unwrap_or("")));
+            Step::new("verify", "검증", "warn", format!("문법만{fixed}"), d)
+        }
+        "failed" => {
+            d.push(v.note.clone().unwrap_or_default());
+            Step::new("verify", "검증", "fail", "걸림", d)
+        }
+        _ => Step::new("verify", "검증", "skip", "SQL 없음", vec!["답에 SQL 코드 블록이 없습니다".into()]),
+    }
+}
+
+/// 1234567 → "1,234,567"
+fn thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// 질의 하나를 스트리밍으로 — 취소할 수 있게 별도 작업으로 돌린다.
@@ -632,6 +849,42 @@ pub struct HarnessOpts {
     examples: bool,
     examples_count: usize,
     examples_path: String,
+}
+
+/// 공급자 하나에서 하네스가 고른 단계 (설정 → AI 하네스 화면) — 모델 측정값으로 정해진다
+#[derive(Serialize)]
+pub struct HarnessPlanView {
+    local: bool,
+    /// 형식으로 묶은 중간 단계(테이블 고르기 · 문법 카드 AI 고르기)를 쓰는지 — 느린 로컬 모델은 끈다
+    routing: bool,
+    think: bool,
+    repairs: u32,
+    tables: usize,
+    tok_per_sec: Option<f32>,
+    /// 측정값 아래면 느린 모델로 본다
+    slow_below: f32,
+    budget: usize,
+    /// 공급자 설정에 직접 적은 생각·temperature (하네스보다 우선)
+    user_think: Option<String>,
+    user_temperature: Option<f32>,
+}
+
+#[tauri::command]
+pub fn ai_harness_plan(st: State<'_, AppState>, provider: String) -> R<HarnessPlanView> {
+    let p = self::provider(&st, &provider)?;
+    let pl = harness::plan(&p);
+    Ok(HarnessPlanView {
+        local: harness::is_local_model(&p),
+        routing: pl.routing,
+        think: pl.think,
+        repairs: pl.repairs,
+        tables: pl.tables,
+        tok_per_sec: pl.tok_per_sec,
+        slow_below: harness::SLOW_TOK_PER_SEC,
+        budget: harness::context_budget(&p),
+        user_think: p.think.clone(),
+        user_temperature: p.temperature,
+    })
 }
 
 #[tauri::command]
@@ -954,6 +1207,36 @@ pub fn ai_cancel(st: State<'_, AppState>, request_id: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thousands_groups_digits() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1000), "1,000");
+        assert_eq!(thousands(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn verify_step_names_what_happened() {
+        let v = Verify {
+            state: "ok",
+            repairs: 1,
+            first_problem: Some(
+                "ORA-00904: \"X\": invalid identifier
+자세히"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        let s = verify_step(&v, Task::Generate, 2);
+        assert_eq!((s.state, s.summary.as_str()), ("ok", "파싱 ✓ · 1번 고침"));
+        assert!(s.detail[0].starts_with("처음 답: ORA-00904") && !s.detail[0].contains("자세히"));
+        assert_eq!(verify_step(&v, Task::Explain, 2).state, "skip");
+        let none = Verify { state: "none", ..Default::default() };
+        assert_eq!(verify_step(&none, Task::Generate, 2).summary, "SQL 없음");
+        let failed = Verify { state: "failed", note: Some("ORA-00942".into()), repairs: 2, ..Default::default() };
+        assert_eq!(verify_step(&failed, Task::Fix, 2).state, "fail");
+    }
 
     fn table(name: &str, cols: usize) -> meta::TableDesc {
         meta::TableDesc {

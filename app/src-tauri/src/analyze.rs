@@ -139,12 +139,14 @@ enum Progress {
 
 /// 분석 시작. `provider` 가 None 이면 정적 분석만. 진행은 "analysis-progress" 이벤트로.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn analysis_start(
     app: AppHandle,
     st: State<'_, AppState>,
     id: u64,
     units: Vec<UnitRef>,
     provider: Option<String>,
+    model: Option<String>,
     allow_remote: bool,
     options: Options,
 ) -> R<u64> {
@@ -153,7 +155,7 @@ pub async fn analysis_start(
     }
     let cfg = match &provider {
         Some(n) => {
-            let p = crate::ai::provider(&st, n)?;
+            let p = crate::ai::provider_with(&st, n, model.as_deref())?;
             if p.is_remote() && !allow_remote {
                 return Err(ErrView::msg("invalid", format!("'{}' 는 외부 서버입니다. 소스 코드가 밖으로 나갑니다.", p.name)));
             }
@@ -328,6 +330,7 @@ pub async fn analysis_code_list(st: State<'_, AppState>, id: u64, folders: Vec<S
 
 /// 코드 폴더 분석 — 고른 파일(paths)만. 진행·끝은 analysis_start 와 같은 "analysis-progress" 이벤트
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn analysis_code_start(
     app: AppHandle,
     st: State<'_, AppState>,
@@ -335,6 +338,7 @@ pub async fn analysis_code_start(
     folders: Vec<String>,
     paths: Vec<String>,
     provider: Option<String>,
+    model: Option<String>,
     allow_remote: bool,
     options: Options,
 ) -> R<u64> {
@@ -357,7 +361,7 @@ pub async fn analysis_code_start(
     }
     let cfg = match &provider {
         Some(n) => {
-            let p = crate::ai::provider(&st, n)?;
+            let p = crate::ai::provider_with(&st, n, model.as_deref())?;
             if p.is_remote() && !allow_remote {
                 return Err(ErrView::msg("invalid", format!("'{}' 는 외부 서버입니다. 소스 코드가 밖으로 나갑니다.", p.name)));
             }

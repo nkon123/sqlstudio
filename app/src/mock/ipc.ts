@@ -510,7 +510,8 @@ const LOCAL: Record<string, (a: Args) => unknown> = {
         { id: "mode", name: "Mode", currentValue: "plan", options: [{ value: "build", name: "build" }, { value: "plan", name: "plan" }] }] };
   },
   acp_set_option: () => [],
-  acp_model_context: () => ({ model: "opencode/big-pickle", context: 200000, lines: 400 }),
+  acp_model_context: (a: { model?: string | null }) => a.model === "opencode/small" ? { model: a.model, context: 32000, lines: 366 } : { model: a.model ?? "opencode/big-pickle", context: 200000, lines: 400 },
+  acp_models: () => ({ current: "opencode/big-pickle", options: [["opencode/big-pickle", "OpenCode/Big Pickle"], ["opencode/small", "OpenCode/Small"]] }),
   acp_ack_remote: () => null,
   acp_cancel: () => null,
   acp_prompt: async (a) => {

@@ -797,7 +797,9 @@ async fn ask_agent(acp: &Acp, acfg: &AcpAgentConfig, cfg: &sqls_llm::ProviderCon
     let r = a.request("session/new", json!({ "cwd": work_dir(acfg).map_err(err)?, "mcpServers": [] }), Some(CALL_TIMEOUT)).await.map_err(err)?;
     let sid = r["sessionId"].as_str().ok_or_else(|| sqls_llm::Error::Protocol(format!("ACP {name}: session/new 답에 sessionId 가 없습니다")))?.to_string();
     let mut options = r.get("configOptions").cloned().unwrap_or(Value::Array(vec![]));
-    if let Some(m) = acfg.model.as_deref().filter(|m| !m.is_empty()) {
+    // 분석 화면에서 고른 모델 (cfg.model), 아니면 설정의 모델
+    let model = Some(cfg.model.as_str()).filter(|m| !m.is_empty() && *m != DEFAULT_MODEL).or(acfg.model.as_deref().filter(|m| !m.is_empty()));
+    if let Some(m) = model {
         apply_option(&a, &sid, &mut options, "model", m).await;
     }
     // 분석은 읽기만 — 편집 도구를 막는 plan (설정의 처음 모드가 있으면 그것)
@@ -884,24 +886,56 @@ pub struct ModelContext {
     lines: Option<u32>,
 }
 
-/// 분석 조각 크기를 정하려고 — ACP 는 모델의 컨텍스트 크기를 알려 주지 않아, opencode 는 `opencode models <공급자> --verbose` 로 읽는다.
-/// 다른 에이전트는 모른다
+/// 모델 칸에 아무것도 고르지 않았을 때 — 에이전트가 정한 모델
+pub(crate) const DEFAULT_MODEL: &str = "에이전트 기본 모델";
+
+/// 에이전트가 내놓는 모델 목록 — 새 세션의 configOptions 에서 (분석 화면의 모델 고르기)
+#[derive(Serialize)]
+pub struct AgentModels {
+    /// 설정에 적은 모델, 없으면 에이전트의 기본 모델
+    current: Option<String>,
+    /// (값, 이름)
+    options: Vec<(String, String)>,
+}
+
+/// 에이전트를 띄우고 세션을 하나 열어 설정 고르기(configOptions)를 본다 — 분석이 곧 쓸 프로세스를 미리 띄우는 셈
+async fn session_options(st: &AppState, acfg: &AcpAgentConfig) -> R<Value> {
+    let a = st.acp.get(acfg, &|_| {}).await?;
+    let r = a.request("session/new", json!({ "cwd": work_dir(acfg)?, "mcpServers": [] }), Some(CALL_TIMEOUT)).await?;
+    Ok(r.get("configOptions").cloned().unwrap_or(Value::Array(vec![])))
+}
+
+fn model_option(options: &Value) -> Option<&Value> {
+    options.as_array()?.iter().find(|o| o["id"] == "model")
+}
+
 #[tauri::command]
-pub async fn acp_model_context(st: State<'_, AppState>, agent: String) -> R<ModelContext> {
+pub async fn acp_models(st: State<'_, AppState>, agent: String) -> R<AgentModels> {
     let acfg = agent_cfg(&st, &agent)?;
+    let options = session_options(&st, &acfg).await?;
+    let Some(o) = model_option(&options) else { return Ok(AgentModels { current: acfg.model.clone(), options: vec![] }) };
+    let list = o["options"].as_array().into_iter().flatten().filter_map(|x| {
+        let v = x["value"].as_str()?;
+        Some((v.to_string(), x["name"].as_str().unwrap_or(v).to_string()))
+    });
+    let current = acfg.model.clone().filter(|m| !m.is_empty()).or_else(|| o["currentValue"].as_str().map(String::from));
+    Ok(AgentModels { current, options: list.collect() })
+}
+
+/// 분석 조각 크기를 정하려고 — ACP 는 모델의 컨텍스트 크기를 알려 주지 않아, opencode 는 `opencode models <공급자> --verbose` 로 읽는다.
+/// `model` 이 없으면 설정의 모델, 그것도 없으면 에이전트의 기본 모델. 다른 에이전트는 모른다
+#[tauri::command]
+pub async fn acp_model_context(st: State<'_, AppState>, agent: String, model: Option<String>) -> R<ModelContext> {
+    let acfg = agent_cfg(&st, &agent)?;
+    let model = model.filter(|m| !m.is_empty() && m != DEFAULT_MODEL).or_else(|| acfg.model.clone().filter(|m| !m.is_empty()));
     let unknown = |model: Option<String>| ModelContext { model, context: None, lines: None };
-    let Some(path) = resolve(&acfg.command).filter(|p| p.file_stem().is_some_and(|s| s.eq_ignore_ascii_case("opencode"))) else { return Ok(unknown(acfg.model.clone())) };
-    let model = match acfg.model.clone().filter(|m| !m.is_empty()) {
+    let Some(path) = resolve(&acfg.command).filter(|p| p.file_stem().is_some_and(|s| s.eq_ignore_ascii_case("opencode"))) else { return Ok(unknown(model)) };
+    let model = match model {
         Some(m) => m,
-        None => {
-            // 고르지 않았으면 에이전트의 기본 모델 — 세션을 하나 열어 본다 (분석이 곧 쓸 프로세스를 미리 띄우는 셈)
-            let a = st.acp.get(&acfg, &|_| {}).await?;
-            let r = a.request("session/new", json!({ "cwd": work_dir(&acfg)?, "mcpServers": [] }), Some(CALL_TIMEOUT)).await?;
-            match r["configOptions"].as_array().and_then(|v| v.iter().find(|o| o["id"] == "model")).and_then(|o| o["currentValue"].as_str()) {
-                Some(m) => m.to_string(),
-                None => return Ok(unknown(None)),
-            }
-        }
+        None => match model_option(&session_options(&st, &acfg).await?).and_then(|o| o["currentValue"].as_str()) {
+            Some(m) => m.to_string(),
+            None => return Ok(unknown(None)),
+        },
     };
     let context = opencode_context(&path, &acfg, &model).await;
     Ok(ModelContext { lines: context.map(auto_lines), model: Some(model), context })
@@ -1057,7 +1091,7 @@ mod tests {
         let client = sqls_llm::Client::new();
         let d = Arc::new(Direct(Acp::default(), acfg.clone()));
         client.set_external(d.clone());
-        let mut cfg = sqls_llm::ProviderConfig::new("acp:opencode", sqls_llm::ProviderKind::OpenaiCompatible, "에이전트 기본 모델");
+        let mut cfg = sqls_llm::ProviderConfig::new("acp:opencode", sqls_llm::ProviderKind::OpenaiCompatible, DEFAULT_MODEL);
         cfg.base_url = Some("acp://opencode".into());
         assert!(cfg.is_remote(), "ACP 공급자는 외부로 본다 (분석이 전송 동의를 묻게)");
         let body = "Unit: PROCEDURE APP.P_CLOSE_DAY
@@ -1080,6 +1114,22 @@ END;";
         }
     }
 
+    /// 분석 화면에서 고른 모델(cfg.model)이 설정의 모델보다 먼저 — `cargo test -p sqlstudio acp_live_pick_model -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn acp_live_pick_model() {
+        let acfg = AcpAgentConfig::opencode();
+        let acp = Acp::default();
+        let mut cfg = sqls_llm::ProviderConfig::new("acp:opencode", sqls_llm::ProviderKind::OpenaiCompatible, "opencode/beam-free");
+        cfg.base_url = Some("acp://opencode".into());
+        let req = sqls_llm::ChatRequest { system: "Answer with only the number.".into(), messages: vec![sqls_llm::Message::user("What is 2 + 2?")], json_schema: None };
+        let r = ask_agent(&acp, &acfg, &cfg, &req).await;
+        acp.shutdown_all();
+        let r = r.unwrap_or_else(|e| panic!("{e}"));
+        eprintln!("{:?} → {:?}", r.model, r.text);
+        assert!(r.model.as_deref().is_some_and(|m| m.contains("Beam")), "{:?}", r.model);
+    }
+
     /// 분석의 사전 대조처럼 한 opencode 에 여러 질문을 같이 — 세션마다 답이 섞이지 않는지.
     /// `cargo test -p sqlstudio acp_live_parallel -- --ignored --nocapture`
     #[tokio::test]
@@ -1087,7 +1137,7 @@ END;";
     async fn acp_live_parallel() {
         let acfg = AcpAgentConfig::opencode();
         let acp = Acp::default();
-        let mut cfg = sqls_llm::ProviderConfig::new("acp:opencode", sqls_llm::ProviderKind::OpenaiCompatible, "에이전트 기본 모델");
+        let mut cfg = sqls_llm::ProviderConfig::new("acp:opencode", sqls_llm::ProviderKind::OpenaiCompatible, DEFAULT_MODEL);
         cfg.base_url = Some("acp://opencode".into());
         let ask = |n: u32| {
             let req = sqls_llm::ChatRequest { system: "Answer with only the number.".into(), messages: vec![sqls_llm::Message::user(format!("What is {n} + 100?"))], json_schema: None };

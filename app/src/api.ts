@@ -207,7 +207,9 @@ export const api = {
   acpCheckSql: (sessionId: number | undefined, task: Task, text: string, repairs: number, firstProblem: string | null) =>
     invoke<{ step: Step; repair?: string | null; problem?: string | null }>("acp_check_sql", { sessionId: sessionId ?? null, task, text, repairs, firstProblem }),
   /** 분석 조각 크기용 — 에이전트 모델의 컨텍스트 크기와 거기서 정한 줄 수 (opencode 만, 모르면 null) */
-  acpModelContext: (agent: string) => invoke<{ model: string | null; context: number | null; lines: number | null }>("acp_model_context", { agent }),
+  acpModelContext: (agent: string, model: string | null = null) => invoke<{ model: string | null; context: number | null; lines: number | null }>("acp_model_context", { agent, model }),
+  /** 에이전트가 내놓는 모델 — current 는 설정의 모델, 없으면 에이전트 기본. options 는 [값, 이름] */
+  acpModels: (agent: string) => invoke<{ current: string | null; options: [string, string][] }>("acp_models", { agent }),
   acpSetOption: (agent: string, sessionId: string, configId: string, value: string) =>
     invoke<AcpConfigOption[]>("acp_set_option", { agent, sessionId, configId, value }),
   acpPrompt: (agent: string, sessionId: string, text: string, onEvent: (e: AcpEvent) => void) => {

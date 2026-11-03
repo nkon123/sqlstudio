@@ -146,6 +146,8 @@ export class AnalysisView {
   private nameIn = h("input", { placeholder: "이름 (예: ORD%)", style: "width:130px" });
   private provSel = h("select", { style: "max-width:240px" });
   private badge = h("span", { class: "badge" });
+  /** ACP 에이전트일 때 이 분석에 쓸 모델 — 에이전트 설정의 기본 모델은 바꾸지 않는다 (고른 것은 이 PC 에 기억) */
+  private acpModelSel = h("select", { hidden: true, style: "max-width:220px", title: "이 분석에 쓸 에이전트 모델 — 에이전트 설정의 기본 모델은 바꾸지 않는다" });
   private linesIn = h("input", { type: "number", value: "120", min: "20", max: "400", style: "width:64px", title: "조각 하나의 최대 줄 수 — 작은 모델일수록 작게" });
   private jobsIn = h("input", { type: "number", value: "1", min: "1", max: "16", style: "width:48px", title: "동시에 물을 조각 수 (로컬 모델은 보통 1)" });
   /** 조각 줄 수를 모델에 맞춰 정했을 때 보이는 표시 */
@@ -221,7 +223,12 @@ export class AnalysisView {
     this.modeSel.onchange = () => this.setMode(this.modeSel.value === "code" ? "code" : "db");
     this.folderBtn.onclick = () => this.pickFolder();
     this.stopBtn.onclick = () => this.cancel();
-    this.provSel.onchange = () => { this.updateBadge(); void this.autoFit(); };
+    this.provSel.onchange = () => { this.updateBadge(); void this.onProvider(); };
+    this.acpModelSel.onchange = () => {
+      const agent = this.provSel.value.slice(4);
+      try { localStorage.setItem(`analysis.acpModel.${agent}`, this.acpModelSel.value); } catch { /* 기억 못 해도 된다 */ }
+      void this.autoFit();
+    };
     for (const i of [this.linesIn, this.jobsIn]) i.addEventListener("input", () => { this.touched.add(i); if (i === this.linesIn) this.linesAuto.hidden = true; });
     this.allBox.onchange = () => {
       for (const r of this.rows) this.allBox.checked ? this.checked.add(keyOf(r)) : this.checked.delete(keyOf(r));
@@ -236,7 +243,7 @@ export class AnalysisView {
       h("button", { title: "다른 곳에서 내보낸 분석 결과(.sqla)를 가져와 접속 없이 본다", onclick: () => this.importSet() }, "가져오기"),
       h("span", { class: "sep" }),
       this.modeSel, this.ownerIn, this.nameIn, this.folderIn, this.folderBtn, listBtn, h("span", { class: "sep" }),
-      this.provSel, this.badge,
+      this.provSel, this.acpModelSel, this.badge,
       h("label", { class: "check", title: "조각 하나의 최대 줄 수" }, "조각", this.linesIn, "줄", this.linesAuto),
       h("label", { class: "check", title: "동시에 물을 조각 수" }, "동시", this.jobsIn),
       h("label", { class: "check", title: "저장된 결과가 있어도 다시 묻는다" }, this.forceBox, "다시"),
@@ -307,13 +314,13 @@ export class AnalysisView {
     const opt = (p: Provider, label: string) => h("option", { value: p.name, selected: p.name === prev }, label);
     this.provSel.replaceChildren(h("option", { value: "" }, "모델 없이 (정적 분석만)"),
       ...this.providers.filter((p) => !p.name.startsWith("acp:")).map((p) => opt(p, `${p.name} · ${p.model}`)),
-      ...(acp.length ? [h("optgroup", { label: "ACP 에이전트" }, ...acp.map((p) => opt(p, `${p.name.slice(4)} (ACP) · ${p.model}`)))] : []));
+      ...(acp.length ? [h("optgroup", { label: "ACP 에이전트" }, ...acp.map((p) => opt(p, `${p.name.slice(4)} (ACP)`)))] : []));
     if (!prev) {
       const local = this.providers.find((p) => !p.remote);
       if (local) this.provSel.value = local.name;
     }
     this.updateBadge();
-    void this.autoFit();
+    void this.onProvider();
     this.loading(steps, 1);
     await this.refreshSets();
     // 접속이 없으면 이 PC 의 결과 중 하나를 연다
@@ -582,6 +589,35 @@ export class AnalysisView {
     return this.providers.find((p) => p.name === this.provSel.value);
   }
 
+  /** 공급자를 바꾸면 — ACP 에이전트면 모델 목록을 채우고, 조각 크기를 맞춘다 */
+  private async onProvider() {
+    const p = this.provSel.value;
+    this.acpModelSel.hidden = !p.startsWith("acp:");
+    if (p.startsWith("acp:")) await this.loadAcpModels(p.slice(4));
+    if (this.provSel.value === p) await this.autoFit();
+  }
+
+  /** 에이전트가 내놓는 모델 — 처음엔 에이전트를 띄워 세션을 하나 열어 본다 (분석이 곧 쓸 프로세스라 미리 띄우는 셈) */
+  private async loadAcpModels(agent: string) {
+    this.acpModelSel.replaceChildren(h("option", { value: "" }, "모델 목록 읽는 중…"));
+    this.acpModelSel.disabled = true;
+    const m = await api.acpModels(agent).catch((e) => { toast(`${agent}: 모델 목록을 읽지 못했습니다 — ${errOf(e).message}`, "error"); return null; });
+    if (this.provSel.value !== `acp:${agent}`) return;
+    this.acpModelSel.disabled = false;
+    let saved: string | null = null;
+    try { saved = localStorage.getItem(`analysis.acpModel.${agent}`); } catch { /* 없으면 설정의 모델 */ }
+    const list = m?.options ?? [];
+    const pick = list.some(([v]) => v === saved) ? saved : m?.current ?? "";
+    this.acpModelSel.replaceChildren(
+      ...(list.length ? [] : [h("option", { value: "" }, "에이전트 기본 모델")]),
+      ...list.map(([v, name]) => h("option", { value: v, selected: v === pick }, v === m?.current ? `${name} (설정)` : name)));
+  }
+
+  /** 분석에 쓸 ACP 모델 — 고르지 않았으면 null (설정의 모델) */
+  private acpModel(): string | null {
+    return this.provSel.value.startsWith("acp:") && this.acpModelSel.value ? this.acpModelSel.value : null;
+  }
+
   /** ACP 에이전트면 조각 줄 수를 모델의 컨텍스트 크기로, 동시 수를 4 로 (조각마다 새 대화라 하나씩이면 느리다).
    *  다른 공급자로 돌아가면 기본값. 손으로 바꾼 칸은 그대로 둔다 */
   private async autoFit() {
@@ -596,8 +632,9 @@ export class AnalysisView {
     set(this.jobsIn, "4", "동시에 물을 조각 수 — ACP 에이전트는 자동 4 (한 에이전트에 대화를 여럿 연다)");
     if (this.touched.has(this.linesIn)) return;
     this.linesIn.title = "모델의 컨텍스트 크기를 읽는 중…";
-    const c = await api.acpModelContext(p.slice(4)).catch(() => null);
-    if (this.provSel.value !== p || this.touched.has(this.linesIn)) return;
+    const model = this.acpModel();
+    const c = await api.acpModelContext(p.slice(4), model).catch(() => null);
+    if (this.provSel.value !== p || this.acpModel() !== model || this.touched.has(this.linesIn)) return;
     if (c?.lines && c.context) {
       set(this.linesIn, String(c.lines), `자동 — ${c.model} 컨텍스트 ${Math.round(c.context / 1000)}K 토큰 → ${c.lines}줄 (최대 400). 직접 바꾸면 그 값을 쓴다`);
       this.linesAuto.hidden = false;
@@ -808,8 +845,8 @@ export class AnalysisView {
     };
     try {
       this.run = this.mode === "code"
-        ? await invoke<number>("analysis_code_start", { id, folders: this.folders, paths: picked.map((r) => r.path), provider: p?.name ?? null, allowRemote: !!p?.remote, options })
-        : await invoke<number>("analysis_start", { id, units, provider: p?.name ?? null, allowRemote: !!p?.remote, options });
+        ? await invoke<number>("analysis_code_start", { id, folders: this.folders, paths: picked.map((r) => r.path), provider: p?.name ?? null, model: this.acpModel(), allowRemote: !!p?.remote, options })
+        : await invoke<number>("analysis_start", { id, units, provider: p?.name ?? null, model: this.acpModel(), allowRemote: !!p?.remote, options });
     } catch (e) {
       return toast(errOf(e).message, "error");
     }

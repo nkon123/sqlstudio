@@ -150,10 +150,16 @@ pub fn set_api_key(st: State<'_, AppState>, provider: String, key: String, remem
 }
 
 pub(crate) fn provider(st: &AppState, name: &str) -> R<ProviderConfig> {
+    provider_with(st, name, None)
+}
+
+/// `model` — ACP 에이전트면 그 분석에 쓸 모델 (분석 화면에서 고른 것). 없으면 설정의 모델
+pub(crate) fn provider_with(st: &AppState, name: &str, model: Option<&str>) -> R<ProviderConfig> {
     // "acp:<이름>" — ACP 에이전트를 공급자처럼 (분석에서). 주소 acp://<이름> 이면 HTTP 대신 에이전트에게 묻는다
     if let Some(agent) = name.strip_prefix("acp:") {
         let a = crate::acp::agent_cfg(st, agent)?;
-        let mut p = ProviderConfig::new(name, sqls_llm::ProviderKind::OpenaiCompatible, a.model.as_deref().unwrap_or("에이전트 기본 모델"));
+        let model = model.filter(|m| !m.is_empty()).or(a.model.as_deref().filter(|m| !m.is_empty())).unwrap_or(crate::acp::DEFAULT_MODEL);
+        let mut p = ProviderConfig::new(name, sqls_llm::ProviderKind::OpenaiCompatible, model);
         p.base_url = Some(format!("acp://{agent}"));
         return Ok(p);
     }

@@ -135,6 +135,9 @@ export class AiPanel {
     // 설정에서 바꾸거나 지운 에이전트의 대화는 버린다 (다음 질문에 새로 연다)
     if (this.acp && this.acp.agent !== this.agentName()) this.dropAcp();
     this.updateBadge();
+    // 지난번에 에이전트를 골라 두었으면 미리 띄운다 — 느린 PC 에선 시작이 오래 걸려 첫 질문을 기다리게 하지 않게
+    const a = this.agentName();
+    if (a && this.agents.find((x) => x.name === a)?.available) this.ensureAcp(a).catch((e) => { this.statusEl.textContent = errOf(e).message; });
   }
 
   private current() {
@@ -188,8 +191,13 @@ export class AiPanel {
   private ensureAcp(name: string): Promise<AcpChat> {
     if (this.acp?.agent === name) return Promise.resolve(this.acp);
     if (this.acpStarting) return this.acpStarting;
-    this.statusEl.textContent = `${name} 시작 중…`;
-    const start: Promise<AcpChat> = api.acpNewSession(name).then((s) => {
+    // 몇 초 걸렸는지 보여 준다 (느린 PC 에선 1분 가까이 걸려 멈춘 것처럼 보이지 않게)
+    const t0 = Date.now();
+    const tick = () => {
+      if (this.acpStarting === start && this.running == null) this.statusEl.textContent = `${name} 시작 중… ${Math.round((Date.now() - t0) / 1000)}초`;
+    };
+    const timer = window.setInterval(tick, 1000);
+    const start: Promise<AcpChat> = api.acpNewSession(name).finally(() => window.clearInterval(timer)).then((s) => {
       if (this.acpStarting !== start) throw new Error("다른 대화로 바뀌었습니다");
       const chat: AcpChat = { agent: name, session: s.session_id, mcp: s.mcp_profiles, sent: false };
       this.acp = chat;
@@ -205,6 +213,7 @@ export class AiPanel {
       throw e;
     });
     this.acpStarting = start;
+    this.statusEl.textContent = `${name} 시작 중…`;
     return start;
   }
 

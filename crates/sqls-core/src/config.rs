@@ -56,6 +56,9 @@ pub struct AcpAgentConfig {
     /// 새 대화의 처음 모드 (opencode: plan = 편집 도구를 막음, build = 다 씀). 비우면 에이전트 기본값
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// 새 대화의 모델 (opencode: `opencode/big-pickle` 같은 공급자/모델). AI 패널에서 고르면 여기에 남는다. 비우면 에이전트 기본값
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// 외부 전송 동의 — 에이전트가 쓰는 모델은 대개 이 PC 밖에 있다
     #[serde(default)]
     pub remote_ack: bool,
@@ -67,10 +70,11 @@ impl AcpAgentConfig {
         Self {
             name: "opencode".into(),
             command: "opencode".into(),
-            args: vec!["acp".into()],
+            args: vec!["acp".into(), "--pure".into()],
             cwd: None,
             mcp: true,
             mode: Some("plan".into()),
+            model: None,
             remote_ack: false,
         }
     }

@@ -100,7 +100,7 @@ export interface CompletionStatus { profile: string; phase: string; objects: num
 export interface McpSettings { allowed_connections: string[]; call_timeout_secs: number; allow_explain: boolean }
 /** ACP 에이전트 (opencode 등) — 설정의 [[acp]] */
 export interface AcpAgent {
-  name: string; command: string; args: string[]; cwd?: string | null; mcp: boolean; mode?: string | null; remote_ack?: boolean;
+  name: string; command: string; args: string[]; cwd?: string | null; mcp: boolean; mode?: string | null; model?: string | null; remote_ack?: boolean;
   /** 실행 파일을 찾았는지 · 지금 띄워져 있는지 (읽을 때만) */
   available?: boolean; running?: boolean;
 }

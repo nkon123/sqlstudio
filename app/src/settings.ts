@@ -839,17 +839,19 @@ async function acpSection(app: App): Promise<HTMLElement[]> {
     const args = h("input", { value: (a?.args ?? []).join(" "), placeholder: "예: acp" });
     const cwd = h("input", { value: a?.cwd ?? "", placeholder: "비우면 데이터 폴더의 acp-work" });
     const mode = h("input", { value: a?.mode ?? "", placeholder: "예: plan" });
+    const model = h("input", { value: a?.model ?? "", placeholder: "비우면 에이전트 기본값" });
     const mcp = h("input", { type: "checkbox", checked: a?.mcp ?? true }) as HTMLInputElement;
     const result = h("pre", { class: "modal-text" });
     const collect = (): AcpAgent => ({
       name: name.value.trim(), command: command.value.trim(), args: args.value.trim().split(/\s+/).filter(Boolean),
-      cwd: cwd.value.trim() || null, mcp: mcp.checked, mode: mode.value.trim() || null,
+      cwd: cwd.value.trim() || null, mcp: mcp.checked, mode: mode.value.trim() || null, model: model.value.trim() || null,
     });
     form.replaceChildren(
-      h("p", { class: "hint" }, "ACP(Agent Client Protocol)를 지원하는 코딩 에이전트를 AI 패널의 공급자 목록에서 고를 수 있게 합니다. 모델·로그인은 에이전트 쪽 설정을 씁니다 (opencode: 터미널에서 opencode auth login)."),
-      field("이름", name), field("실행 파일", command), field("인자", args, "빈칸으로 나눕니다"),
+      h("p", { class: "hint" }, "ACP(Agent Client Protocol)를 지원하는 코딩 에이전트를 AI 패널의 공급자 목록에서 고를 수 있게 합니다. 로그인은 에이전트 쪽 설정을 씁니다 (opencode: 터미널에서 opencode auth login)."),
+      field("이름", name), field("실행 파일", command), field("인자", args, "빈칸으로 나눕니다. opencode acp 에는 --pure(외부 플러그인 없이, 시작이 빠름)를 늘 붙입니다"),
       field("작업 폴더", cwd, "에이전트가 파일을 보는 곳"),
       field("처음 모드", mode, "새 대화마다 이 모드로 바꿉니다. opencode 의 plan 은 파일 편집 도구를 막습니다 (build 는 묻지 않고 파일을 고칠 수 있습니다)"),
+      field("모델", model, "새 대화마다 이 모델로 바꿉니다. AI 패널에서 모델을 고르면 여기에 저장됩니다 (opencode 예: opencode/big-pickle)"),
       h("label", { class: "check", title: "새 대화를 열 때 sqlstudio-mcp 를 MCP 서버로 넘깁니다. 설정 → MCP 에서 허용한 접속의 사전(테이블·컬럼·소스)만 조회하고, SQL 은 실행하지 않습니다" },
         mcp, "DB 사전 조회 도구(sqlstudio-mcp)를 에이전트에 넘기기"),
       h("div", { class: "row" },

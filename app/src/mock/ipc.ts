@@ -561,7 +561,18 @@ const LOCAL: Record<string, (a: Args) => unknown> = {
       verify: { state: "ok", repairs: 1, first_problem: "ORA-00904: \"DEPT_NO\": invalid identifier" }, warnings: [] };
   },
   get_mcp_settings: () => ({ allowed_connections: [], call_timeout_secs: 30, allow_explain: false }),
-  history_search: () => [],
+  // 실행 이력 — 몇 건을 지어 두고 낱말(모두 들어간 것)·접속으로 거른다
+  history_search: (a) => {
+    const now = Math.floor(Date.now() / 1000);
+    const rows = [
+      { t: now - 120, profile: "가짜 DB", user: "SCOTT", sql: "SELECT deptno, SUM(sal) AS total_sal\n  FROM emp\n GROUP BY deptno", kind: "query", ms: 38, rows: 3, count: 4 },
+      { t: now - 900, profile: "가짜 DB", user: "SCOTT", sql: "UPDATE emp SET sal = sal * 1.1 WHERE deptno = 10", kind: "dml", ms: 12, rows: 3, count: 1 },
+      { t: now - 3600, profile: "ERP 개발", user: "ERP", sql: "SELECT * FROM orders WHERE status = 'CANCEL' AND order_dt >= TRUNC(SYSDATE) - 7", kind: "query", ms: 220, rows: 18, count: 2 },
+      { t: now - 86400 * 2, profile: "가짜 DB", user: "SCOTT", sql: "SELECT empno, ename FROM emp WHERE dept_no = 10", kind: "query", ms: 5, rows: null, error: "ORA-00904: \"DEPT_NO\": invalid identifier", count: 1 },
+    ];
+    const words = String(a.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+    return rows.filter((r) => (!a.profile || r.profile === a.profile) && words.every((w) => r.sql.toLowerCase().includes(w)));
+  },
   client_log: () => null,
   conn_event: () => null,
   // 파일은 브라우저 저장소에 (탭 되살리기·저장을 시험할 수 있게)

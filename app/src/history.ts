@@ -23,6 +23,82 @@ function when(t: number) {
   return d.toDateString() === now.toDateString() ? hm : `${two(d.getMonth() + 1)}-${two(d.getDate())} ${hm}`;
 }
 
+/** 왼쪽 패널의 실행 이력 — 좁은 폭에 맞춰 한 건을 두 줄로 (때·접속·성공 / 문장).
+ *  클릭: 고르기(전체 문장은 마우스를 올리면) · 더블클릭·Enter: 편집기에 넣기 · 우클릭: 넣기·새 탭·복사.
+ *  넓게 보려면 F8 의 이력 창 */
+export interface HistoryPanelHost {
+  /** 지금 탭의 접속 프로필 — 탭을 바꾸면 달라진다 */
+  profile: () => string | undefined;
+  insert: (sql: string) => void;
+  newTab: (sql: string) => void;
+  menu: (x: number, y: number, sql: string) => void;
+}
+
+export function historyPanel(host: HistoryPanelHost) {
+  const q = h("input", { placeholder: "이력 찾기 (낱말 여러 개)" }) as HTMLInputElement;
+  const only = h("input", { type: "checkbox" }) as HTMLInputElement;
+  const onlyLabel = h("span", {}, "이 접속만");
+  const info = h("span", { class: "hist-info" });
+  const list = h("div", { class: "side-hist-list", tabindex: "0" });
+  let rows: Row[] = [];
+  let sel = -1;
+  let seq = 0;
+  const sqlOf = (r: Row) => r.sql.trim().replace(/;?\s*$/, ";");
+  const show = () => {
+    list.replaceChildren(...rows.map((r, i) => {
+      const el = h("div", { class: `side-hist${i === sel ? " sel" : ""}${r.error ? " err" : ""}`,
+        title: `${r.sql}\n\n${r.user}@${r.profile} · ${new Date(r.t * 1000).toLocaleString()} · ${r.ms.toLocaleString()} ms${r.rows != null ? ` · ${r.rows.toLocaleString()}행` : ""}${r.error ? `\n${r.error}` : ""}` },
+        h("div", { class: "side-hist-meta" }, h("span", { class: "hist-s" }, r.error ? "✗" : "✓"), when(r.t), " · ", r.profile,
+          r.count > 1 ? h("span", { class: "hist-n" }, ` ×${r.count}`) : ""),
+        h("div", { class: "side-hist-sql" }, r.sql.replace(/\s+/g, " ").slice(0, 160)));
+      el.onclick = () => { sel = i; show(); };
+      el.ondblclick = () => host.insert(sqlOf(r));
+      el.oncontextmenu = (e) => { e.preventDefault(); sel = i; show(); host.menu(e.clientX, e.clientY, sqlOf(r)); };
+      return el;
+    }));
+    if (!rows.length) list.append(h("div", { class: "empty" }, q.value.trim() ? "맞는 이력이 없습니다" : "실행한 SQL 이 여기에 쌓입니다"));
+    list.querySelector(".sel")?.scrollIntoView({ block: "nearest" });
+  };
+  const load = async () => {
+    const my = ++seq;
+    const prof = host.profile();
+    only.disabled = !prof;
+    onlyLabel.textContent = prof ? `${prof} 만` : "이 접속만";
+    try {
+      const r = await invoke<Row[]>("history_search", { query: q.value, profile: only.checked && prof ? prof : null, limit: 200 });
+      if (my !== seq) return;
+      rows = r;
+      sel = Math.min(sel, rows.length - 1);
+      info.textContent = rows.length ? `${rows.length}${rows.length >= 200 ? "+" : ""}` : "";
+      show();
+    } catch (e) {
+      list.replaceChildren(h("div", { class: "err" }, errOf(e).message));
+    }
+  };
+  let timer = 0;
+  q.addEventListener("input", () => { clearTimeout(timer); timer = window.setTimeout(load, 150); });
+  only.onchange = load;
+  // 목록·찾기 칸에서 ↑↓ 고르기, Enter 넣기
+  const keys = (e: KeyboardEvent) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      sel = Math.max(0, Math.min(rows.length - 1, sel + (e.key === "ArrowDown" ? 1 : -1)));
+      show();
+    } else if (e.key === "Enter" && rows[sel]) {
+      e.preventDefault();
+      host.insert(sqlOf(rows[sel]));
+    }
+  };
+  q.addEventListener("keydown", keys);
+  list.addEventListener("keydown", keys);
+  const el = h("div", { class: "side-pane side-hist-pane" },
+    h("div", { class: "side-hist-bar" }, q, h("button", { class: "small", title: "다시 읽기", onclick: () => void load() }, "↻")),
+    h("div", { class: "side-hist-opts" }, h("label", { class: "check", title: "지금 탭의 접속에서 실행한 것만" }, only, onlyLabel), info),
+    list,
+    h("small", { class: "hint" }, "더블클릭·Enter: 넣기 · 우클릭: 메뉴 · F8: 넓게 보기"));
+  return { el, load };
+}
+
 export async function openHistory(host: HistoryHost) {
   const q = h("input", { placeholder: "찾기 — 낱말 여러 개 (예: orders cancel)", class: "hist-q" });
   const only = h("input", { type: "checkbox", checked: !!host.profile });

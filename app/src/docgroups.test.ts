@@ -16,10 +16,10 @@ eq(dateBucket(new Date(2026, 9, 20).getTime(), now), "지난 30일", "보름 전
 eq(dateBucket(new Date(2026, 5, 1).getTime(), now), "이전", "다섯 달 전");
 eq(dateBucket(now + 60_000, now), "오늘", "시계가 조금 앞선 것");
 
-// 접속 — 끊긴 탭은 마지막 접속에 '(끊김)', 한 번도 안 했으면 '접속 안 함'
+// 접속 — 끊긴 탭은 마지막 접속과 같은 묶음, 한 번도 안 했으면 '접속 안 함'
 const t = (o: object) => ({ used: now, tag: null, conn: null, lastProfile: null, ...o });
 eq(docGroupKey(t({ conn: { profile: "ERP 개발" } }), "conn"), "ERP 개발", "접속");
-eq(docGroupKey(t({ lastProfile: "MES" }), "conn"), "MES (끊김)", "끊김");
+eq(docGroupKey(t({ lastProfile: "ERP 개발" }), "conn"), "ERP 개발", "끊김은 같은 묶음");
 eq(docGroupKey(t({}), "conn"), "접속 안 함", "접속 안 함");
 eq(docGroupKey(t({ tag: "월마감" }), "tag"), "월마감", "태그");
 eq(docGroupKey(t({}), "tag"), "태그 없음", "태그 없음");

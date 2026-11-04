@@ -1,4 +1,4 @@
-// 왼쪽 '열린 문서' 묶기 — 날짜(마지막으로 고친 날) · 접속 · 태그. 고른 묶기는 이 PC 에 기억한다.
+// 왼쪽 '문서' 묶기 — 날짜(마지막으로 고친 날) · 접속 · 태그. 고른 묶기는 이 PC 에 기억한다.
 
 export type DocGroup = "none" | "date" | "conn" | "tag";
 
@@ -35,7 +35,8 @@ export interface Groupable { used: number; tag: string | null; conn: { profile: 
 
 export function docGroupKey(t: Groupable, mode: DocGroup): string {
   if (mode === "date") return dateBucket(t.used);
-  if (mode === "conn") return t.conn?.profile ?? (t.lastProfile ? `${t.lastProfile} (끊김)` : NO_CONN);
+  // 끊긴 문서도 마지막 접속의 묶음에 (끊김은 문서 줄의 접속 이름에 보인다)
+  if (mode === "conn") return t.conn?.profile ?? t.lastProfile ?? NO_CONN;
   if (mode === "tag") return t.tag ?? NO_TAG;
   return "";
 }

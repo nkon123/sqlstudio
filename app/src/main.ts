@@ -28,7 +28,7 @@ import { showColumnSource } from "./colsource";
 import { showRowTrace, showValueTrace, type TraceHooks } from "./valuetrace";
 import { showDiff, type Snapshot } from "./resultdiff";
 import { openCopyData } from "./copydata";
-import { openHistory } from "./history";
+import { historyPanel, openHistory } from "./history";
 import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
 import { fromLineStart, hasManualLayout, manualLayout } from "./autofmt";
@@ -185,7 +185,7 @@ export class App {
       this.browserFilter,
       this.browserList,
       h("small", { class: "hint" }, "클릭: 구조 · 우클릭: 메뉴 · 더블클릭: 이름 넣기 · 체크: AI 문맥에 포함"));
-    // 왼쪽 영역 — 위는 늘 보이는 세로 메뉴, 아래는 '열린 문서' 목록 (테이블·프로젝트를 고르면 그 자리에)
+    // 왼쪽 영역 — 위는 늘 보이는 세로 메뉴, 아래는 '문서' 목록 (테이블·프로젝트를 고르면 그 자리에)
     const searchRow = h("div", { class: "doc-search", hidden: true }, this.docFilter);
     this.docFilter.addEventListener("input", () => this.filterDocs());
     this.docFilter.addEventListener("keydown", (e) => {
@@ -198,48 +198,56 @@ export class App {
       this.docList.hidden = docsFolded;
       docsHead.classList.toggle("folded", docsFolded);
       try { localStorage.setItem("side.docsFolded", docsFolded ? "1" : "0"); } catch { /* 이번만 */ }
-    } }, "열린 문서");
+    } }, "문서");
     this.docsHead = docsHead;
     this.docList.hidden = docsFolded;
     docsHead.classList.toggle("folded", docsFolded);
     // 묶기 — 없음 · 날짜 · 접속 · 태그
-    const groupBtn = h("button", { class: "doc-group-btn", title: "열린 문서를 묶어 보기", onclick: () => {
+    // '문서' 줄 오른쪽의 작은 아이콘 둘 — 찾기, 묶기 (묶었으면 강조색)
+    const searchBtn = h("button", { class: "doc-icon", title: "문서 찾기 — 제목·접속·첫 줄·태그 (Esc: 닫기)", onclick: () => {
+      searchRow.hidden = !searchRow.hidden;
+      searchBtn.classList.toggle("on", !searchRow.hidden);
+      if (!searchRow.hidden) this.docFilter.focus();
+      else if (this.docFilter.value) { this.docFilter.value = ""; this.filterDocs(); }
+    } }, icon("M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4"));
+    this.docFilter.addEventListener("keydown", (e) => { if (e.key === "Escape") searchBtn.classList.remove("on"); });
+    const groupTitle = () => `묶기: ${GROUP_LABEL[docGroupPref()]} — 없음 · 날짜 · 접속 · 태그`;
+    const groupBtn = h("button", { class: "doc-icon", title: groupTitle(), onclick: () => {
       const r = groupBtn.getBoundingClientRect();
       showMenu(r.left, r.bottom + 2, [
         { title: "묶기" },
         ...(Object.entries(GROUP_LABEL) as [DocGroup, string][]).map(([k, label]): MenuItem => ({
           label: `${docGroupPref() === k ? "✓ " : ""}${label}`,
-          run: () => { setDocGroupPref(k); groupBtn.textContent = `묶기: ${GROUP_LABEL[k]}`; this.renderDocs(); },
+          run: () => { setDocGroupPref(k); groupBtn.title = groupTitle(); groupBtn.classList.toggle("on", k !== "none"); this.renderDocs(); },
         })),
       ]);
-    } }, `묶기: ${GROUP_LABEL[docGroupPref()]}`);
-    const docPane = h("div", { class: "side-pane doc-pane" }, searchRow, h("div", { class: "doc-section-row" }, docsHead, groupBtn), this.docList);
+    } }, icon("M4 6h16M7 12h10M10 18h4"));
+    groupBtn.classList.toggle("on", docGroupPref() !== "none");
+    const docPane = h("div", { class: "side-pane doc-pane" },
+      h("div", { class: "doc-section-row" }, docsHead, h("span", { class: "doc-icons" }, searchBtn, groupBtn)), searchRow, this.docList);
     const nav = h("nav", { class: "side-nav" });
-    const panes: Record<string, HTMLElement> = { doc: docPane, table: tablePane, git: this.gitPane };
+    const panes: Record<string, HTMLElement> = { doc: docPane, table: tablePane, git: this.gitPane, hist: this.histPanel.el };
     const showSide = (k: string) => {
       this.sideTab = k;
       for (const [n, el] of Object.entries(panes)) el.hidden = n !== k;
-      for (const b of nav.children) b.classList.toggle("active", (b as HTMLElement).dataset.k === k && k !== "doc");
+      for (const b of nav.children) b.classList.toggle("active", (b as HTMLElement).dataset.k === k);
       try { localStorage.setItem("side.tab", k); } catch { /* 없어도 된다 */ }
       if (k === "git") this.loadGit().then((g) => g.setVisible(true));
       else this.git?.setVisible(false);
+      if (k === "hist") void this.histPanel.load();
       this.placeTabs();
     };
     const item = (k: string, label: string, path: string, title: string, run: () => void) =>
       h("button", { class: "side-item", "data-k": k, title, onclick: run }, icon(path), h("span", {}, label));
     nav.append(
       item("new", "새 문서", "M12 5v14M5 12h14", "새 탭 (같은 접속으로)", () => { showSide("doc"); this.newTab(true); }),
-      item("search", "검색", "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4", "열린 문서를 제목·접속·첫 줄로 찾기", () => {
-        showSide("doc");
-        searchRow.hidden = false;
-        this.docFilter.focus();
-      }),
-      // 고른 것을 다시 누르면 열린 문서로
+      // 아래 영역을 바꾸는 넷 — 지금 보는 것이 강조된다. 테이블·프로젝트·실행 이력은 다시 눌러도 문서 목록으로
+      item("doc", "문서", "M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5", "열린 문서 목록 (탭)", () => showSide("doc")),
       item("table", "테이블", "M4 5h16v14H4zM4 10h16M4 15h16M10 5v14", "테이블·뷰 목록 — 클릭: 구조 · 더블클릭: 이름 넣기 · 체크: AI 문맥", () => showSide(this.sideTab === "table" ? "doc" : "table")),
       item("git", "프로젝트", "M6 3v12M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9", "프로젝트 폴더·git", () => showSide(this.sideTab === "git" ? "doc" : "git")),
-      item("history", "실행 이력", "M12 7v5l3 2M3.5 9A9 9 0 1 1 3 12M3 4v5h5", "실행한 SQL 이력 (F8)", () => this.showHistory()),
+      item("hist", "실행 이력", "M12 7v5l3 2M3.5 9A9 9 0 1 1 3 12M3 4v5h5", "실행한 SQL 이력 — 더블클릭: 넣기 · F8: 넓게 보기", () => showSide(this.sideTab === "hist" ? "doc" : "hist")),
     );
-    const browser = h("aside", { class: "browser" }, nav, docPane, tablePane, this.gitPane);
+    const browser = h("aside", { class: "browser" }, nav, docPane, tablePane, this.gitPane, this.histPanel.el);
     this.browserEl = browser;
     let sideTab = "doc";
     try { const s = localStorage.getItem("side.tab"); if (s && s in panes) sideTab = s; } catch { /* 기본 */ }
@@ -578,7 +586,7 @@ export class App {
 
   /** 왼쪽 목록을 묶음대로 다시 놓는다 — 묶음 제목을 넣고 그 아래에 탭. 위 가로 줄일 때는 묶지 않는다 (탭 순서 그대로) */
   renderDocs() {
-    if (this.docsHead) this.docsHead.textContent = `열린 문서 ${this.tabs.length}`;
+    if (this.docsHead) this.docsHead.textContent = `문서 ${this.tabs.length}`;
     const strip = this.tabStrip;
     const mode: DocGroup = strip.classList.contains("vertical") ? docGroupPref() : "none";
     // 같은 모양이면 다시 놓지 않는다 (화면을 새로 그릴 때마다 불린다 — 접속이 바뀌면 접속 묶음이 바뀐다)
@@ -1224,6 +1232,8 @@ export class App {
       this.btn.cancel.textContent = "■ 중지";
       t.editor.clearRunning();
       this.refresh();
+      // 왼쪽에 실행 이력을 보고 있으면 방금 실행한 것이 보이게
+      if (this.sideTab === "hist") void this.histPanel.load();
     }
   }
 
@@ -2143,20 +2153,34 @@ export class App {
 
   /** F8: 실행 이력 */
   showHistory() {
-    const t = this.active;
     openHistory({
-      profile: t?.conn?.profile,
-      insert: (sql) => {
-        const cur = this.active;
-        if (!cur) return void this.newTab(true, sql);
-        const v = cur.editor.view;
-        const line = v.state.doc.lineAt(v.state.selection.main.head);
-        cur.editor.insert(line.text.trim() ? `\n${sql}\n` : sql);
-        v.focus();
-      },
+      profile: this.active?.conn?.profile,
+      insert: (sql) => this.insertHistory(sql),
       newTab: (sql) => void this.newTab(true, sql),
     });
   }
+
+  /** 이력의 문장을 편집기 커서에 — 커서 줄에 글이 있으면 앞뒤로 줄을 띄워 */
+  private insertHistory(sql: string) {
+    const cur = this.active;
+    if (!cur) return void this.newTab(true, sql);
+    const v = cur.editor.view;
+    const line = v.state.doc.lineAt(v.state.selection.main.head);
+    cur.editor.insert(line.text.trim() ? `\n${sql}\n` : sql);
+    v.focus();
+  }
+
+  /** 왼쪽 패널의 실행 이력 */
+  private histPanel = historyPanel({
+    profile: () => this.active?.conn?.profile,
+    insert: (sql) => this.insertHistory(sql),
+    newTab: (sql) => void this.newTab(true, sql),
+    menu: (x, y, sql) => showMenu(x, y, [
+      { label: "편집기에 넣기", run: () => this.insertHistory(sql) },
+      { label: "새 탭에서 열기", run: () => void this.newTab(true, sql.replace(/;\s*$/, "")) },
+      { label: "복사", run: () => void navigator.clipboard.writeText(sql).then(() => toast("복사했습니다", "ok", 1500)).catch(() => {}) },
+    ]),
+  });
 
   /** 파일을 탭으로 연다. 이미 열려 있으면 그 탭으로 */
   async openPath(path: string) {

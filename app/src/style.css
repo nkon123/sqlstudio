@@ -67,6 +67,13 @@ input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb
 /* ── 툴바 ── */
 /* 툴바는 섬이 아니다 — 바탕 위에 그대로 */
 .toolbar { display: flex; align-items: center; gap: 6px; padding: var(--gap) calc(var(--gap) + 2px); background: transparent; }
+.app-icon { width: 18px; height: 18px; flex: none; margin: 0 4px 0 2px; border-radius: 4px; }
+/* 창 단추 — 제목 표시줄 대신 툴바 오른쪽 끝 (닫기는 올리면 빨강) */
+.win-ctrls { display: flex; align-items: center; gap: 2px; margin-left: 6px; }
+.toolbar .win-btn { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 28px; padding: 0; border-radius: var(--r-ctl); color: var(--dim); }
+.win-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.toolbar .win-btn:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.toolbar .win-btn.close:hover:not(:disabled) { background: #c42b1c; color: #fff; }
 .toolbar button { padding: 4px 10px; }
 .toolbar select { background: var(--island); }
 .toolbar select { max-width: 220px; }

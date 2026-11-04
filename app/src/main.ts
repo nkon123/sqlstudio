@@ -42,6 +42,26 @@ import { icon, settings } from "./settings";
 import { docGroupKey, docGroupPref, GROUP_LABEL, setDocGroupPref, sortGroupKeys, type DocGroup } from "./docgroups";
 import { profileOptions } from "./conngroups";
 import { editToSelect } from "./editcmd";
+import appIcon from "../src-tauri/icons/64x64.png";
+
+/** 창 단추 (최소화 · 최대화 · 닫기) — 제목 표시줄을 없앴으니 툴바 오른쪽 끝에.
+ *  닫기는 창의 닫기 요청으로 가서 커밋 전 확인 등 원래 닫을 때의 처리를 그대로 거친다. 브라우저(가짜 DB 모드)에는 창이 없다 */
+function windowControls(): HTMLElement | "" {
+  if (!("__TAURI_INTERNALS__" in window)) return "";
+  const w = getCurrentWindow();
+  const btn = (cls: string, title: string, path: string, run: () => Promise<void>) =>
+    h("button", { class: `win-btn ${cls}`, title, onclick: () => void run().catch(() => {}) }, icon(path));
+  const max = btn("max", "최대화", "M6 6h12v12H6z", () => w.toggleMaximize());
+  // 최대화된 창이면 '이전 크기로' 그림
+  const sync = () => void w.isMaximized().then((m) => {
+    max.title = m ? "이전 크기로" : "최대화";
+    max.replaceChildren(icon(m ? "M8 8h10v10H8zM6 16V6h10" : "M6 6h12v12H6z"));
+  }).catch(() => {});
+  void w.onResized(sync).catch(() => {});
+  sync();
+  return h("div", { class: "win-ctrls" },
+    btn("min", "최소화", "M6 12h12", () => w.minimize()), max, btn("close", "닫기", "M7 7l10 10M17 7L7 17", () => w.close()));
+}
 
 export class App {
   private tabs: Tab[] = [];
@@ -136,7 +156,11 @@ export class App {
     this.runGroup = h("span", { class: "run-split" }, this.btn.run,
       drop("▾", "실행 방법 고르기 — 스크립트 전체·실행계획·디버그", () => runMenu(this), "primary split-more"));
     this.btn.cancel.hidden = true;
-    const toolbar = h("header", { class: "toolbar" },
+    // 제목 표시줄을 없앴다 — 툴바의 빈 곳(툴바 바탕·빈칸)을 끌면 창이 움직이고, 더블클릭하면 최대화
+    const drag = { "data-tauri-drag-region": "" };
+    const toolbar = h("header", { class: "toolbar", ...drag },
+      // 앱 아이콘 — 제목 표시줄이 없으니 왼쪽 위에 작게 (끌면 창이 움직인다)
+      h("img", { class: "app-icon", src: appIcon, alt: "SQLStudio", title: "SQLStudio", draggable: false, ...drag }),
       this.connPill,
       h("span", { class: "sep" }),
       this.runGroup, this.btn.cancel, this.btn.explain,
@@ -144,11 +168,12 @@ export class App {
       h("span", { class: "sep" }),
       drop("파일 ▾", "새 탭·열기·저장·인코딩·실행 이력·포맷", () => fileMenu(this)),
       drop("도구 ▾", "분석·흐름도·디버그·스키마 비교·데이터 복사·용량·세션", () => toolsMenu(this)),
-      h("span", { class: "spacer" }),
+      h("span", { class: "spacer", ...drag }),
       h("button", { class: "pal-open", title: "모든 명령을 이름으로 찾아 실행 (Ctrl+Shift+P)", onclick: () => this.palette() },
         h("span", {}, "🔍", h("span", { class: "pal-label" }, " 명령 검색")), h("kbd", {}, "Ctrl+Shift+P")),
-      h("span", { class: "spacer" }),
+      h("span", { class: "spacer", ...drag }),
       this.btn.toggleBrowser, this.btn.toggleAi, this.btn.keys, this.btn.settings,
+      windowControls(),
     );
     this.connPill.addEventListener("click", () => {
       const r = this.connPill.getBoundingClientRect();

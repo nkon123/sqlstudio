@@ -294,6 +294,15 @@ impl Default for McpConfig {
     }
 }
 
+/// 바꿔치기 저장(임시 파일에 쓰고 rename)용 임시 파일 이름 — 프로세스 번호를 붙인다.
+/// SQLStudio 를 둘 띄우면 같은 데이터 폴더의 파일(tabs.json·ui-state.json·설정)을 함께 쓰는데,
+/// 임시 파일 이름이 같으면 한쪽이 다른 쪽이 쓰던 임시 파일을 옮겨 버려 저장이 실패한다(os error 2)
+pub fn temp_path(path: &std::path::Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(format!(".sqlstudio-{}.tmp", std::process::id()));
+    PathBuf::from(s)
+}
+
 pub fn config_path() -> PathBuf {
     if let Ok(p) = std::env::var("SQLSTUDIO_CONFIG") {
         return PathBuf::from(p);
@@ -535,7 +544,7 @@ impl Config {
         }
         let text = toml::to_string_pretty(self).map_err(|e| Error::Config(e.to_string()))?;
         // 쓰다가 죽어도 기존 파일이 깨지지 않게: 임시 파일에 쓰고 바꿔치기
-        let tmp = path.with_extension("toml.tmp");
+        let tmp = temp_path(&path);
         std::fs::write(&tmp, text).map_err(|e| Error::Config(e.to_string()))?;
         std::fs::rename(&tmp, &path).map_err(|e| Error::Config(e.to_string()))?;
         Ok(())

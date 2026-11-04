@@ -107,8 +107,7 @@ impl AppState {
         let mut cfg = self.cfg.wr();
         cfg.llm_providers = self
             .providers
-            .read()
-            .unwrap()
+            .rd()
             .iter()
             .filter_map(|p| toml::Value::try_from(p).ok())
             .collect();

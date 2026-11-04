@@ -7,6 +7,7 @@
 //! DB 에 보내는 것은 SELECT 뿐이고 (보내기 전에 문장 종류를 다시 확인한다), 운영 DB·실행 중인 세션에서는 SQL 만 보인다.
 //! 한 질의는 10초까지 — 넘으면 취소한다.
 
+use sqls_core::sync::MutexExt;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -131,22 +132,22 @@ struct Log {
 impl Log {
     /// 지금 보는 곳 — 소스 위치는 지운다 (place 로 다시)
     fn at(&self, at: impl Into<String>) {
-        *self.at.lock().unwrap() = at.into();
-        *self.loc.lock().unwrap() = None;
+        *self.at.lk() = at.into();
+        *self.loc.lk() = None;
     }
     fn place(&self, unit: &str, line: u32, end_line: u32, marks: Vec<u32>, hint: Option<String>) {
-        *self.loc.lock().unwrap() = Some(Loc { unit: unit.to_string(), line, end_line: end_line.max(line), marks, hint });
+        *self.loc.lk() = Some(Loc { unit: unit.to_string(), line, end_line: end_line.max(line), marks, hint });
     }
     /// 다음 한 줄에만 붙는 짚을 낱말
     fn hint(&self, h: impl Into<String>) {
-        *self.hint.lock().unwrap() = Some(h.into());
+        *self.hint.lk() = Some(h.into());
     }
     #[allow(clippy::too_many_arguments)]
     fn push(&self, purpose: impl Into<String>, sql: Option<&str>, binds: &[(String, String)], sent: bool, result: Option<String>, ms: u64, error: Option<String>) {
-        let at = self.at.lock().unwrap().clone();
-        let loc = self.loc.lock().unwrap().clone().unwrap_or_default();
-        let hint = self.hint.lock().unwrap().take().or(loc.hint);
-        let mut l = self.list.lock().unwrap();
+        let at = self.at.lk().clone();
+        let loc = self.loc.lk().clone().unwrap_or_default();
+        let hint = self.hint.lk().take().or(loc.hint);
+        let mut l = self.list.lk();
         let seq = l.len() + 1;
         let unit = (!loc.unit.is_empty()).then_some(loc.unit);
         let (line, end_line) = if unit.is_some() { (Some(loc.line), Some(loc.end_line)) } else { (None, None) };
@@ -161,7 +162,7 @@ impl Log {
         self.push(purpose, Some(sql), binds, false, None, 0, None);
     }
     fn take(self) -> Vec<LogEntry> {
-        self.list.into_inner().unwrap()
+        self.list.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

@@ -7,6 +7,10 @@ import type { Column, RowPage } from "./api";
 
 const ROW_H = 22;
 const OVERSCAN = 8;
+/** 행 번호 칸의 폭 (.grid-num) */
+const NUM_W = 56;
+/** 가로로 화면 밖 이만큼(px)까지는 미리 그린다 */
+const COL_OVERSCAN = 400;
 const MIN_W = 48;
 const MAX_W = 420;
 
@@ -282,12 +286,14 @@ export class ResultGrid {
       const c = this.sortCol;
       const num = NUMERIC.test(this.columns[c]?.type_name ?? "");
       const d = this.sortDir;
+      // 숫자 열은 미리 숫자로 바꿔 둔다 — 비교할 때마다 바꾸면 행이 많을 때 몇 배 느리다
+      const key = num ? Float64Array.from(this.rows, (r) => (r[c] == null ? 0 : Number(r[c]))) : null;
       v.sort((a, b) => {
         const x = this.rows[a][c], y = this.rows[b][c];
         if (x == null && y == null) return a - b;
         if (x == null) return 1; // NULL 은 뒤로 (Oracle 의 오름차순과 같게)
         if (y == null) return -1;
-        const r = num ? Number(x) - Number(y) : x < y ? -1 : x > y ? 1 : 0;
+        const r = key ? key[a] - key[b] : x < y ? -1 : x > y ? 1 : 0;
         return r * d || a - b;
       });
     }
@@ -390,7 +396,7 @@ export class ResultGrid {
     this.viewport.scrollTop = Math.max(0, (vr + 1) * ROW_H - this.viewport.clientHeight);
     this.update();
     this.notifyDirty();
-    const el = this.body.querySelector(`.grid-cell[data-r="${vr}"][data-c="${c}"]`) as HTMLElement | null;
+    const el = this.cellEl(vr, c);
     if (el) this.startEdit(vr, c, el);
   }
 
@@ -491,7 +497,7 @@ export class ResultGrid {
         // 오른쪽 편집 가능한 칸으로
         const next = [...e.editable].filter((x) => x > c).sort((a, b) => a - b)[0];
         if (next != null) {
-          const el = this.body.querySelector(`.grid-cell[data-r="${viewRow}"][data-c="${next}"]`) as HTMLElement | null;
+          const el = this.cellEl(viewRow, next);
           if (el) this.startEdit(viewRow, next, el);
         }
       }
@@ -500,14 +506,17 @@ export class ResultGrid {
     return true;
   }
 
-  /** 열 너비: 헤더와 앞쪽 200행의 글자 폭으로 정한다 */
+  /** 열 너비: 헤더와 앞쪽 행(최대 200행 — 열이 많으면 재는 칸이 8000개를 넘지 않게 줄인다)의 글자 폭으로 정한다 */
   private measure(): number[] {
-    const sample = this.rows.slice(0, 200);
+    const n = Math.max(20, Math.min(200, Math.floor(8000 / Math.max(1, this.columns.length))));
+    const sample = this.rows.slice(0, n);
     return this.columns.map((c, i) => {
       let w = this.measureCtx.measureText(c.name).width + 28;
       for (const r of sample) {
         const v = r[i];
         const t = v == null ? "(null)" : v.length > 80 ? v.slice(0, 80) : v;
+        // 글자 하나가 넓어야 12px(한글) — 그래도 지금 폭을 못 넘는 짧은 값은 재지 않는다
+        if (t.length * 12 + 16 <= w) continue;
         w = Math.max(w, this.measureCtx.measureText(t).width + 16);
       }
       return Math.round(Math.min(MAX_W, Math.max(MIN_W, w)));
@@ -592,6 +601,20 @@ export class ResultGrid {
     const frag = document.createDocumentFragment();
     const tw = `${this.totalWidth()}px`;
     const { rowClass, cellClass } = this.opts;
+    // 가로도 보이는 열만 (좌우로 COL_OVERSCAN px 여유) — 열이 수백 개인 결과에서 스크롤할 때마다 모든 칸을 만들지 않게.
+    // 건너뛴 앞 열들은 그 폭만큼의 빈 칸 하나로
+    const left = this.viewport.scrollLeft - COL_OVERSCAN;
+    const right = this.viewport.scrollLeft + this.viewport.clientWidth + COL_OVERSCAN;
+    const cols: number[] = [];
+    let x = NUM_W;
+    let skip = 0;
+    for (let c = 0; c < this.columns.length; c++) {
+      if (this.hiddenCol(c)) continue;
+      const w = this.widths[c];
+      if (x + w < left) skip += w;
+      else if (x <= right) cols.push(c);
+      x += w;
+    }
     for (let r = first; r < last; r++) {
       const row = div("grid-row");
       row.style.transform = `translateY(${r * ROW_H}px)`;
@@ -605,9 +628,13 @@ export class ResultGrid {
       const num = div("grid-cell grid-num");
       num.textContent = this.added.has(ri) ? "+" : String(r + 1);
       row.append(num);
+      if (skip) {
+        const pad = div("grid-skip");
+        pad.style.width = `${skip}px`;
+        row.append(pad);
+      }
       const changed = this.dirty.get(ri);
-      for (let c = 0; c < this.columns.length; c++) {
-        if (this.hiddenCol(c)) continue;
+      for (const c of cols) {
         const cell = div("grid-cell");
         cell.style.width = `${this.widths[c]}px`;
         if (changed?.has(c)) cell.classList.add("dirty");
@@ -837,7 +864,7 @@ export class ResultGrid {
       this.toggleDeleteSelected();
     } else if (this.edit && (e.key === "F2" || e.key === "Enter") && this.sel) {
       e.preventDefault();
-      const el = this.body.querySelector(`.grid-cell[data-r="${this.sel.r1}"][data-c="${this.sel.c1}"]`) as HTMLElement | null;
+      const el = this.cellEl(this.sel.r1, this.sel.c1);
       if (el) this.startEdit(this.sel.r1, this.sel.c1, el);
     }
   }
@@ -901,13 +928,19 @@ export class ResultGrid {
     return true;
   }
 
+  /** 그 셀의 요소 — 화면 밖의 열·행은 그리지 않으므로 먼저 보이게 스크롤하고 바로 다시 그린다 */
+  private cellEl(r: number, c: number): HTMLElement | null {
+    this.reveal(r, c);
+    this.update();
+    return this.body.querySelector(`.grid-cell[data-r="${r}"][data-c="${c}"]`);
+  }
+
   /** 그 셀이 보이게 스크롤 */
   private reveal(r: number, c: number) {
     const vp = this.viewport;
     const top = r * ROW_H;
     if (top < vp.scrollTop) vp.scrollTop = top;
     else if (top + ROW_H > vp.scrollTop + vp.clientHeight) vp.scrollTop = top + ROW_H - vp.clientHeight;
-    const NUM_W = 56;
     let left = NUM_W;
     for (let i = 0; i < c; i++) if (!this.hiddenCol(i)) left += this.widths[i];
     const right = left + this.widths[c];

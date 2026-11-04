@@ -1,6 +1,6 @@
 //! 세션·락 모니터 명령. 조회는 프로필의 메타 세션(읽기 전용), 종료는 사람이 확인한 뒤 잠깐 쓰는 별도 세션으로.
 
-use sqls_core::sync::MutexExt;
+use sqls_core::sync::{MutexExt, RwLockExt};
 use serde::Serialize;
 use sqls_core::monitor::{self, SessionDetail, SessionRow, Wait};
 use tauri::State;
@@ -46,8 +46,7 @@ pub async fn monitor_kill(st: State<'_, AppState>, id: u64, sid: i64, serial: i6
     let profile = st.sessions.lk().get(&id).map(|s| s.profile.clone()).unwrap_or_default();
     let p = st
         .cfg
-        .read()
-        .unwrap()
+        .rd()
         .profile(&profile)
         .cloned()
         .ok_or_else(|| ErrView::msg("invalid", "접속 프로필을 찾을 수 없습니다"))?;
@@ -56,8 +55,7 @@ pub async fn monitor_kill(st: State<'_, AppState>, id: u64, sid: i64, serial: i6
     }
     let pw = st
         .passwords
-        .read()
-        .unwrap()
+        .rd()
         .get(&p.name.to_uppercase())
         .cloned()
         .or_else(|| p.stored_password())

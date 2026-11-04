@@ -26,8 +26,7 @@ static NEXT_RUN: AtomicU64 = AtomicU64::new(1);
 
 fn profile_of(st: &AppState, id: u64) -> R<String> {
     st.sessions
-        .lock()
-        .unwrap()
+        .lk()
         .get(&id)
         .map(|s| s.profile.clone())
         .ok_or_else(|| ErrView::msg("session_closed", "세션이 닫혀 있습니다"))

@@ -105,7 +105,7 @@ async fn ui_state_save(ts: f64, items: std::collections::BTreeMap<String, String
     let mut last = UI_STATE_TS.lock().unwrap_or_else(|e| e.into_inner());
     let ts = ts.max(*last + 1.0);
     let p = ui_state_path();
-    let tmp = p.with_extension("json.tmp");
+    let tmp = sqls_core::config::temp_path(&p);
     let body = serde_json::json!({ "ts": ts, "items": items }).to_string();
     std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &p)).map_err(|e| {
         tracing::warn!("화면 상태 저장 실패: {e}");
@@ -186,6 +186,17 @@ pub fn run() {
     let state = AppState::load();
 
     tauri::Builder::default()
+        // 하나만 실행 — 두 번째로 켜면 떠 있는 창을 앞으로 가져오고 끝난다. 둘이 같은 데이터 폴더의 tabs.json 을
+        // 나중에 닫은 쪽으로 덮어써, 먼저 닫은 창의 저장하지 않은 SQL 이 사라지던 것. 맨 먼저 등록해야 한다.
+        // (잠금은 app.restart() 직전에 풀리므로 데이터 폴더를 바꾼 뒤의 재시작은 그대로 된다)
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tracing::info!("이미 실행 중 — 두 번째 실행은 창을 앞으로 가져오고 끝남");
+            if let Some(w) = tauri::Manager::get_webview_window(app, "main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![

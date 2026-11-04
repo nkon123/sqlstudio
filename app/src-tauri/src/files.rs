@@ -63,10 +63,13 @@ pub fn read_sql_file(path: String) -> R<SqlFile> {
 #[tauri::command]
 pub fn write_sql_file(path: String, text: String, encoding: String) -> R<()> {
     let bytes = encode(&text, &encoding)?;
-    // 임시 파일에 쓰고 바꿔치기 — 저장 중에 죽어도 원본이 남는다
-    let tmp = format!("{path}.sqlstudio-tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| ErrView::msg("io", format!("{tmp}: {e}")))?;
-    std::fs::rename(&tmp, &path).map_err(|e| ErrView::msg("io", format!("{path}: {e}")))?;
+    // 임시 파일에 쓰고 바꿔치기 — 저장 중에 죽어도 원본이 남는다 (tabs.json 도 여기로)
+    let tmp = sqls_core::config::temp_path(std::path::Path::new(&path));
+    std::fs::write(&tmp, bytes).map_err(|e| ErrView::msg("io", format!("{}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        ErrView::msg("io", format!("{path}: {e}"))
+    })?;
     Ok(())
 }
 

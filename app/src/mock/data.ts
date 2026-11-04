@@ -79,6 +79,18 @@ export const TABLES: Record<string, MockTable> = {
     count: 3000,
     row: (i) => [String(100000 + Math.floor(i / 3)), String((i % 3) + 1), String(200 + ((i * 31) % 500)), String(1 + (i % 4)), String(990 + ((i * 113) % 9000))],
   },
+  // 열이 아주 많은 테이블 — 넓은 결과에서 그리드가 버티는지 본다 (열 150개)
+  WIDE_LOG: {
+    desc: {
+      owner: "SCOTT", name: "WIDE_LOG", object_type: "TABLE", comment: "열이 많은 로그", num_rows: "2000", last_analyzed: "2026-10-01 03:00:00",
+      columns: [c("LOG_ID", "NUMBER(12)", "로그 번호", false),
+        ...Array.from({ length: 149 }, (_, k) => c(`ATTR_${String(k + 1).padStart(3, "0")}`, k % 3 ? "VARCHAR2(40)" : "NUMBER(10,2)", `속성 ${k + 1}`))],
+      primary_key: ["LOG_ID"],
+      indexes: [{ name: "PK_WIDE_LOG", unique: true, columns: ["LOG_ID"] }],
+    },
+    count: 2000,
+    row: (i) => [String(i + 1), ...Array.from({ length: 149 }, (_, k) => (k % 3 ? `값 ${i}-${k}${"x".repeat((i + k) % 12)}` : String(((i * 7 + k * 13) % 100000) / 100)))],
+  },
 };
 
 /** 목록에만 보이는 객체 (뷰·프로시저 등) */

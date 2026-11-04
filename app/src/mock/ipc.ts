@@ -623,7 +623,7 @@ const MOCK_UNIT = {
 
 function banner(where: string) {
   const b = document.createElement("div");
-  b.textContent = `가짜 DB 모드 (${where}) — 테이블 EMP · DEPT · ORDERS · ORDER_ITEMS`;
+  b.textContent = `가짜 DB 모드 (${where}) — 테이블 EMP · DEPT · ORDERS · ORDER_ITEMS · WIDE_LOG(열 150)`;
   b.style.cssText = "position:fixed;right:8px;bottom:6px;z-index:99999;padding:2px 8px;border-radius:4px;background:#c0392b;color:#fff;font:600 11px sans-serif;pointer-events:none;opacity:.85";
   const add = () => document.body.append(b);
   if (document.body) add(); else addEventListener("DOMContentLoaded", add);

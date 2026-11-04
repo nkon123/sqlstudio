@@ -142,7 +142,8 @@ export class App {
     b("save", "저장", "저장 (Ctrl+S)", () => this.save());
     b("saveAs", "다른 이름", "다른 이름으로 저장 (Ctrl+Shift+S)", () => this.saveAs());
     b("format", "포맷", "SQL 정리 (Ctrl+Shift+F) — 선택 영역, 없으면 커서 위치 문장", () => this.formatSql());
-    b("toggleBrowser", "◧", "왼쪽 영역(테이블·프로젝트) 접기/펼치기 (Ctrl+Shift+1) · 경계선을 끌면 너비 조절", () => this.layout.toggle("left"), "icon");
+    // 툴바에는 두지 않는다 (왼쪽 패널 아래의 '접기') — 명령 검색이 같은 단추를 쓴다
+    b("toggleBrowser", "◧", "왼쪽 패널 접기/펼치기 — 접으면 아이콘 줄만 (Ctrl+Shift+1)", () => this.layout.toggle("left"), "icon");
     b("toggleAi", "AI", "오른쪽 AI 영역 접기/펼치기 (Ctrl+Shift+3) · AI 입력칸으로 바로: Ctrl+K · 경계선을 끌면 너비 조절", () => this.layout.toggle("right"), "icon");
     b("keys", "?", "단축키 목록 (F1)", () => showShortcuts(), "icon");
     b("settings", "⚙", "설정 — 접속·편집기·AI·MCP·데이터 폴더", () => this.settings(), "icon");
@@ -172,7 +173,7 @@ export class App {
       h("button", { class: "pal-open", title: "모든 명령을 이름으로 찾아 실행 (Ctrl+Shift+P)", onclick: () => this.palette() },
         h("span", {}, "🔍", h("span", { class: "pal-label" }, " 명령 검색")), h("kbd", {}, "Ctrl+Shift+P")),
       h("span", { class: "spacer", ...drag }),
-      this.btn.toggleBrowser, this.btn.toggleAi, this.btn.keys, this.btn.settings,
+      this.btn.toggleAi,
       windowControls(),
     );
     this.connPill.addEventListener("click", () => {
@@ -237,8 +238,12 @@ export class App {
       if (k === "hist") void this.histPanel.load();
       this.placeTabs();
     };
+    // 접힌 아이콘 줄에서 누르면 펼치고 그 화면으로 (새 문서·설정·도움말은 펼치지 않는다)
     const item = (k: string, label: string, path: string, title: string, run: () => void) =>
-      h("button", { class: "side-item", "data-k": k, title, onclick: run }, icon(path), h("span", {}, label));
+      h("button", { class: "side-item", "data-k": k, title, onclick: () => {
+        if (!this.leftOpen && k in panes) { this.layout.toggle("left", true); showSide(k); return; }
+        run();
+      } }, icon(path), h("span", {}, label));
     nav.append(
       item("new", "새 문서", "M12 5v14M5 12h14", "새 탭 (같은 접속으로)", () => { showSide("doc"); this.newTab(true); }),
       // 아래 영역을 바꾸는 넷 — 지금 보는 것이 강조된다. 테이블·프로젝트·실행 이력은 다시 눌러도 문서 목록으로
@@ -247,7 +252,14 @@ export class App {
       item("git", "프로젝트", "M6 3v12M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9", "프로젝트 폴더·git", () => showSide(this.sideTab === "git" ? "doc" : "git")),
       item("hist", "실행 이력", "M12 7v5l3 2M3.5 9A9 9 0 1 1 3 12M3 4v5h5", "실행한 SQL 이력 — 더블클릭: 넣기 · F8: 넓게 보기", () => showSide(this.sideTab === "hist" ? "doc" : "hist")),
     );
-    const browser = h("aside", { class: "browser" }, nav, docPane, tablePane, this.gitPane, this.histPanel.el);
+    // 아래 — 자주 쓰지 않는 전역 기능 (위 툴바에서 옮김)
+    const foot = h("div", { class: "side-foot" },
+      item("settings", "설정", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
+        "설정 — 접속·편집기·AI·MCP·데이터 폴더", () => this.settings()),
+      item("help", "도움말", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5V14M12 17.5h.01", "단축키 목록 (F1)", () => showShortcuts()),
+      // 접기 — 접으면 아이콘 줄의 맨 아래에서 같은 단추로 펼친다 (화살표가 돌아간다)
+      item("collapse", "접기", "M15 6l-6 6 6 6M20 4v16", "왼쪽 패널 접기/펼치기 — 접으면 아이콘 줄만 (Ctrl+Shift+1) · 경계선을 끌면 너비 조절", () => this.layout.toggle("left")));
+    const browser = h("aside", { class: "browser" }, nav, docPane, tablePane, this.gitPane, this.histPanel.el, foot);
     this.browserEl = browser;
     let sideTab = "doc";
     try { const s = localStorage.getItem("side.tab"); if (s && s in panes) sideTab = s; } catch { /* 기본 */ }
@@ -328,6 +340,9 @@ export class App {
   /** 마지막으로 저장한 탭 상태 — 문서 객체(고치면 새 객체)·파일·탭 순서가 같으면 다시 쓰지 않는다 */
   private savedTabsSig: unknown[] = [];
   private savingTabs = false;
+  /** 마지막으로 편집한 때·탭을 저장한 때 (performance.now) — 치는 동안은 저장을 미룬다 */
+  private lastEditAt = 0;
+  private lastSavedAt = 0;
 
   /** 탭을 데이터 폴더의 tabs.json 에 (바뀐 것이 있을 때만, force 면 늘) */
   private async saveTabs(force = false) {
@@ -335,6 +350,10 @@ export class App {
     const active = Math.max(0, this.active ? this.tabs.indexOf(this.active) : 0);
     const sig = [active, ...this.tabs.flatMap((t) => [t.editor.view.state.doc, t.filePath, t.dirty, t.encoding, t.conn?.profile ?? t.lastProfile, t.tag])];
     if (!force && sig.length === this.savedTabsSig.length && sig.every((x, i) => x === this.savedTabsSig[i])) return;
+    // 치는 동안은 쓰지 않는다 — 손을 멈추고 2초 뒤에 (모든 탭을 통째로 쓰므로 큰 문서면 무겁다).
+    // 쉬지 않고 쳐도 30초에 한 번은 남긴다
+    const now = performance.now();
+    if (!force && now - this.lastEditAt < 2000 && now - this.lastSavedAt < 30_000) return;
     this.savingTabs = true;
     try {
       await saveSession(active, this.tabs.map((t) => ({
@@ -342,6 +361,7 @@ export class App {
         cursor: t.editor.cursor(), profile: t.conn?.profile ?? t.lastProfile, used: t.used, tag: t.tag,
       })));
       this.savedTabsSig = sig;
+      this.lastSavedAt = performance.now();
     } catch { /* 다음 차례에 다시 */ } finally {
       this.savingTabs = false;
     }
@@ -632,6 +652,7 @@ export class App {
 
   /** 문서를 고쳤을 때 — 고친 때를 남기고, 날짜 묶음이 바뀌었으면 (예: 어제 → 오늘) 다시 놓는다 */
   docTouched(t: Tab) {
+    this.lastEditAt = performance.now();
     const before = docGroupKey(t, "date");
     t.used = Date.now();
     if (this.tabStrip.dataset.group === "date" && docGroupKey(t, "date") !== before) this.renderDocs();
@@ -2367,6 +2388,19 @@ function sqlTemplate(kind: "select" | "insert" | "update" | "delete", table: str
 /** 경로 비교용: 구분자·대소문자 무시 (Windows) */
 function normPath(p: string) {
   return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+// 화면 코드에서 잡지 않은 오류도 로그에 (지금까지는 개발자 도구에만 남아 사용자 PC 에서 원인을 알 수 없었다).
+// 같은 오류가 되풀이되면 처음 몇 번만
+{
+  let sent = 0;
+  const report = (what: string, e: unknown) => {
+    if (sent++ >= 20) return;
+    const msg = e instanceof Error ? `${e.message}\n${(e.stack ?? "").split("\n").slice(1, 6).join("\n")}` : String(e);
+    void invoke("client_log", { level: "error", message: `화면 오류 (${what}): ${msg}` }).catch(() => {});
+  };
+  window.addEventListener("error", (ev) => report("error", ev.error ?? ev.message));
+  window.addEventListener("unhandledrejection", (ev) => report("promise", ev.reason));
 }
 
 // 시작 시간 나누기 — 모듈을 다 읽고 여기 오기까지(ESM 이라 위의 import 를 모두 실행한 뒤) · 첫 화면 구성

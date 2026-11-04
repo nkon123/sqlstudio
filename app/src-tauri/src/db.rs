@@ -191,8 +191,7 @@ pub struct ProfileView {
 #[tauri::command]
 pub fn list_profiles(st: State<'_, AppState>) -> Vec<ProfileView> {
     st.cfg
-        .read()
-        .unwrap()
+        .rd()
         .connections
         .iter()
         .map(|p| ProfileView {
@@ -411,8 +410,7 @@ pub async fn connect(
 ) -> R<Connected> {
     let p = st
         .cfg
-        .read()
-        .unwrap()
+        .rd()
         .profile(&profile)
         .cloned()
         .ok_or_else(|| ErrView::msg("invalid", format!("접속 프로필이 없습니다: {profile}")))?;

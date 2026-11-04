@@ -2,6 +2,9 @@
 
 import { h } from "./ui";
 
+/** 왼쪽 패널을 접었을 때 남는 아이콘 줄의 폭 */
+const RAIL = 44;
+
 export class SideLayout {
   private w = { left: 240, right: 360 };
   private open = { left: true, right: true };
@@ -57,7 +60,8 @@ export class SideLayout {
   }
 
   private apply(save = true) {
-    const l = this.open.left ? `${this.w.left}px` : "0px";
+    // 왼쪽은 접어도 아이콘 줄(RAIL)이 남는다
+    const l = this.open.left ? `${this.w.left}px` : `${RAIL}px`;
     const r = this.open.right ? `${this.w.right}px` : "0px";
     this.root.style.gridTemplateColumns = `${l} 6px minmax(0, 1fr) 6px ${r}`;
     this.root.classList.toggle("left-closed", !this.open.left);

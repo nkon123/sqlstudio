@@ -273,8 +273,7 @@ pub(crate) fn hub_for(st: &AppState, id: u64) -> Result<Arc<MetaHub>, ErrView> {
             .ok_or_else(|| ErrView::msg("session_closed", "세션이 닫혀 있습니다"))?
     };
     st.hubs
-        .lock()
-        .unwrap()
+        .lk()
         .get(&profile)
         .cloned()
         .ok_or_else(|| ErrView::msg("invalid", "자동완성 정보가 없습니다"))

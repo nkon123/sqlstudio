@@ -105,8 +105,7 @@ pub async fn ai_list_models(st: State<'_, AppState>, provider: ProviderConfig) -
     let mut p = provider;
     let same_server = st
         .providers
-        .read()
-        .unwrap()
+        .rd()
         .iter()
         .any(|s| s.name == p.name && s.kind == p.kind && s.base_url().trim_end_matches('/') == p.base_url().trim_end_matches('/'));
     if p.api_key.is_none() && same_server {
@@ -165,8 +164,7 @@ pub(crate) fn provider_with(st: &AppState, name: &str, model: Option<&str>) -> R
     }
     let mut p = st
         .providers
-        .read()
-        .unwrap()
+        .rd()
         .iter()
         .find(|p| p.name == name)
         .cloned()

@@ -1,7 +1,7 @@
 //! PL/SQL 디버거 명령. 세션 두 개(대상·제어)는 sqls_core::debug 가 연다.
 //! 이 탭의 작업 세션은 소스·사전 조회에만 쓴다 (디버그 중에도 비어 있다).
 
-use sqls_core::sync::MutexExt;
+use sqls_core::sync::{MutexExt, RwLockExt};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -139,8 +139,7 @@ pub struct Started {
 
 fn run(st: &AppState, did: u64) -> R<Arc<DebugRun>> {
     st.debuggers
-        .lock()
-        .unwrap()
+        .lk()
         .get(&did)
         .cloned()
         .ok_or_else(|| ErrView::msg("invalid", "디버그 세션이 끝났습니다"))
@@ -183,15 +182,13 @@ pub async fn debug_start(
     let profile = st.sessions.lk().get(&id).map(|s| s.profile.clone()).unwrap_or_default();
     let p = st
         .cfg
-        .read()
-        .unwrap()
+        .rd()
         .profile(&profile)
         .cloned()
         .ok_or_else(|| ErrView::msg("invalid", "접속 프로필을 찾을 수 없습니다"))?;
     let pw = st
         .passwords
-        .read()
-        .unwrap()
+        .rd()
         .get(&p.name.to_uppercase())
         .cloned()
         .or_else(|| p.stored_password())

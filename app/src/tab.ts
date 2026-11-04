@@ -333,7 +333,12 @@ export class Tab {
   refreshSub(now = false) {
     clearTimeout(this.subTimer);
     const run = () => {
-      const line = this.editor.view.state.doc.toString().split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("--")) ?? "";
+      // 앞줄부터 보다가 첫 SQL 줄에서 멈춘다 — 큰 문서를 통째로 문자열로 만들지 않게
+      let line = "";
+      for (const l of this.editor.view.state.doc.iterLines()) {
+        const s = l.trim();
+        if (s && !s.startsWith("--")) { line = s.length > 200 ? s.slice(0, 200) : s; break; }
+      }
       (this.tabEl.querySelector(".tab-sub") as HTMLElement).textContent = line.length > 80 ? `${line.slice(0, 80)}…` : line || "(빈 문서)";
       // 줄어든 탭·한 줄 목록은 잘리므로 마우스를 올리면 전체 제목과 첫 줄을
       this.tabEl.title = line ? `${this.title()}\n${line}` : this.title();

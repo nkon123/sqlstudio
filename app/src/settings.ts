@@ -6,6 +6,7 @@ import { api, errOf, type AcpAgent, type Group, type ModelProfile, type Profile,
 import { colorOf, countIn, groupLabel, groupLeaf, groupParent, groupTree, isCollapsed, setCollapsed, type GroupNode } from "./conngroups";
 import { DEFAULT_PREFS, STYLE_PRESETS, autoFormat, detectPrefs, formatSql, loadPrefs, savePrefs, setAutoFormat, type AutoFormat, type FormatPrefs } from "./format";
 import { restoreEnabled, setRestoreEnabled } from "./tabsession";
+import { revealEnabled, setRevealEnabled } from "./tab";
 import { DEFAULT_SNIPPETS, parse as parseSnippets, saveSnippets, snippets, type Snip } from "./snippets";
 import { applyTheme, confirmBox, editorColorNow, field, h, modal, setEditorColor, themePref, toast, type EditorColorKey, type ThemePref } from "./ui";
 import type { App } from "./main";
@@ -284,6 +285,12 @@ function editorPage(app: App) {
       cb.onchange = () => setRestoreEnabled(cb.checked);
       return cb;
     })(), "시작할 때 지난 탭 되살리기 — 쓰던 SQL 을 몇 초마다 데이터 폴더(tabs.json)에 남깁니다. 끄면 닫을 때 저장 여부를 묻습니다"),
+    h("h3", {}, "결과 영역"),
+    h("label", { class: "check" }, (() => {
+      const cb = h("input", { type: "checkbox", checked: revealEnabled() }) as HTMLInputElement;
+      cb.onchange = () => setRevealEnabled(cb.checked);
+      return cb;
+    })(), "SELECT 결과가 나오면 결과 영역 키우기 — 결과가 작게 보일 때만 화면의 절반 남짓으로 키우고, 커서는 에디터에 둡니다. 결과 영역의 ↕ 나 경계선 더블클릭으로 직접 정한 비율로 돌아갑니다"),
     h("h3", {}, "SQL 실행 이력 (F8)"),
     histBox,
     h("h3", {}, "코드 조각"),

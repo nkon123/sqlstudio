@@ -137,7 +137,7 @@ export class App {
       drop("도구 ▾", "분석·흐름도·디버그·스키마 비교·데이터 복사·용량·세션", () => toolsMenu(this)),
       h("span", { class: "spacer" }),
       h("button", { class: "pal-open", title: "모든 명령을 이름으로 찾아 실행 (Ctrl+Shift+P)", onclick: () => this.palette() },
-        h("span", {}, "🔍 명령 검색"), h("kbd", {}, "Ctrl+Shift+P")),
+        h("span", {}, "🔍", h("span", { class: "pal-label" }, " 명령 검색")), h("kbd", {}, "Ctrl+Shift+P")),
       h("span", { class: "spacer" }),
       this.btn.toggleBrowser, this.btn.toggleAi, this.btn.keys, this.btn.settings,
     );
@@ -797,6 +797,7 @@ export class App {
         t.grid.setPage(r.outcome);
         this.loadNotes(t);
         t.show("result");
+        if (r.outcome.rows.length) t.revealResults();
         this.status(`${r.outcome.rows.length.toLocaleString()}행${r.outcome.has_more ? "+" : ""} · ${ms}`);
         break;
       case "affected":
@@ -878,6 +879,7 @@ export class App {
             }
           } else if (ev.event === "rows") {
             t.grid.setPage(ev.page);
+            if (ev.page.rows.length) t.revealResults();
           }
         });
         t.txnPending = s.txn_pending;

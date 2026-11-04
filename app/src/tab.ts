@@ -15,6 +15,16 @@ import { field, h, modal, toast } from "./ui";
 import type { App } from "./main";
 import { dragSplit } from "./layout";
 
+/** SELECT 결과가 나오면 결과 영역 키우기 (설정 → 편집기, 기본 켬) */
+export function revealEnabled(): boolean {
+  try { return localStorage.getItem("results.reveal") !== "0"; } catch { return true; }
+}
+export function setRevealEnabled(on: boolean) {
+  try { localStorage.setItem("results.reveal", on ? "1" : "0"); } catch { /* 이번만 */ }
+}
+/** 키울 때 에디터 높이(%) — 결과 영역은 그 나머지 */
+const REVEAL_EDITOR = 45;
+
 export type Conn = Connected & { profile: string; /** 접속한 때 (ms) */ at?: number };
 export type Pane = "result" | "output" | "plan" | "desc";
 
@@ -218,6 +228,8 @@ export class Tab {
     this.editorHostEl = editorHost;
     splitter.title = "끌어서 높이 조절 · 더블클릭: 원래 비율";
     splitter.addEventListener("dblclick", () => this.resizePane("reset"));
+    // 직접 끌면 그 비율이 새 기준 — 자동으로 키운 것은 잊는다
+    splitter.addEventListener("mousedown", () => { this.autoGrown = false; });
     try {
       const saved = Number(localStorage.getItem("pane.editor"));
       if (saved >= 15 && saved <= 85) editorHost.style.flexBasis = `${saved}%`;
@@ -232,13 +244,34 @@ export class Tab {
   }
 
   private editorHostEl!: HTMLElement;
+  /** 결과가 나와 자동으로 키운 상태 — '원래 비율' 은 직접 정한 비율로 */
+  private autoGrown = false;
+
+  /** SELECT 결과가 나오면 결과 영역을 키운다. 이미 크면 그대로, 비율은 저장하지 않는다. 포커스는 에디터에 둔다 */
+  revealResults() {
+    if (!revealEnabled() || this.root.hidden) return;
+    const host = this.editorHostEl;
+    const total = this.root.getBoundingClientRect().height;
+    if (!total || (host.getBoundingClientRect().height / total) * 100 <= REVEAL_EDITOR + 1) return;
+    host.style.flexBasis = `${REVEAL_EDITOR}%`;
+    this.autoGrown = true;
+    // 에디터가 줄어도 커서 줄은 보이게
+    requestAnimationFrame(() => {
+      const v = this.editor.view;
+      v.dispatch({ selection: v.state.selection, scrollIntoView: true });
+    });
+  }
 
   /** 에디터와 결과 영역의 높이 — 키우기·줄이기는 15%씩, 원래는 45%. 비율로 두어 창을 줄여도 경계선이 화면 밖으로 나가지 않는다 */
   resizePane(how: "grow" | "shrink" | "reset") {
     const host = this.editorHostEl;
     const total = this.root.getBoundingClientRect().height || 1;
     const cur = (host.getBoundingClientRect().height / total) * 100;
-    const next = how === "reset" ? 45 : how === "grow" ? cur - 15 : cur + 15;
+    let saved = 45;
+    try { const n = Number(localStorage.getItem("pane.editor")); if (n >= 15 && n <= 85) saved = n; } catch { /* 기본 */ }
+    // 자동으로 키운 뒤의 '원래 비율' 은 직접 정해 둔 비율, 아니면 기본 45%
+    const next = how === "reset" ? (this.autoGrown ? saved : 45) : how === "grow" ? cur - 15 : cur + 15;
+    this.autoGrown = false;
     const pct = Math.round(Math.max(15, Math.min(85, next)));
     host.style.flexBasis = `${pct}%`;
     try { localStorage.setItem("pane.editor", String(pct)); } catch { /* 기억 못 해도 된다 */ }
@@ -274,7 +307,7 @@ export class Tab {
   refreshTitle() {
     (this.tabEl.querySelector(".tab-title") as HTMLElement).textContent = this.title();
     this.tabEl.title = this.title(); // 줄어든 탭은 제목이 잘리므로 마우스를 올리면 전체를 보인다
-    this.tabEl.style.borderTopColor = this.conn?.color ?? "transparent";
+    if (this.conn?.color) this.tabEl.style.setProperty("--tab-conn", this.conn.color); else this.tabEl.style.removeProperty("--tab-conn");
     // 커밋하지 않은 변경 — 다른 탭을 보고 있어도 알 수 있게 탭과 에디터 위에
     const txn = !!this.conn && this.txnPending;
     this.tabEl.classList.toggle("txn", txn);

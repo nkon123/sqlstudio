@@ -219,6 +219,19 @@ pub fn merge_sql(owner: &str, table: &str, cols: &[&ColPlan], keys: &[String]) -
     sql
 }
 
+/// 대상에 테이블이 없을 때 — 원본 열 정의로 만든다 (열 이름·형식·NOT NULL, 기본 키).
+/// 기본값·인덱스·주석·저장 옵션은 옮기지 않는다 (기본값은 시퀀스 등 원본 DB 의 것을 가리킬 수 있다).
+/// `picked` 가 있으면 그 열만, 기본 키는 그 열을 모두 만들 때만
+pub fn create_table_sql(owner: &str, table: &str, src: &[ColumnDesc], pk: &[String], picked: &[String]) -> String {
+    let cols: Vec<&ColumnDesc> = src.iter().filter(|c| picked.is_empty() || picked.contains(&c.name)).collect();
+    let mut lines: Vec<String> = cols.iter().map(|c| format!("  {} {}{}", q(&c.name), c.data_type, if c.nullable { "" } else { " NOT NULL" })).collect();
+    if !pk.is_empty() && pk.iter().all(|k| cols.iter().any(|c| &c.name == k)) {
+        let names: Vec<String> = pk.iter().map(|k| q(k)).collect();
+        lines.push(format!("  PRIMARY KEY ({})", names.join(", ")));
+    }
+    format!("CREATE TABLE {} (\n{}\n)", qualified(owner, table), lines.join(",\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +281,15 @@ WHEN MATCHED THEN UPDATE SET t.\"NM\" = s.\"NM\", t.\"HIRED\" = s.\"HIRED\" WHEN
         // 열이 모두 키면 넣기만
         let only_id = copied(&p, &["ID".into()]);
         assert!(!merge_sql("DEV", "EMP", &only_id, &["ID".into()]).contains("WHEN MATCHED"));
+    }
+
+    #[test]
+    fn create_table() {
+        let src = vec![c("ID", "NUMBER(10)", false), c("NM", "VARCHAR2(30 CHAR)", true), c("PIC", "BLOB", true)];
+        assert_eq!(create_table_sql("DEV", "EMP", &src, &["ID".into()], &[]),
+            "CREATE TABLE \"DEV\".\"EMP\" (\n  \"ID\" NUMBER(10) NOT NULL,\n  \"NM\" VARCHAR2(30 CHAR),\n  \"PIC\" BLOB,\n  PRIMARY KEY (\"ID\")\n)");
+        // 키 열을 빼고 만들면 기본 키도 뺀다
+        assert_eq!(create_table_sql("DEV", "EMP", &src, &["ID".into()], &["NM".into()]),
+            "CREATE TABLE \"DEV\".\"EMP\" (\n  \"NM\" VARCHAR2(30 CHAR)\n)");
     }
 }

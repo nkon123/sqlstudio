@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use sqls_core::copydata::{self as cd, ColPlan, Mode};
-use sqls_core::meta;
+use sqls_core::meta::{self, TableDesc};
 use tauri::ipc::Channel;
 use tauri::State;
 
@@ -45,6 +45,9 @@ pub struct CopyArgs {
     commit_every: Option<u64>,
     #[serde(default)]
     confirmed: bool,
+    /// 대상에 테이블이 없으면 원본 열 정의로 만든다
+    #[serde(default)]
+    create_table: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +64,8 @@ pub struct CopyPlan {
     select_sql: String,
     write_sql: String,
     delete_sql: Option<String>,
+    /// 대상에 없어 만들 때 — 복사 전에 실행한다
+    create_sql: Option<String>,
     warnings: Vec<String>,
     production: bool,
 }
@@ -81,7 +86,22 @@ async fn prepare(st: &AppState, a: &CopyArgs) -> R<Prepared> {
         return Err(ErrView::msg("read_only", "대상 접속이 읽기 전용 프로필입니다 — 다른 접속을 대상으로 고르세요"));
     }
     let sd = meta::describe(&src, a.src_table.trim()).await?;
-    let dd = meta::describe(&dst, a.dst_table.trim()).await?;
+    // 대상에 없으면 (고른 경우) 원본 열로 만든다 — 그 테이블을 대상으로 계획을 세운다
+    let mut create_sql = None;
+    let dd = match meta::describe(&dst, a.dst_table.trim()).await {
+        Ok(d) => d,
+        Err(sqls_core::Error::Invalid(_)) if a.create_table => {
+            let (owner, name) = meta::split_qualified(a.dst_table.trim(), &dst.info().user);
+            create_sql = Some(cd::create_table_sql(&owner, &name, &sd.columns, &sd.primary_key, &a.columns));
+            let mut d = sd.clone();
+            d.columns.retain(|c| a.columns.is_empty() || a.columns.contains(&c.name));
+            if !d.primary_key.iter().all(|k| d.columns.iter().any(|c| &c.name == k)) {
+                d.primary_key.clear();
+            }
+            TableDesc { owner, name, object_type: "TABLE".into(), indexes: vec![], ..d }
+        }
+        Err(e) => return Err(e.into()),
+    };
     if dd.object_type != "TABLE" {
         return Err(ErrView::msg("invalid", format!("대상 {}.{} 은 테이블이 아닙니다 ({})", dd.owner, dd.name, dd.object_type)));
     }
@@ -116,11 +136,16 @@ async fn prepare(st: &AppState, a: &CopyArgs) -> R<Prepared> {
     if a.mode == Mode::Replace && cond.map(str::trim).unwrap_or("").is_empty() {
         warnings.push("조건이 없어 대상 테이블의 행을 모두 지우고 넣습니다".into());
     }
+    if create_sql.is_some() {
+        warnings.push(format!("대상에 {}.{} 이 없어 원본 열 정의로 새로 만듭니다 — CREATE TABLE 은 바로 확정되어 롤백으로 지워지지 않습니다 (기본값·인덱스·주석은 옮기지 않습니다)", dd.owner, dd.name));
+    }
+    let creating = create_sql.is_some();
     let select_sql = cd::select_sql(&sd.owner, &sd.name, &cols, cond);
     // 조건이 틀렸으면 여기서 알게 된다 (건수를 세면서)
     let src_rows = count(&src, &cd::count_sql(&sd.owner, &sd.name, cond)).await?;
-    let delete_sql = (a.mode == Mode::Replace).then(|| cd::delete_sql(&dd.owner, &dd.name, cond));
+    let delete_sql = (a.mode == Mode::Replace && !creating).then(|| cd::delete_sql(&dd.owner, &dd.name, cond));
     let dst_rows = match a.mode {
+        Mode::Replace if creating => Some(0),
         Mode::Replace => Some(count(&dst, &cd::count_sql(&dd.owner, &dd.name, cond)).await?),
         _ => None,
     };
@@ -135,6 +160,7 @@ async fn prepare(st: &AppState, a: &CopyArgs) -> R<Prepared> {
         select_sql,
         write_sql,
         delete_sql,
+        create_sql,
         warnings,
         production: crate::db::is_production(st, a.dst_id),
     };
@@ -185,6 +211,14 @@ pub async fn copy_run(st: State<'_, AppState>, args: CopyArgs, on_event: Channel
         p.plan.src, p.plan.dst, total, args.mode,
         if every > 0 { format!(", {every}행마다 커밋") } else { String::new() }
     );
+    if let Some(create) = &p.plan.create_sql {
+        // DDL 은 그 세션의 커밋 전 변경까지 확정한다 — 남은 변경이 있으면 먼저 정리하게
+        if txn.load(Ordering::Relaxed) {
+            return Err(ErrView::msg("invalid", "대상 탭에 커밋하지 않은 변경이 있습니다 — 테이블을 만들면 함께 커밋되므로 먼저 커밋하거나 롤백하세요"));
+        }
+        dst.execute(create, sqls_core::session::ExecOptions::default()).await?;
+        tracing::info!("데이터 복사: 대상 테이블 {} 을 만듦", p.plan.dst);
+    }
     let mut deleted = 0u64;
     if let Some(del) = &p.plan.delete_sql {
         let r = dst.execute(del, sqls_core::session::ExecOptions::default()).await?;

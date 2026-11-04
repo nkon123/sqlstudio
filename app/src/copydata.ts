@@ -9,7 +9,7 @@ type Mode = "append" | "replace" | "merge";
 interface ColPlan { name: string; src_type: string | null; dst_type: string | null; status: "copy" | "src_only" | "dst_only" | "unsupported"; note?: string }
 interface CopyPlan {
   src: string; dst: string; columns: ColPlan[]; primary_key: string[]; keys: string[];
-  src_rows: number; dst_rows: number | null; select_sql: string; write_sql: string; delete_sql: string | null;
+  src_rows: number; dst_rows: number | null; select_sql: string; write_sql: string; delete_sql: string | null; create_sql: string | null;
   warnings: string[]; production: boolean;
 }
 interface Summary { read: number; written: number; failed: number; deleted: number; stopped: boolean; errors: [number, string][]; txn_pending: boolean; committed: number; elapsed_ms: number }
@@ -54,6 +54,9 @@ export function openCopyData(hk: CopyHooks) {
   const mode = () => (radios.find((r) => r.checked)?.value ?? "append") as Mode;
   const skipErr = h("input", { type: "checkbox" }) as HTMLInputElement;
   skipErr.checked = true;
+  // 대상에 테이블이 없으면 원본 열 정의로 만든다 (미리 보기에 CREATE TABLE 이 나온다)
+  const createTbl = h("input", { type: "checkbox" }) as HTMLInputElement;
+  createTbl.onchange = () => { if (plan) { plan = null; renderPlan(); } };
   // 큰 복사는 중간에 커밋 — 끊겨도 앞부분이 남고 대상의 UNDO 가 모자라지 않게 (비우면 커밋하지 않는다)
   const commitEvery = h("input", { type: "number", min: "0", step: "10000", placeholder: "안 함", style: "width:90px",
     title: "이만큼 넣을 때마다 대상에서 커밋합니다. 비우면 커밋하지 않고 끝난 뒤 대상 탭에서 커밋·롤백합니다.\n중간에 커밋하면 멈췄을 때 롤백으로 전부 되돌릴 수 없습니다." }) as HTMLInputElement;
@@ -70,7 +73,7 @@ export function openCopyData(hk: CopyHooks) {
     src_id: Number(srcSel.value), src_table: srcTable.value.trim(),
     dst_id: Number(dstSel.value), dst_table: (dstTable.value.trim() || (srcTable.value.trim().split(".").pop() ?? "")),
     cond: cond.value.trim() || null, mode: mode(), keys: mode() === "merge" ? keys : [],
-    columns: plan ? [...picked] : [], skip_errors: skipErr.checked, confirmed,
+    columns: plan ? [...picked] : [], skip_errors: skipErr.checked, confirmed, create_table: createTbl.checked,
     commit_every: Number(commitEvery.value) > 0 ? Math.floor(Number(commitEvery.value)) : null,
   });
 
@@ -81,6 +84,7 @@ export function openCopyData(hk: CopyHooks) {
     const m = mode();
     const head = h("div", { class: "row" }, h("b", {}, `${p.src} → ${p.dst}`),
       h("span", {}, ` · 원본 ${p.src_rows.toLocaleString()}행${p.dst_rows != null ? ` · 대상에서 지울 행 ${p.dst_rows.toLocaleString()}` : ""}`),
+      p.create_sql ? h("span", { class: "warn-text" }, " · 대상 테이블을 새로 만듦") : "",
       p.production ? h("span", { class: "warn-text" }, " · 대상이 운영 DB") : "");
     const rows = p.columns.map((c) => {
       const cb = h("input", { type: "checkbox", disabled: c.status !== "copy" }) as HTMLInputElement;
@@ -97,7 +101,9 @@ export function openCopyData(hk: CopyHooks) {
     const table = h("table", { class: "copy-cols" },
       h("thead", {}, h("tr", {}, h("th", {}, "옮김"), m === "merge" ? h("th", {}, "키") : "", h("th", {}, "열"), h("th", {}, "원본"), h("th", {}, "대상"), h("th", {}, "상태"), h("th", {}, "알림"))),
       h("tbody", {}, ...rows));
-    const sqlText = [p.delete_sql && `-- 1. 대상에서 지우기\n${p.delete_sql};`, `-- ${p.delete_sql ? 2 : 1}. 원본에서 읽기\n${p.select_sql};`, `-- ${p.delete_sql ? 3 : 2}. 대상에 넣기 (1000행씩 묶어)\n${p.write_sql};`].filter(Boolean).join("\n\n");
+    const steps = [p.create_sql && ["대상 테이블 만들기", p.create_sql], p.delete_sql && ["대상에서 지우기", p.delete_sql],
+      ["원본에서 읽기", p.select_sql], ["대상에 넣기 (1000행씩 묶어)", p.write_sql]].filter(Boolean) as [string, string][];
+    const sqlText = steps.map(([t, s], i) => `-- ${i + 1}. ${t}\n${s};`).join("\n\n");
     planBox.replaceChildren(head,
       ...p.warnings.map((w) => h("div", { class: "warn-text", style: "font-size:12px" }, w)),
       h("div", { class: "copy-cols-box" }, table),
@@ -136,7 +142,7 @@ export function openCopyData(hk: CopyHooks) {
     const every = args().commit_every;
     const what = m === "replace" ? `대상에서 ${p.dst_rows?.toLocaleString() ?? "?"}행을 지우고 ${p.src_rows.toLocaleString()}행을 넣습니다` :
       m === "merge" ? `${p.src_rows.toLocaleString()}행을 키(${keys.join(", ")})로 MERGE 합니다` : `${p.src_rows.toLocaleString()}행을 넣습니다`;
-    if (!(await confirmBox("데이터 복사", `${p.src} → ${dst?.label ?? ""} ${p.dst}\n\n${what}.\n${every ? `${every.toLocaleString()}행마다 커밋합니다 — 멈추면 커밋한 데까지는 남습니다 (롤백으로 되돌릴 수 없음).` : "커밋하지 않습니다 — 대상 탭에서 커밋하거나 롤백하세요."}${p.production ? "\n\n⚠ 대상이 운영 DB 입니다." : ""}`, "복사"))) return;
+    if (!(await confirmBox("데이터 복사", `${p.src} → ${dst?.label ?? ""} ${p.dst}\n\n${p.create_sql ? "대상에 테이블을 만들고 (바로 확정됨) " : ""}${what}.\n${every ? `${every.toLocaleString()}행마다 커밋합니다 — 멈추면 커밋한 데까지는 남습니다 (롤백으로 되돌릴 수 없음).` : "커밋하지 않습니다 — 대상 탭에서 커밋하거나 롤백하세요."}${p.production ? "\n\n⚠ 대상이 운영 DB 입니다." : ""}`, "복사"))) return;
     runBtn.disabled = previewBtn.disabled = true;
     stopBtn.hidden = false;
     const bar = h("progress", { max: Math.max(1, p.src_rows), value: 0, style: "width:100%" }) as HTMLProgressElement;
@@ -175,7 +181,9 @@ export function openCopyData(hk: CopyHooks) {
   const lbl = (t: string) => h("span", { class: "copy-lbl" }, t);
   const body = h("div", { class: "usage copy-data" },
     h("div", { class: "row" }, lbl("원본"), srcSel, srcTable),
-    h("div", { class: "row" }, lbl("대상"), dstSel, dstTable),
+    h("div", { class: "row" }, lbl("대상"), dstSel, dstTable,
+      h("label", { class: "rdiff-key", title: "대상에 이 테이블이 없으면 원본의 열 이름·형식·NOT NULL·기본 키로 CREATE TABLE 한 뒤 옮깁니다.\n기본값·인덱스·주석은 옮기지 않습니다. CREATE TABLE 은 롤백되지 않습니다." },
+        createTbl, "테이블이 없으면 만들기")),
     h("div", { class: "row" }, lbl("조건"), h("span", { class: "dim" }, "WHERE"), cond),
     h("div", { class: "row" }, lbl("방식"),
       radio("append", "추가", "INSERT 만 — 키가 겹치면 그 행은 실패"),

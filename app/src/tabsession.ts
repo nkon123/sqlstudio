@@ -14,6 +14,9 @@ export interface SavedTab {
   dirty: boolean;
   cursor: number;
   profile: string | null;
+  /** 마지막으로 고친 때 (왼쪽 목록의 날짜 묶음) — 예전 파일에는 없다 */
+  used?: number;
+  tag?: string | null;
 }
 
 interface SavedSession { v: 1; at: number; active: number; tabs: SavedTab[] }

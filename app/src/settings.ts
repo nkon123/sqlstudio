@@ -7,6 +7,7 @@ import { colorOf, countIn, groupLabel, groupLeaf, groupParent, groupTree, isColl
 import { DEFAULT_PREFS, STYLE_PRESETS, autoFormat, detectPrefs, formatSql, loadPrefs, savePrefs, setAutoFormat, type AutoFormat, type FormatPrefs } from "./format";
 import { restoreEnabled, setRestoreEnabled } from "./tabsession";
 import { revealEnabled, setRevealEnabled } from "./tab";
+import { setTabsSidePref, tabsSidePref } from "./tabdrag";
 import { DEFAULT_SNIPPETS, parse as parseSnippets, saveSnippets, snippets, type Snip } from "./snippets";
 import { applyTheme, confirmBox, editorColorNow, field, h, modal, setEditorColor, themePref, toast, type EditorColorKey, type ThemePref } from "./ui";
 import type { App } from "./main";
@@ -27,7 +28,7 @@ function markActive(list: HTMLElement, name: string | undefined) {
 }
 
 /** 선 아이콘 (24×24, 선만) */
-function icon(d: string): SVGSVGElement {
+export function icon(d: string): SVGSVGElement {
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
@@ -285,6 +286,11 @@ function editorPage(app: App) {
       cb.onchange = () => setRestoreEnabled(cb.checked);
       return cb;
     })(), "시작할 때 지난 탭 되살리기 — 쓰던 SQL 을 몇 초마다 데이터 폴더(tabs.json)에 남깁니다. 끄면 닫을 때 저장 여부를 묻습니다"),
+    h("label", { class: "check" }, (() => {
+      const cb = h("input", { type: "checkbox", checked: tabsSidePref() }) as HTMLInputElement;
+      cb.onchange = () => { setTabsSidePref(cb.checked); app.placeTabs(); };
+      return cb;
+    })(), "문서 탭을 왼쪽 목록으로 — 왼쪽의 '문서' 에 열린 탭을 세로로 보이고, 왼쪽을 접거나 테이블·프로젝트를 보면 편집기 위 탭 줄로 돌아옵니다. 끄면 늘 위 탭 줄"),
     h("h3", {}, "결과 영역"),
     h("label", { class: "check" }, (() => {
       const cb = h("input", { type: "checkbox", checked: revealEnabled() }) as HTMLInputElement;

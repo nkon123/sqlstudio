@@ -165,6 +165,51 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .tab::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--tab-conn); display: none; }
 .tab[style*="--tab-conn"]::before { display: block; }
 .tab-title { overflow: hidden; text-overflow: ellipsis; }
+.tab-sub { display: none; }
+/* 왼쪽 '문서' — 같은 탭을 세로 목록으로 (채팅 목록처럼): 제목 줄 + 첫 SQL 줄 미리 보기 */
+.doc-pane { display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 0; }
+/* 왼쪽 위 세로 메뉴 — 새 문서 · 검색 · 테이블 · 프로젝트 · 실행 이력 */
+.side-nav { display: flex; flex-direction: column; gap: 1px; padding-bottom: 6px; }
+.side-item { display: flex; align-items: center; gap: 10px; width: 100%; height: 30px; padding: 0 8px; border-radius: var(--r-ctl); color: var(--text); text-align: left; }
+.side-item svg { width: 17px; height: 17px; flex: none; fill: none; stroke: var(--dim); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.side-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.side-item.active svg { stroke: var(--accent); }
+.doc-search input { width: 100%; }
+/* '열린 문서 N ▾' — 누르면 접는다 */
+.doc-section { align-self: flex-start; padding: 6px 8px 2px; font-size: 12px; color: var(--dim); background: none; }
+.doc-section::after { content: " ▾"; font-size: 10px; }
+.doc-section.folded::after { content: " ▸"; }
+.doc-section:hover:not(:disabled) { background: none; color: var(--text); }
+.doc-section-row { display: flex; align-items: center; justify-content: space-between; }
+.doc-group-btn { padding: 4px 6px 0; font-size: 11.5px; color: var(--dim); }
+/* 묶음 제목 (오늘 · 어제 … / 접속 / 태그) */
+.doc-group { display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 6px; padding: 4px 8px 4px 4px; border-radius: var(--r-ctl);
+  font-size: 12px; font-weight: 600; color: var(--text); text-align: left; }
+.doc-group:first-child { margin-top: 0; }
+.doc-group span { margin-left: auto; font-weight: 400; font-size: 11px; color: var(--dim); }
+/* 펼침 ▾ / 접힘 ▸ */
+.doc-chev { flex: none; width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid var(--dim);
+  margin: 0 3px; transition: transform .12s; }
+.doc-group.folded .doc-chev { transform: rotate(-90deg); }
+@media (prefers-reduced-motion: reduce) { .doc-chev { transition: none; } }
+/* 묶음 안의 문서는 들여 쓰고 왼쪽에 세로 안내선 — 어느 묶음에 속하는지 */
+.tabs.vertical:not([data-group="none"]) .tab { margin-left: 12px; }
+.tabs.vertical:not([data-group="none"]) .tab::after { content: ""; position: absolute; left: -5px; top: 0; bottom: 0; width: 1px; background: var(--line); }
+.tabs.vertical:not([data-group="none"]) .tab.active::after { background: var(--accent); width: 2px; left: -6px; }
+.tab.in-folded:not(.active) { display: none; }
+.tab-tag { margin-left: 6px; font-size: 11px; color: var(--accent); }
+.tabs:not(.vertical) .tab-tag, .tabs[data-group="tag"] .tab-tag { display: none; }
+.doc-list { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+/* 열린 문서 — 한 줄: 제목, 흐린 접속, 오른쪽 끝에 커밋 전·닫기 */
+.tabs.vertical { flex-direction: column; align-items: stretch; gap: 1px; padding: 0; overflow: visible; }
+.tabs.vertical .tab { height: 30px; min-width: 0; max-width: none; padding: 0 4px 0 8px; }
+.tabs.vertical .tab-title { flex: 1; min-width: 0; }
+.tabs.vertical .tab-prof { color: var(--dim); font-size: 11.5px; }
+.tabs.vertical .tab.active .tab-prof { color: color-mix(in srgb, var(--text) 60%, var(--dim)); }
+/* 위 탭 줄이 없으면 편집기 섬의 위 모서리도 둥글게 */
+.tabs-row[hidden] + .tab-bodies .editor-host { border-radius: var(--r-island); }
+.tabs.vertical .tab-close { visibility: hidden; }
+.tabs.vertical .tab:hover .tab-close, .tabs.vertical .tab.active .tab-close { visibility: visible; }
 .tab:hover:not(.active) { background-color: var(--hover); color: var(--text); }
 .tab.active { --tab-bg: var(--sunk); z-index: 1; background-color: var(--tab-bg); color: var(--text); font-weight: 500; }
 .tab-close { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: none; border-radius: 50%; background: none; color: var(--dim); font-size: 14px; line-height: 1; }

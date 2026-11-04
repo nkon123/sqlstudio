@@ -13,7 +13,7 @@ import { api, byteToUtf16, errOf, utf16ToByte, type Column, type ErrView, type E
 import { AiPanel } from "./ai";
 import { listen } from "@tauri-apps/api/event";
 import { showSpace } from "./space";
-import { enableTabDrag } from "./tabdrag";
+import { enableTabDrag, tabsSidePref } from "./tabdrag";
 import { cellCondition, listCondition, listText, placeCondition, type CondOp, type ListCond, type ListText } from "./cond";
 import { changeCase } from "./editor";
 import { autoFormat, formatSql, loadPrefs, startsWithDml } from "./format";
@@ -38,7 +38,8 @@ import { alertBox, applyTheme, bindBox, confirmBox, h, modal, passwordBox, toast
 import { Tab } from "./tab";
 import { SideLayout } from "./layout";
 import { connMenu, fileMenu, palette, runMenu, toolsMenu } from "./menus";
-import { settings } from "./settings";
+import { icon, settings } from "./settings";
+import { docGroupKey, docGroupPref, GROUP_LABEL, setDocGroupPref, sortGroupKeys, type DocGroup } from "./docgroups";
 import { profileOptions } from "./conngroups";
 import { editToSelect } from "./editcmd";
 
@@ -55,6 +56,14 @@ export class App {
   /** 탭을 끌어 옮긴 직후의 클릭은 탭을 고르는 것이 아니다 */
   tabJustDragged = false;
   private tabBodies = h("div", { class: "tab-bodies" });
+  /** 위쪽 탭 줄 — 문서 목록이 왼쪽에 보이면 숨긴다 */
+  private tabsRow!: HTMLElement;
+  /** 왼쪽 '문서' — 열린 탭을 세로 목록으로 (채팅 목록처럼) */
+  private docList = h("div", { class: "doc-list" });
+  private docFilter = h("input", { placeholder: "문서 찾기", title: "제목·접속·첫 줄로 거른다" }) as HTMLInputElement;
+  private sideTab = "doc";
+  private restoring = false;
+  private leftOpen = true;
   profileSel = h("select", { title: "접속 프로필" });
   /** 접속 단추 — 프로필·상태를 보이고, 누르면 프로필 고르기·끊기 메뉴 */
   private connName = h("span", { class: "conn-name" });
@@ -151,28 +160,72 @@ export class App {
       this.browserFilter,
       this.browserList,
       h("small", { class: "hint" }, "클릭: 구조 · 우클릭: 메뉴 · 더블클릭: 이름 넣기 · 체크: AI 문맥에 포함"));
-    // 왼쪽 영역: 테이블 | 프로젝트
-    const sideTabs = h("div", { class: "side-tabs" });
-    const panes: Record<string, HTMLElement> = { table: tablePane, git: this.gitPane };
+    // 왼쪽 영역 — 위는 늘 보이는 세로 메뉴, 아래는 '열린 문서' 목록 (테이블·프로젝트를 고르면 그 자리에)
+    const searchRow = h("div", { class: "doc-search", hidden: true }, this.docFilter);
+    this.docFilter.addEventListener("input", () => this.filterDocs());
+    this.docFilter.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { this.docFilter.value = ""; this.filterDocs(); searchRow.hidden = true; this.active?.editor.focus(); }
+    });
+    let docsFolded = false;
+    try { docsFolded = localStorage.getItem("side.docsFolded") === "1"; } catch { /* 기본 */ }
+    const docsHead = h("button", { class: "doc-section", title: "접기/펼치기", onclick: () => {
+      docsFolded = !docsFolded;
+      this.docList.hidden = docsFolded;
+      docsHead.classList.toggle("folded", docsFolded);
+      try { localStorage.setItem("side.docsFolded", docsFolded ? "1" : "0"); } catch { /* 이번만 */ }
+    } }, "열린 문서");
+    this.docsHead = docsHead;
+    this.docList.hidden = docsFolded;
+    docsHead.classList.toggle("folded", docsFolded);
+    // 묶기 — 없음 · 날짜 · 접속 · 태그
+    const groupBtn = h("button", { class: "doc-group-btn", title: "열린 문서를 묶어 보기", onclick: () => {
+      const r = groupBtn.getBoundingClientRect();
+      showMenu(r.left, r.bottom + 2, [
+        { title: "묶기" },
+        ...(Object.entries(GROUP_LABEL) as [DocGroup, string][]).map(([k, label]): MenuItem => ({
+          label: `${docGroupPref() === k ? "✓ " : ""}${label}`,
+          run: () => { setDocGroupPref(k); groupBtn.textContent = `묶기: ${GROUP_LABEL[k]}`; this.renderDocs(); },
+        })),
+      ]);
+    } }, `묶기: ${GROUP_LABEL[docGroupPref()]}`);
+    const docPane = h("div", { class: "side-pane doc-pane" }, searchRow, h("div", { class: "doc-section-row" }, docsHead, groupBtn), this.docList);
+    const nav = h("nav", { class: "side-nav" });
+    const panes: Record<string, HTMLElement> = { doc: docPane, table: tablePane, git: this.gitPane };
     const showSide = (k: string) => {
+      this.sideTab = k;
       for (const [n, el] of Object.entries(panes)) el.hidden = n !== k;
-      for (const b of sideTabs.children) b.classList.toggle("on", (b as HTMLElement).dataset.k === k);
+      for (const b of nav.children) b.classList.toggle("active", (b as HTMLElement).dataset.k === k && k !== "doc");
       try { localStorage.setItem("side.tab", k); } catch { /* 없어도 된다 */ }
       if (k === "git") this.loadGit().then((g) => g.setVisible(true));
       else this.git?.setVisible(false);
+      this.placeTabs();
     };
-    for (const [k, label] of [["table", "테이블"], ["git", "프로젝트"]]) sideTabs.append(h("button", { "data-k": k, onclick: () => showSide(k) }, label));
-    const browser = h("aside", { class: "browser" }, sideTabs, tablePane, this.gitPane);
+    const item = (k: string, label: string, path: string, title: string, run: () => void) =>
+      h("button", { class: "side-item", "data-k": k, title, onclick: run }, icon(path), h("span", {}, label));
+    nav.append(
+      item("new", "새 문서", "M12 5v14M5 12h14", "새 탭 (같은 접속으로)", () => { showSide("doc"); this.newTab(true); }),
+      item("search", "검색", "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4", "열린 문서를 제목·접속·첫 줄로 찾기", () => {
+        showSide("doc");
+        searchRow.hidden = false;
+        this.docFilter.focus();
+      }),
+      // 고른 것을 다시 누르면 열린 문서로
+      item("table", "테이블", "M4 5h16v14H4zM4 10h16M4 15h16M10 5v14", "테이블·뷰 목록 — 클릭: 구조 · 더블클릭: 이름 넣기 · 체크: AI 문맥", () => showSide(this.sideTab === "table" ? "doc" : "table")),
+      item("git", "프로젝트", "M6 3v12M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9", "프로젝트 폴더·git", () => showSide(this.sideTab === "git" ? "doc" : "git")),
+      item("history", "실행 이력", "M12 7v5l3 2M3.5 9A9 9 0 1 1 3 12M3 4v5h5", "실행한 SQL 이력 (F8)", () => this.showHistory()),
+    );
+    const browser = h("aside", { class: "browser" }, nav, docPane, tablePane, this.gitPane);
     this.browserEl = browser;
-    let sideTab = "table";
-    try { sideTab = localStorage.getItem("side.tab") === "git" ? "git" : "table"; } catch { /* 기본 */ }
-    showSide(sideTab);
+    let sideTab = "doc";
+    try { const s = localStorage.getItem("side.tab"); if (s && s in panes) sideTab = s; } catch { /* 기본 */ }
     this.ai = new AiPanel({
       context: () => this.aiContext(),
       insertSql: (s) => this.active?.editor.insert(s),
       replaceSql: (s) => this.replaceStatement(s),
     });
-    const center = h("section", { class: "center" }, h("div", { class: "tabs-row" }, this.tabStrip, this.plusBtn, this.tabListBtn), this.tabBodies);
+    this.tabsRow = h("div", { class: "tabs-row" }, this.tabStrip, this.plusBtn, this.tabListBtn);
+    const center = h("section", { class: "center" }, this.tabsRow, this.tabBodies);
+    showSide(sideTab);
     // 스크롤바를 숨겨 두었으니, 넘친 탭은 휠(세로)로 가로로 넘긴다
     this.tabStrip.addEventListener("wheel", (e) => {
       if (this.tabStrip.scrollWidth <= this.tabStrip.clientWidth) return;
@@ -181,6 +234,7 @@ export class App {
     }, { passive: false });
     const main = h("main", { class: "layout" });
     this.layout = new SideLayout(main, browser, center, this.ai.el, (side, open) => {
+      if (side === "left" && this.leftOpen !== open) { this.leftOpen = open; this.placeTabs(); }
       this.btn[side === "left" ? "toggleBrowser" : "toggleAi"]?.classList.toggle("active", open);
     });
     root.append(toolbar, main,
@@ -246,13 +300,13 @@ export class App {
   private async saveTabs(force = false) {
     if (this.savingTabs || !restoreEnabled() || !this.tabs.length) return;
     const active = Math.max(0, this.active ? this.tabs.indexOf(this.active) : 0);
-    const sig = [active, ...this.tabs.flatMap((t) => [t.editor.view.state.doc, t.filePath, t.dirty, t.encoding, t.conn?.profile ?? t.lastProfile])];
+    const sig = [active, ...this.tabs.flatMap((t) => [t.editor.view.state.doc, t.filePath, t.dirty, t.encoding, t.conn?.profile ?? t.lastProfile, t.tag])];
     if (!force && sig.length === this.savedTabsSig.length && sig.every((x, i) => x === this.savedTabsSig[i])) return;
     this.savingTabs = true;
     try {
       await saveSession(active, this.tabs.map((t) => ({
         text: t.editor.text(), filePath: t.filePath, encoding: t.encoding, eol: t.eol, dirty: t.dirty,
-        cursor: t.editor.cursor(), profile: t.conn?.profile ?? t.lastProfile,
+        cursor: t.editor.cursor(), profile: t.conn?.profile ?? t.lastProfile, used: t.used, tag: t.tag,
       })));
       this.savedTabsSig = sig;
     } catch { /* 다음 차례에 다시 */ } finally {
@@ -268,6 +322,8 @@ export class App {
       return;
     }
     let unsaved = 0;
+    // 되살릴 때는 저장된 순서 그대로 (새 문서를 맨 위로 올리지 않는다)
+    this.restoring = true;
     for (const st of s.tabs) {
       let { text, encoding, eol, dirty } = st;
       // 파일로 저장해 둔 탭은 디스크에서 다시 (밖에서 고쳤을 수 있다). 파일이 없어졌으면 남긴 내용을 저장 안 함으로
@@ -285,10 +341,14 @@ export class App {
       t.eol = eol;
       t.setDirty(dirty);
       t.lastProfile = st.profile ?? null;
+      if (st.used) t.used = st.used;
+      t.tag = st.tag ?? null;
       t.refreshTitle();
       t.editor.view.dispatch({ selection: { anchor: Math.min(st.cursor, t.editor.view.state.doc.length) }, scrollIntoView: true });
       if (dirty) unsaved++;
     }
+    this.restoring = false;
+    this.renderDocs();
     const act = this.tabs[s.active];
     if (act) this.activate(act);
     // 접속은 되살리지 않는다 (운영 DB 일 수 있다) — 그 탭의 프로필만 골라 둔다
@@ -458,13 +518,123 @@ export class App {
   newTab(sameConnection: boolean, text = "") {
     const prev = this.active;
     const t = new Tab(this, text);
-    this.tabs.push(t);
-    this.tabStrip.append(t.tabEl);
+    // 문서를 왼쪽 목록으로 볼 때는 새 문서가 맨 위 (채팅 목록처럼). 위 탭 줄에서는 맨 왼쪽
+    if (tabsSidePref() && !this.restoring) {
+      this.tabs.unshift(t);
+      this.tabStrip.prepend(t.tabEl);
+    } else {
+      this.tabs.push(t);
+      this.tabStrip.append(t.tabEl);
+    }
     this.enableTabDrag(t);
     this.tabBodies.append(t.root);
+    this.renderDocs();
     this.activate(t);
     if (sameConnection && prev?.conn) this.connect(t, prev.conn.profile);
     return t;
+  }
+
+  /** 문서 탭 자리 — 설정이 '왼쪽 목록' 이고 왼쪽의 '문서' 가 보이면 왼쪽에, 아니면 편집기 위 가로 줄.
+   *  문서를 바꿀 곳이 늘 하나는 보이게 (왼쪽을 접거나 테이블·프로젝트를 보면 위 줄이 돌아온다) */
+  placeTabs() {
+    if (!this.tabsRow) return;
+    const side = tabsSidePref() && this.leftOpen && this.sideTab === "doc";
+    this.tabStrip.classList.toggle("vertical", side);
+    if (side && this.tabStrip.parentElement !== this.docList) this.docList.append(this.tabStrip);
+    if (!side && this.tabStrip.parentElement !== this.tabsRow) this.tabsRow.prepend(this.tabStrip);
+    this.tabsRow.hidden = side;
+    if (!side && this.docFilter.value) { this.docFilter.value = ""; this.filterDocs(); }
+    this.renderDocs();
+    this.active?.tabEl.scrollIntoView({ inline: "nearest", block: "nearest" });
+  }
+
+  private docsHead: HTMLElement | null = null;
+  private docsSig = "";
+
+  /** 왼쪽 목록을 묶음대로 다시 놓는다 — 묶음 제목을 넣고 그 아래에 탭. 위 가로 줄일 때는 묶지 않는다 (탭 순서 그대로) */
+  renderDocs() {
+    if (this.docsHead) this.docsHead.textContent = `열린 문서 ${this.tabs.length}`;
+    const strip = this.tabStrip;
+    const mode: DocGroup = strip.classList.contains("vertical") ? docGroupPref() : "none";
+    // 같은 모양이면 다시 놓지 않는다 (화면을 새로 그릴 때마다 불린다 — 접속이 바뀌면 접속 묶음이 바뀐다)
+    const sig = `${mode}|${this.tabs.map((t) => `${t.id}:${docGroupKey(t, mode)}`).join(",")}`;
+    if (sig === this.docsSig && strip.childElementCount === this.tabs.length + strip.querySelectorAll(".doc-group").length) return;
+    this.docsSig = sig;
+    for (const g of strip.querySelectorAll(".doc-group")) g.remove();
+    strip.dataset.group = mode;
+    if (mode === "none") {
+      for (const t of this.tabs) t.tabEl.classList.remove("in-folded");
+      strip.append(...this.tabs.map((t) => t.tabEl));
+    } else {
+      let folded: string[] = [];
+      try { folded = JSON.parse(localStorage.getItem("docs.folded") ?? "[]"); } catch { /* 모두 펼침 */ }
+      const groups = new Map<string, Tab[]>();
+      for (const t of this.tabs) {
+        const k = docGroupKey(t, mode);
+        groups.set(k, [...(groups.get(k) ?? []), t]);
+      }
+      for (const k of sortGroupKeys([...groups.keys()], mode)) {
+        const list = groups.get(k)!;
+        // 날짜로 묶으면 그 안은 최근에 고친 것부터
+        if (mode === "date") list.sort((a, b) => b.used - a.used);
+        // 묶음 제목을 누르면 접는다 (접어도 지금 보는 문서는 남긴다). 접은 것은 이 PC 에 기억
+        const id = `${mode}:${k}`;
+        const head = h("button", { class: "doc-group", title: "접기/펼치기", onclick: () => {
+          const now = !head.classList.contains("folded");
+          head.classList.toggle("folded", now);
+          for (const t of list) t.tabEl.classList.toggle("in-folded", now);
+          let f: string[] = [];
+          try { f = JSON.parse(localStorage.getItem("docs.folded") ?? "[]"); } catch { /* 처음 */ }
+          f = now ? [...new Set([...f, id])] : f.filter((x) => x !== id);
+          try { localStorage.setItem("docs.folded", JSON.stringify(f)); } catch { /* 이번만 */ }
+        } }, h("i", { class: "doc-chev" }), k, h("span", {}, String(list.length)));
+        const isFolded = folded.includes(id);
+        head.classList.toggle("folded", isFolded);
+        for (const t of list) t.tabEl.classList.toggle("in-folded", isFolded);
+        strip.append(head, ...list.map((t) => t.tabEl));
+      }
+    }
+    this.filterDocs();
+  }
+
+  /** 문서를 고쳤을 때 — 고친 때를 남기고, 날짜 묶음이 바뀌었으면 (예: 어제 → 오늘) 다시 놓는다 */
+  docTouched(t: Tab) {
+    const before = docGroupKey(t, "date");
+    t.used = Date.now();
+    if (this.tabStrip.dataset.group === "date" && docGroupKey(t, "date") !== before) this.renderDocs();
+  }
+
+  /** 탭 우클릭 — 태그 (한 문서에 하나: 왼쪽 목록을 태그로 묶을 때 쓴다) */
+  tabMenu(t: Tab, e: MouseEvent) {
+    e.preventDefault();
+    const tags = [...new Set(this.tabs.map((x) => x.tag).filter((x): x is string => !!x))].sort((a, b) => a.localeCompare(b));
+    const setTag = (tag: string | null) => { t.tag = tag; t.refreshTitle(); this.renderDocs(); };
+    showMenu(e.clientX, e.clientY, [
+      { title: "태그" },
+      ...tags.map((g): MenuItem => ({ label: `${t.tag === g ? "✓ " : ""}${g}`, run: () => setTag(g) })),
+      { label: "새 태그…", run: async () => {
+        const inp = h("input", { placeholder: "예: 월마감, 장애 대응", style: "width:100%" }) as HTMLInputElement;
+        setTimeout(() => inp.focus(), 0);
+        const ok = await modal("새 태그", h("div", { class: "form" }, h("small", {}, `${t.title()} 에 붙일 태그`), inp),
+          [{ label: "취소", value: false }, { label: "붙이기", value: true, kind: "primary" }]);
+        if (ok && inp.value.trim()) setTag(inp.value.trim().slice(0, 30));
+      } },
+      { label: "태그 빼기", disabled: !t.tag, run: () => setTag(null) },
+      { sep: true },
+      { label: "닫기", run: () => void this.closeTab(t) },
+    ]);
+  }
+
+  private filterDocs() {
+    const q = this.docFilter.value.trim().toLowerCase();
+    for (const t of this.tabs) t.tabEl.hidden = !!q && !`${t.tabEl.textContent} ${t.tag ?? ""}`.toLowerCase().includes(q);
+    // 보이는 문서가 없는 묶음은 제목도 숨긴다
+    for (const g of this.tabStrip.querySelectorAll<HTMLElement>(".doc-group")) {
+      let n = g.nextElementSibling as HTMLElement | null;
+      let any = false;
+      while (n && !n.classList.contains("doc-group")) { if (!n.hidden) any = true; n = n.nextElementSibling as HTMLElement | null; }
+      g.hidden = !any;
+    }
   }
 
   /** 탭을 끌어 순서 바꾸기 (끄는 동안 놓일 자리를 선으로 보인다) */
@@ -526,6 +696,7 @@ export class App {
     t.root.remove();
     t.tabEl.remove();
     this.tabs = this.tabs.filter((x) => x !== t);
+    this.renderDocs();
     if (!this.tabs.length) this.newTab(false);
     else if (this.active === t) this.activate(this.tabs[this.tabs.length - 1]);
   }
@@ -2074,6 +2245,8 @@ export class App {
     const t = this.active;
     const c = t?.conn;
     const busy = !!t?.running;
+    // 접속이 바뀌었으면 접속 묶음도 (바뀐 것이 없으면 아무것도 안 한다)
+    this.renderDocs();
     this.btn.connect.disabled = busy;
     this.btn.disconnect.disabled = !c || busy;
     for (const k of ["run", "script", "explain", "debug", "monitor", "compare", "space", "copy"]) this.btn[k].disabled = !c || busy;

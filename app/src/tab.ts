@@ -50,6 +50,10 @@ export class Tab {
   /** 읽은 파일의 줄 끝 — 저장할 때 되돌린다 (편집기 안은 \n). CRLF 파일을 LF 로 바꿔 Git 에서 모든 줄이 바뀐 것처럼 보이지 않게 */
   eol: "\n" | "\r\n" = "\n";
   dirty = false;
+  /** 마지막으로 고친 때 — 왼쪽 목록을 날짜로 묶을 때 */
+  used = Date.now();
+  /** 태그 (한 문서에 하나) — 왼쪽 목록을 태그로 묶을 때 */
+  tag: string | null = null;
   txnPending = false;
   /** 끊긴 접속을 다시 여는 중 */
   recovering = false;
@@ -221,7 +225,7 @@ export class Tab {
       describe: () => app.describeAtCursor(),
       history: () => app.showHistory(),
       // 붙여 넣기·되돌리기처럼 DOM input 이 나지 않는 편집도 — 탭의 ● (저장하지 않은 편집)
-      edited: () => this.setDirty(true),
+      edited: () => { this.setDirty(true); this.refreshSub(); app.docTouched(this); },
     }, text, sqlCompletion(() => this.conn?.id));
     this.editor.view.dom.addEventListener("contextmenu", (e) => void app.editorMenu(this, e));
     dragSplit(splitter, editorHost);
@@ -238,8 +242,11 @@ export class Tab {
     this.grid.clear("Ctrl+Enter: 커서 위치 문장 실행 · F5: 스크립트 실행 · Ctrl+E: 실행계획");
     this.tabEl = h("div", { class: "tab", onclick: () => { if (!app.tabJustDragged) app.activate(this); } },
       h("span", { class: "tab-title" }),
+      // 왼쪽 문서 목록에서만 보인다 — 첫 줄 미리 보기
+      h("span", { class: "tab-sub" }),
       h("span", { class: "tab-txn", hidden: true, title: "커밋하지 않은 변경이 있습니다 (INSERT·UPDATE·DELETE·MERGE 등) — 커밋 또는 롤백하세요" }, "커밋 전"),
       h("button", { class: "tab-close", title: "닫기", onclick: (e: Event) => { e.stopPropagation(); app.closeTab(this); } }, "×"));
+    this.tabEl.addEventListener("contextmenu", (e) => app.tabMenu(this, e));
     this.refreshTitle();
   }
 
@@ -305,14 +312,33 @@ export class Tab {
   }
 
   refreshTitle() {
-    (this.tabEl.querySelector(".tab-title") as HTMLElement).textContent = this.title();
-    this.tabEl.title = this.title(); // 줄어든 탭은 제목이 잘리므로 마우스를 올리면 전체를 보인다
+    // 이름과 접속을 나눠 둔다 — 가로 탭은 이어서 보이고, 왼쪽 목록은 접속을 흐리게
+    const file = this.filePath ? this.filePath.split(/[\\/]/).pop() : `새 문서 ${this.id}`;
+    const prof = this.title().slice(`${this.dirty ? "● " : ""}${file}`.length);
+    (this.tabEl.querySelector(".tab-title") as HTMLElement).replaceChildren(
+      h("span", { class: "tab-name" }, `${this.dirty ? "● " : ""}${file}`), h("span", { class: "tab-prof" }, prof),
+      this.tag ? h("span", { class: "tab-tag" }, `#${this.tag}`) : "");
     if (this.conn?.color) this.tabEl.style.setProperty("--tab-conn", this.conn.color); else this.tabEl.style.removeProperty("--tab-conn");
     // 커밋하지 않은 변경 — 다른 탭을 보고 있어도 알 수 있게 탭과 에디터 위에
     const txn = !!this.conn && this.txnPending;
     this.tabEl.classList.toggle("txn", txn);
     (this.tabEl.querySelector(".tab-txn") as HTMLElement).hidden = !txn;
     this.root.classList.toggle("txn", txn);
+    // 파일을 열거나 되살린 뒤에도 미리 보기가 맞게
+    this.refreshSub(true);
+  }
+
+  private subTimer = 0;
+  /** 문서 목록의 미리 보기 — 처음 나오는 SQL 줄 (주석·빈 줄은 건너뛴다). 치는 동안은 잠깐 뒤에 */
+  refreshSub(now = false) {
+    clearTimeout(this.subTimer);
+    const run = () => {
+      const line = this.editor.view.state.doc.toString().split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("--")) ?? "";
+      (this.tabEl.querySelector(".tab-sub") as HTMLElement).textContent = line.length > 80 ? `${line.slice(0, 80)}…` : line || "(빈 문서)";
+      // 줄어든 탭·한 줄 목록은 잘리므로 마우스를 올리면 전체 제목과 첫 줄을
+      this.tabEl.title = line ? `${this.title()}\n${line}` : this.title();
+    };
+    if (now) run(); else this.subTimer = window.setTimeout(run, 400);
   }
 
   setDirty(d: boolean) {

@@ -54,7 +54,7 @@ It combines three things that today come from separate tools or don't exist yet:
 | **PL/SQL intelligence** | Trace calls, CRUD, impact, long cursors and data flow across legacy packages |
 | **Agent-ready MCP** | Give Claude and compatible agents read-only access to allow-listed metadata and saved analysis |
 | **Database operations** | Inspect plans, sessions, locks, transactions and paged results without leaving the workspace |
-| **Local or frontier models** | Choose Ollama, LM Studio, vLLM, compatible endpoints or Anthropic for each environment |
+| **Local or frontier models** | Choose Ollama, LM Studio, vLLM, compatible endpoints, Anthropic or an ACP agent for each environment |
 
 ### 1. Human in control: AI proposes, you review and run
 
@@ -70,6 +70,7 @@ It combines three things that today come from separate tools or don't exist yet:
 - **Cancellation that works behind firewalls.** When NAT drops the cancel signal, SQLLM abandons the session and reconnects after 5 seconds. The UI frees up immediately.
 - **Oracle 11g and later**, Instant Client 19, CP949 or UTF-8 file encodings, and offline installation with WebView2 bundled.
 - **Guard rails.** UPDATE/DELETE without WHERE, DROP and TRUNCATE require confirmation. Uncommitted transactions are flagged. Every edit made in the grid is shown as SQL and confirmed before it runs.
+- **Nothing lost.** Open tabs are saved every few seconds and restored on the next start. Files are written atomically, the app runs as a single instance so two windows never overwrite each other's tabs, and an unexpected error in one task doesn't take the rest of the app down.
 
 ### 3. Fast
 
@@ -80,6 +81,8 @@ Rust and Tauri 2. The installer is small, memory use is low, and startup is fast
 | First page of results (500 rows) | 3–5 ms |
 | Fetching 100,000 rows | < 200 ms |
 | Context-aware autocomplete, per keystroke | 0.002–0.15 ms |
+| Scrolling a 150-column result (rows and columns virtualized) | ~12 ms per frame |
+| Searching 240,000 history entries | 3–38 ms |
 
 Autocomplete parses the statement under the cursor and suggests only what fits that clause. It suggests FK-based join conditions, columns of CTEs and inline views, and correlated subquery scopes. It uses no LLM and makes no database round trip.
 
@@ -145,8 +148,10 @@ For example, ask Claude Desktop *"If we change a column in ORDERS, which batch j
 
 SQLLM is an active, working prototype. It starts with the Oracle environments that generic AI coding tools often overlook. Everything described above is implemented and tested against a real Oracle 11g database:
 
-- Desktop IDE: editor, grid with sorting, filtering and editing, execution plans, PL/SQL debugger (`DBMS_DEBUG`), session and lock monitor
-- AI copilot with local and frontier providers, plus the MCP server with 10 read-only tools
+- Desktop IDE: editor, grid with sorting, filtering, editing, result diff and export (CSV, Excel, INSERT), execution plans, PL/SQL debugger (`DBMS_DEBUG`), session and lock monitor
+- Workspace: a sidebar with open documents (grouped by date, connection or tag), tables, project folder and git, and searchable run history; it collapses to an icon rail
+- Cross-database tools: schema compare with sync scripts, data copy between connections (append, replace or merge, creating the target table if missing), value and row tracing, data-flow diagrams, space usage
+- AI copilot with local and frontier providers and ACP agents (such as opencode), plus the MCP server with 10 read-only tools
 - PL/SQL analysis engine with an app UI, an overnight batch CLI and a model-quality evaluation harness
 - OS credential store integration, and a Windows installer built in CI
 
@@ -157,8 +162,7 @@ SQLLM is an active, working prototype. It starts with the Oracle environments th
 3. **Impact analysis UI and column-level lineage** (table/column → readers, writers, flows, entry points)
 4. **SQL tuning assistant**: actual plans (`DISPLAY_CURSOR`), top SQL, bind capture
 5. **Generated documentation** (HTML, Markdown, YAML) for packages and systems
-6. **Schema compare and DDL export**
-7. **Scale validation** at tens of thousands of tables and millions of lines of source
+6. **Scale validation** at tens of thousands of tables and millions of lines of source
 
 ## Contact
 

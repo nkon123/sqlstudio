@@ -56,6 +56,8 @@ export class Tab {
   tag: string | null = null;
   /** DB 에서 연 코드 소스 ("접속|OWNER.NAME|종류") — 같은 것을 다시 열면 이 탭으로 */
   sourceKey: string | null = null;
+  /** 파일로 저장하기 전의 이름 — 없으면 '새 문서 N' */
+  name: string | null = null;
   txnPending = false;
   /** 끊긴 접속을 다시 여는 중 */
   recovering = false;
@@ -308,15 +310,20 @@ export class Tab {
     for (const [k, b] of this.paneBtns) b.classList.toggle("active", k === p);
   }
 
+  /** 탭 이름 — 파일 이름, 아니면 붙인 이름(DB 에서 연 소스는 객체 이름), 아니면 '새 문서 N' */
+  baseName(): string {
+    return this.filePath ? this.filePath.split(/[\\/]/).pop()! : this.name ?? `새 문서 ${this.id}`;
+  }
+
   title() {
-    const file = this.filePath ? this.filePath.split(/[\\/]/).pop() : `새 문서 ${this.id}`;
+    const file = this.baseName();
     const prof = this.conn ? ` — ${this.conn.profile}` : this.lastProfile ? ` — ${this.lastProfile} (끊김)` : "";
     return `${this.dirty ? "● " : ""}${file}${prof}`;
   }
 
   refreshTitle() {
     // 이름과 접속을 나눠 둔다 — 가로 탭은 이어서 보이고, 왼쪽 목록은 접속을 흐리게
-    const file = this.filePath ? this.filePath.split(/[\\/]/).pop() : `새 문서 ${this.id}`;
+    const file = this.baseName();
     const prof = this.title().slice(`${this.dirty ? "● " : ""}${file}`.length);
     (this.tabEl.querySelector(".tab-title") as HTMLElement).replaceChildren(
       h("span", { class: "tab-name" }, `${this.dirty ? "● " : ""}${file}`), h("span", { class: "tab-prof" }, prof),

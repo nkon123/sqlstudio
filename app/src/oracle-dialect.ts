@@ -86,4 +86,8 @@ export const oracleHighlight = HighlightStyle.define([
   { tag: [t.comment, t.lineComment, t.blockComment], color: "var(--hl-cm)", fontStyle: "italic" },
   { tag: [t.typeName, t.className], color: "var(--hl-type)" },
   { tag: [t.operator, t.compareOperator, t.arithmeticOperator], color: "var(--hl-op)" },
+  // Pro*C (proc-lang.ts) — 호스트 변수 :v, C 함수 이름, #include
+  { tag: t.special(t.variableName), color: "var(--hl-fn)", fontWeight: "600" },
+  { tag: t.function(t.variableName), color: "var(--hl-type)" },
+  { tag: t.meta, color: "var(--hl-cm)" },
 ]);

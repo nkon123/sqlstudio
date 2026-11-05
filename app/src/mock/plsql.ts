@@ -293,3 +293,103 @@ END;
 /
 -- 트리거: trg_orders_audit
 `;
+
+/** Pro*C 시험 문서 — EXEC SQL · 커서 · DECLARE SECTION · K&R 함수 · EXECUTE … END-EXEC */
+export const PROC_SAMPLE = `/* ord_batch.pc — 주문 일 마감 배치 (Pro*C 코드 탐색 시험, 가짜 DB) */
+#include <stdio.h>
+#include <string.h>
+#include <sqlca.h>
+
+#define MAX_ROWS 100
+
+EXEC SQL BEGIN DECLARE SECTION;
+  VARCHAR  v_userid[64];
+  int      v_order_id;
+  int      v_cust_id;
+  double   v_amount;
+  char     v_status[3];
+  char     v_base_dt[9];
+EXEC SQL END DECLARE SECTION;
+
+EXEC SQL INCLUDE SQLCA;
+
+typedef struct {
+  int    order_id;
+  double amount;
+} ord_t;
+
+static int  load_orders(const char *base_dt);
+static void settle_one(int order_id, double amount);
+
+/* 접속 */
+int db_connect(user)
+  char *user;
+{
+  strcpy((char *)v_userid.arr, user);
+  v_userid.len = strlen(user);
+  EXEC SQL CONNECT :v_userid;
+  if (sqlca.sqlcode != 0) {
+    fprintf(stderr, "connect failed: %d\n", sqlca.sqlcode);
+    return -1;
+  }
+  return 0;
+}
+
+/* 기준일 이전 신규 주문을 읽어 하나씩 정산 */
+static int load_orders(const char *base_dt)
+{
+  int n = 0;
+  strcpy(v_base_dt, base_dt);
+
+  EXEC SQL DECLARE c_ord CURSOR FOR
+    SELECT o.order_id, NVL(SUM(i.qty * i.price), 0)
+      FROM orders o, order_items i
+     WHERE i.order_id = o.order_id
+       AND o.order_dt < TO_DATE(:v_base_dt, 'YYYYMMDD')
+       AND o.status = 'NEW'
+     GROUP BY o.order_id;
+
+  EXEC SQL OPEN c_ord;
+  for (;;) {
+    EXEC SQL FETCH c_ord INTO :v_order_id, :v_amount;
+    if (sqlca.sqlcode == 1403) break;
+    if (v_amount <= 0) {
+      EXEC SQL UPDATE orders SET status = 'CN' WHERE order_id = :v_order_id;
+      continue;
+    }
+    settle_one(v_order_id, v_amount);
+    n++;
+  }
+  EXEC SQL CLOSE c_ord;
+  return n;
+}
+
+static void settle_one(int order_id, double amount)
+{
+  v_order_id = order_id;
+  v_amount = amount;
+
+  EXEC SQL MERGE INTO order_sum t
+    USING (SELECT :v_order_id order_id, :v_amount amount FROM dual) s
+       ON (t.order_id = s.order_id)
+     WHEN MATCHED THEN UPDATE SET t.amount = s.amount, t.upd_dt = SYSDATE
+     WHEN NOT MATCHED THEN INSERT (order_id, amount, upd_dt) VALUES (s.order_id, s.amount, SYSDATE);
+
+  EXEC SQL EXECUTE
+    BEGIN
+      pkg_order.proc_cancel(:v_order_id, '정산 확인');
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+  END-EXEC;
+}
+
+int main(int argc, char **argv)
+{
+  int n;
+  if (db_connect(argc > 1 ? argv[1] : "scott/tiger") < 0) return 1;
+  n = load_orders(argc > 2 ? argv[2] : "20261104");
+  EXEC SQL COMMIT WORK RELEASE;
+  printf("settled %d orders\n", n);
+  return 0;
+}
+`;

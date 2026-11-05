@@ -23,11 +23,13 @@ import { oracleSql, oracleHighlight } from "./oracle-dialect";
 import { snippetSource } from "./snippets";
 import { quickMenu } from "./quickmenu";
 import { gotoMatchingParen, parenHighlight, parenSelect } from "./brackets";
-import { codeNav, nameAt, foldUnits, foldCode, navBack, navForward, navReset, openOutline, unfoldAll, unfoldCode } from "./codenav";
+import { codeNav, execSqlTint, inSqlPart, nameAt, foldUnits, foldCode, navBack, navForward, navReset, openOutline, unfoldAll, unfoldCode } from "./codenav";
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import type { Command } from "@codemirror/view";
-import { Annotation, EditorSelection, EditorState, Prec, StateEffect, StateField } from "@codemirror/state";
+import { Annotation, Compartment, EditorSelection, EditorState, type Extension, Prec, StateEffect, StateField } from "@codemirror/state";
+import { procLanguage } from "./proc-lang";
+import { isProC } from "./procnav";
 import { type CaseMode, convertRange } from "./case-convert";
 import { autoFormatExtension, caseWordBefore } from "./autofmt";
 import {
@@ -162,8 +164,20 @@ const marks = StateField.define<DecorationSet>({
   provide: (f) => EditorView.decorations.from(f),
 });
 
+/** 언어 — Oracle SQL·PL/SQL, 또는 Pro*C (글을 보고 고른다) */
+const langConf = new Compartment();
+const langFor = (proc: boolean): Extension => (proc
+  // Pro*C: C 와 EXEC SQL 을 나눠 칠하고, 키워드 자동 대문자는 끈다 (C 코드를 바꾸면 안 된다)
+  ? [procLanguage(), execSqlTint]
+  : [oracleSql({ upperCaseKeywords: true }), autoFormatExtension()]);
+
+/** Pro*C 에서는 EXEC SQL 안에서만 SQL 후보를 띄운다 */
+const onlyInSql = (src: CompletionSource): CompletionSource => (ctx) => (inSqlPart(ctx.state, ctx.pos) ? src(ctx) : null);
+
 export class SqlEditor {
   readonly view: EditorView;
+  /** 지금 Pro*C 로 보고 있다 */
+  proc = false;
 
   constructor(parent: HTMLElement, actions: EditorActions, doc = "", complete?: CompletionSource) {
     const run = (f: () => void) => () => { f(); return true; };
@@ -214,7 +228,7 @@ export class SqlEditor {
           // 후보는 백엔드가 구절을 보고 만든다 (언어 기본 자동완성은 쓰지 않는다)
           autocompletion({
             // 백엔드 후보(테이블·컬럼…) + 코드 조각 (접속 전에도)
-            override: complete ? [complete, snippetSource] : [snippetSource],
+            override: (complete ? [complete, snippetSource] : [snippetSource]).map(onlyInSql),
             activateOnTyping: true,
             activateOnTypingDelay: 20,
             maxRenderedOptions: 100,
@@ -222,12 +236,17 @@ export class SqlEditor {
           }),
           // 컬럼 후보에서 → — 구절·타입에 맞는 꼴(= '' · IS NULL …)
           quickMenu(),
-          oracleSql({ upperCaseKeywords: true }),
+          langConf.of(langFor((this.proc = isProC(doc)))),
           marks,
           codeNav,
-          autoFormatExtension(),
           EditorView.updateListener.of((u) => {
-            if (u.docChanged && !u.transactions.some((tr) => tr.annotation(loaded))) actions.edited?.();
+            if (u.docChanged && !u.transactions.some((tr) => tr.annotation(loaded))) {
+              actions.edited?.();
+              // 붙여 넣기처럼 크게 바뀌면 언어를 다시 고른다
+              let big = 0;
+              u.changes.iterChanges((_a, _b, _c, _d, ins) => { big = Math.max(big, ins.length); });
+              if (big >= 80) setTimeout(() => this.syncLanguage(), 0);
+            }
           }),
           keymap.of([
             { key: "Ctrl-Enter", mac: "Cmd-Enter", run: run(actions.runStatement), preventDefault: true },
@@ -279,6 +298,15 @@ export class SqlEditor {
 
   setText(t: string) {
     this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: t }, annotations: [loaded.of(true), navReset.of(true)] });
+    this.syncLanguage();
+  }
+
+  /** 글을 보고 Oracle SQL ↔ Pro*C */
+  syncLanguage() {
+    const proc = isProC(this.view.state.doc.toString());
+    if (proc === this.proc) return;
+    this.proc = proc;
+    this.view.dispatch({ effects: langConf.reconfigure(langFor(proc)) });
   }
 
   cursor() {

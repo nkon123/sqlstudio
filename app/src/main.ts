@@ -374,7 +374,7 @@ export class App {
     try {
       await saveSession(active, this.tabs.map((t) => ({
         text: t.editor.text(), filePath: t.filePath, encoding: t.encoding, eol: t.eol, dirty: t.dirty,
-        cursor: t.editor.cursor(), profile: t.conn?.profile ?? t.lastProfile, used: t.used, tag: t.tag,
+        cursor: t.editor.cursor(), profile: t.conn?.profile ?? t.lastProfile, used: t.used, tag: t.tag, name: t.name,
       })));
       this.savedTabsSig = sig;
       this.lastSavedAt = performance.now();
@@ -412,6 +412,7 @@ export class App {
       t.lastProfile = st.profile ?? null;
       if (st.used) t.used = st.used;
       t.tag = st.tag ?? null;
+      t.name = st.name ?? null;
       t.refreshTitle();
       t.editor.view.dispatch({ selection: { anchor: Math.min(st.cursor, t.editor.view.state.doc.length) }, scrollIntoView: true });
       if (dirty) unsaved++;
@@ -544,10 +545,16 @@ export class App {
     await this.restoreTabs();
     // 가짜 DB 모드: PL/SQL 소스를 열어 볼 시험 문서 (배포 빌드에서는 빠진다)
     if (import.meta.env.VITE_MOCK) {
-      const { PLSQL_SAMPLE } = await import("./mock/plsql");
-      const t = this.tabs.find((x) => x.editor.text().startsWith(PLSQL_SAMPLE.slice(0, 20))) ?? this.newTab(true, PLSQL_SAMPLE);
-      // 목록에서 찾기 쉽게 꼬리표, 시작하면 이 문서를 연다
-      if (!t.tag) { t.tag = "코드탐색"; t.refreshTitle(); this.renderDocs(); }
+      const { PLSQL_SAMPLE, PROC_SAMPLE } = await import("./mock/plsql");
+      // 목록에서 찾기 쉽게 이름·꼬리표, 시작하면 PL/SQL 시험 문서를 연다
+      const sample = (text: string, name: string) => {
+        const t = this.tabs.find((x) => x.editor.text().startsWith(text.slice(0, 20))) ?? this.newTab(true, text);
+        if (!t.tag || !t.name) { t.tag = "코드탐색"; t.name = name; t.refreshTitle(); }
+        return t;
+      };
+      sample(PROC_SAMPLE, "ord_batch.pc");
+      const t = sample(PLSQL_SAMPLE, "코드 탐색 시험");
+      this.renderDocs();
       this.activate(t);
     }
     mark(`탭 ${this.tabs.length}개`);
@@ -1699,18 +1706,30 @@ export class App {
   /** 코드 객체 소스 탭 — 이미 열었으면 그 탭으로. quiet: 못 열면 알리지 않는다 (패키지 본문이 없을 때) */
   private async openCode(id: number, owner: string, name: string, type: string, quiet = false): Promise<Tab | null> {
     const key = `${id}|${owner}.${name}|${type}`.toUpperCase();
-    const open = this.tabs.find((x) => x.sourceKey === key);
+    // 이미 연 것은 그 탭으로 — 고쳤으면 그대로 두고 새로 연다 (이름 뒤에 (2) …)
+    const open = this.tabs.find((x) => x.sourceKey === key && !x.dirty);
     if (open) { this.activate(open); this.sourceOpened(); return open; }
     try {
       const ddl = await api.getDdl(id, type, `"${owner}"."${name}"`);
       const nt = this.newTab(true, ddl);
       nt.sourceKey = key;
+      // 탭 이름은 객체 이름 — 겹치면 (2) (3) …
+      nt.name = this.uniqueTabName(name, nt);
+      nt.refreshTitle();
+      this.renderDocs();
       this.sourceOpened();
       return nt;
     } catch (e) {
       if (!quiet) toast(errOf(e).message, "error");
       return null;
     }
+  }
+
+  /** 다른 탭과 겹치지 않는 이름 — 겹치면 뒤에 (2) (3) … */
+  private uniqueTabName(base: string, self?: Tab): string {
+    const used = new Set(this.tabs.filter((x) => x !== self).map((x) => x.baseName()));
+    if (!used.has(base)) return base;
+    for (let n = 2; ; n++) if (!used.has(`${base} (${n})`)) return `${base} (${n})`;
   }
 
   /** pkg.proc · owner.pkg.proc — 패키지 본문을 열고 그 프로시저·함수로. 패키지가 아니면 false */
@@ -2372,7 +2391,7 @@ export class App {
     const t = this.active;
     if (!t) return;
     const cur = t.filePath;
-    const name = cur ? cur.split(/[\\/]/).pop()! : "query.sql";
+    const name = cur ? cur.split(/[\\/]/).pop()! : t.name ? `${t.name.replace(/[\\/:*?"<>|]/g, "_")}.sql` : "query.sql";
     const path = await saveDialog({
       filters: [{ name: "SQL", extensions: ["sql", "pls", "pks", "pkb", "prc", "fnc", "trg", "vw", "txt"] }, { name: "모든 파일", extensions: ["*"] }],
       defaultPath: cur ?? name,

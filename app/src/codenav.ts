@@ -6,8 +6,8 @@
 // 구조는 plsqlnav 가 낱말로 짐작한다.
 
 import { codeFolding, foldAll, foldCode, foldEffect, foldGutter, foldService, foldedRanges, unfoldAll, unfoldCode } from "@codemirror/language";
-import { Annotation, EditorSelection, type Extension, StateEffect, StateField } from "@codemirror/state";
-import { type Command, Decoration, type DecorationSet, EditorView, type Panel, showPanel, type ViewUpdate } from "@codemirror/view";
+import { Annotation, EditorSelection, type EditorState, type Extension, StateEffect, StateField } from "@codemirror/state";
+import { type Command, Decoration, type DecorationSet, EditorView, type Panel, showPanel, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { openPalette, type Command as PalCommand } from "./palette";
 import { localDefinition, nameAt, navOf } from "./codedef";
 import { KIND_LABEL, navOutline, navPath, type NavNode, UNIT_KINDS } from "./plsqlnav";
@@ -119,9 +119,17 @@ export function navJump(view: EditorView, pos: number) {
 
 // ── 구조 보기 ───────────────────────────────────────────────────────
 
+/** 개요·구조 보기에 쿼리(한 문장)까지 보이나 — 기본은 보인다 */
+export function outlineSqlPref(): boolean {
+  try { return localStorage.getItem("outline.sql") !== "0"; } catch { return true; }
+}
+export function setOutlineSqlPref(on: boolean) {
+  try { localStorage.setItem("outline.sql", on ? "1" : "0"); } catch { /* 이번만 */ }
+}
+
 export const openOutline: Command = (view) => {
   const { tree } = navOf(view.state.doc);
-  const items = navOutline(tree);
+  const items = navOutline(tree, outlineSqlPref());
   const doc = view.state.doc;
   const here = view.state.selection.main.head;
   // 커서를 감싼 가장 안쪽 단위를 처음에 고른다
@@ -170,7 +178,7 @@ function crumbsPanel(view: EditorView): Panel {
         class: `cm-crumb${UNIT_KINDS.has(x.kind) ? " unit" : ""}`,
         title: `${KIND_LABEL[x.kind]} — ${view.state.doc.lineAt(x.from).number}행으로`,
         onmousedown: (e: Event) => { e.preventDefault(); navJump(view, x.from); },
-      }, UNIT_KINDS.has(x.kind) ? x.name : x.name.toUpperCase()),
+      }, UNIT_KINDS.has(x.kind) || x.kind === "sql" || x.kind === "c block" ? x.name : x.name.toUpperCase()),
     ]) : [h("span", { class: "cm-crumbs-none" }, "맨 바깥")]));
   };
   dom.hidden = true;
@@ -224,6 +232,41 @@ const ctrlLinks: Extension = [
     blur: (_e, view) => linkAt(view, 0, 0, false),
   }),
 ];
+
+// ── Pro*C 의 EXEC SQL 칠하기 ───────────────────────────────────────
+
+/** pos 가 SQL 을 쓰는 자리인가 — Oracle 문서면 늘, Pro*C 면 EXEC SQL 안에서만 */
+export function inSqlPart(state: EditorState, pos: number): boolean {
+  const nav = navOf(state.doc);
+  if (!nav.proc) return true;
+  return navPath(nav.tree, pos).some((x) => x.kind === "sql" || x.kind === "cursor");
+}
+
+const sqlLine = Decoration.line({ class: "cm-exec-sql" });
+
+/** EXEC SQL 문장이 걸친 줄에 옅은 바탕 — C 사이에서 쿼리가 눈에 띄게 */
+export const execSqlTint = ViewPlugin.fromClass(class {
+  deco: DecorationSet;
+  constructor(view: EditorView) { this.deco = this.build(view); }
+  update(u: ViewUpdate) { if (u.docChanged || u.viewportChanged) this.deco = this.build(u.view); }
+  build(view: EditorView): DecorationSet {
+    const { doc } = view.state;
+    const { tree, proc } = navOf(doc);
+    if (!proc) return Decoration.none;
+    const { from, to } = view.viewport;
+    const lines = new Set<number>();
+    const walk = (list: NavNode[]) => {
+      for (const x of list) {
+        if (x.to < from || x.from > to) continue;
+        if (x.kind === "sql" || x.kind === "cursor") {
+          for (let l = doc.lineAt(Math.max(x.from, from)).number, e = doc.lineAt(Math.min(x.to, to)).number; l <= e; l++) lines.add(doc.line(l).from);
+        } else walk(x.children);
+      }
+    };
+    walk(tree);
+    return Decoration.set([...lines].sort((a, b) => a - b).map((p) => sqlLine.range(p)));
+  }
+}, { decorations: (v) => v.deco });
 
 /** 문서·커서가 바뀌면 — 왼쪽 개요 패널이 듣는다 */
 const watchers = new Set<(view: EditorView, docChanged: boolean) => void>();

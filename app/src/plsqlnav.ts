@@ -4,7 +4,11 @@
 
 export type NavKind =
   | "package" | "package body" | "type body" | "procedure" | "function" | "trigger"
-  | "type" | "cursor" | "declare" | "begin" | "if" | "loop" | "case";
+  | "type" | "cursor" | "declare" | "begin" | "if" | "loop" | "case"
+  // 쿼리 한 문장 (PL/SQL 안의 DML · Pro*C 의 EXEC SQL)
+  | "sql"
+  // Pro*C (procnav.ts)
+  | "c function" | "declare section" | "struct" | "c block";
 
 export interface NavNode {
   kind: NavKind;
@@ -21,7 +25,37 @@ export interface NavNode {
 }
 
 /** 구조 보기에 나오는 것 (BEGIN·IF 같은 블록은 빼고) */
-export const UNIT_KINDS: ReadonlySet<NavKind> = new Set(["package", "package body", "type body", "procedure", "function", "trigger", "type", "cursor"]);
+export const UNIT_KINDS: ReadonlySet<NavKind> = new Set(["package", "package body", "type body", "procedure", "function", "trigger", "type", "cursor", "c function", "declare section", "struct"]);
+
+/** 쿼리의 짧은 이름 — SELECT ORD · UPDATE ORD · OPEN C1 FOR … (words: 문장의 낱말, 쓴 그대로) */
+export function sqlLabel(words: string[]): string {
+  let k = 0;
+  const W = (i: number) => (words[i] ?? "").toUpperCase();
+  if (W(0) === "AT") k = 2;
+  const head = W(k);
+  const next = (i: number) => words[i] ?? "";
+  const after = (word: string) => { for (let i = k + 1; i < words.length - 1; i++) if (W(i) === word) return words[i + 1]; return ""; };
+  const join = (...xs: string[]) => xs.filter(Boolean).join(" ");
+  switch (head) {
+    case "SELECT": case "WITH": return join("SELECT", after("FROM"));
+    case "INSERT": return join("INSERT", W(k + 1) === "ALL" || W(k + 1) === "FIRST" ? "ALL" : after("INTO"));
+    case "UPDATE": return join("UPDATE", next(k + 1));
+    case "DELETE": return join("DELETE", W(k + 1) === "FROM" ? next(k + 2) : next(k + 1));
+    case "MERGE": return join("MERGE", after("INTO"));
+    case "EXECUTE":
+      if (W(k + 1) === "IMMEDIATE") return "EXECUTE IMMEDIATE";
+      return W(k + 1) === "BEGIN" || W(k + 1) === "DECLARE" ? "EXECUTE (PL/SQL)" : join("EXECUTE", next(k + 1));
+    case "OPEN": return W(k + 2) === "FOR" ? join("OPEN", next(k + 1), "FOR", W(k + 3) === "SELECT" ? after("FROM") : "") : join("OPEN", next(k + 1));
+    case "FETCH": case "CLOSE": case "PREPARE": case "DESCRIBE": return join(head, next(k + 1));
+    case "FORALL": { const i = words.findIndex((x, j) => j > k && ["INSERT", "UPDATE", "DELETE", "MERGE"].includes(x.toUpperCase())); return join("FORALL", i < 0 ? "" : sqlLabel(words.slice(i))); }
+    default: return head || "SQL";
+  }
+}
+
+/** 쿼리로 보는 문장의 첫 낱말 */
+const SQL_HEAD = new Set(["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "FORALL"]);
+/** 이 낱말 뒤는 새 문장 */
+const STMT_AFTER = new Set(["BEGIN", "THEN", "ELSE", "LOOP"]);
 
 interface Tok { t: "w" | "q" | ";" | "(" | ")" | "/" | "." | "%" | ","; v: string; from: number; to: number }
 
@@ -146,6 +180,25 @@ export function parseNav(src: string): NavNode[] {
     const prev = toks[i - 1];
     const prevW = prev?.t === "w" ? prev.v : "";
     if (!first) first = w;
+    // 쿼리 한 문장 — 프로시저·블록 안에서 문장 처음의 DML · EXECUTE IMMEDIATE · OPEN … FOR · FOR r IN (SELECT …)
+    const atStmt = !prev || prev.t === ";" || (prev.t === "w" && STMT_AFTER.has(prev.v));
+    const inParen = prev?.t === "(" && toks[i - 2]?.t === "w" && toks[i - 2].v === "IN" && (w === "SELECT" || w === "WITH");
+    if (stack.length > 1 && ((atStmt && (SQL_HEAD.has(w) || (w === "EXECUTE" && word(i + 1) === "IMMEDIATE") || (w === "OPEN" && word(i + 2) === "FOR"))) || inParen)) {
+      // 끝: ; (괄호 밖) — FOR … IN ( 안이면 닫는 ) 앞
+      let e = i;
+      for (let d = 0; e < toks.length; e++) {
+        const x = toks[e];
+        if (x.t === "(") d++;
+        else if (x.t === ")") { if (d === 0 && inParen) { e--; break; } d = Math.max(0, d - 1); }
+        else if (x.t === "/" || (x.t === ";" && d === 0 && !inParen)) break;
+      }
+      const last = toks[Math.min(e, toks.length - 1)];
+      const words = toks.slice(i, e + 1).filter((x) => x.t === "w" || x.t === "q").map((x) => (x.t === "q" ? x.v : src.slice(x.from, x.to)));
+      add({ kind: "sql", name: sqlLabel(words), from: tk.from, to: last?.t === "/" ? last.from : (last?.to ?? src.length), end: -1, decl: false, children: [] });
+      // 안의 CASE … END 는 블록이 아니다 — 문장 끝으로 건너뛴다 (; 는 다음 차례에 읽는다)
+      i = (last?.t === ";" || last?.t === "/") && !inParen ? e - 1 : e;
+      continue;
+    }
     switch (w) {
       case "PROCEDURE": case "FUNCTION": {
         if (NOT_DEF.has(first) || prev?.t === "." || prev?.t === "%") break;
@@ -229,7 +282,11 @@ export function parseNav(src: string): NavNode[] {
         const from = w === "LOOP" && loopHead >= 0 ? loopHead : tk.from;
         if (w === "LOOP") loopHead = -1;
         const name = w === "LOOP" && from !== tk.from ? `${loopWord} LOOP` : w;
-        stack.push(add({ kind, name, from, to: src.length, end: -1, decl: false, children: [] }));
+        const x = add({ kind, name, from, to: src.length, end: -1, decl: false, children: [] });
+        // FOR r IN (SELECT …) LOOP — 머리의 쿼리는 이 LOOP 안으로
+        const sib = top().children;
+        while (sib.length > 1 && sib[sib.length - 2].kind === "sql" && sib[sib.length - 2].from >= from) x.children.unshift(sib.splice(sib.length - 2, 1)[0]);
+        stack.push(x);
         break;
       }
       case "END": {
@@ -268,12 +325,12 @@ export function navPath(nodes: NavNode[], pos: number): NavNode[] {
   }
 }
 
-/** 구조 보기 목록 — 단위만, 깊이와 함께 */
-export function navOutline(nodes: NavNode[]): { node: NavNode; depth: number }[] {
+/** 구조 보기 목록 — 단위만, 깊이와 함께. sql: 쿼리(한 문장)까지 */
+export function navOutline(nodes: NavNode[], sql = false): { node: NavNode; depth: number }[] {
   const out: { node: NavNode; depth: number }[] = [];
   const walk = (list: NavNode[], depth: number) => {
     for (const x of list) {
-      const unit = UNIT_KINDS.has(x.kind);
+      const unit = UNIT_KINDS.has(x.kind) || (sql && x.kind === "sql");
       if (unit) out.push({ node: x, depth });
       walk(x.children, unit ? depth + 1 : depth);
     }
@@ -286,4 +343,5 @@ export function navOutline(nodes: NavNode[]): { node: NavNode; depth: number }[]
 export const KIND_LABEL: Record<NavKind, string> = {
   package: "패키지", "package body": "패키지 본문", "type body": "타입 본문", procedure: "프로시저", function: "함수",
   trigger: "트리거", type: "타입", cursor: "커서", declare: "블록", begin: "블록", if: "IF", loop: "LOOP", case: "CASE",
+  sql: "SQL", "c function": "함수", "declare section": "선언부", struct: "구조체", "c block": "블록",
 };

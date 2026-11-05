@@ -2,7 +2,7 @@
 // 커서가 있는 단위를 칠하고, 누르면 그 자리로 간다. 구조는 codenav(plsqlnav) 가 읽는다.
 
 import type { EditorView } from "@codemirror/view";
-import { navJump, navOf, watchNav } from "./codenav";
+import { navJump, navOf, outlineSqlPref, setOutlineSqlPref, watchNav } from "./codenav";
 import { KIND_LABEL, navOutline } from "./plsqlnav";
 import { h } from "./ui";
 
@@ -17,15 +17,24 @@ export interface OutlinePanel {
 /** 짧은 종류 표시 */
 const BADGE: Record<string, string> = {
   package: "PKG", "package body": "BODY", "type body": "TYPE", procedure: "PROC", function: "FN", trigger: "TRG", type: "TYPE", cursor: "CUR",
+  sql: "SQL", "c function": "FN", "declare section": "DECL", struct: "STRC",
 };
 
 /** onState: 이 문서에 단위가 있는지 바뀌면 (메뉴 항목을 흐리게) */
 export function outlinePanel(onState?: (has: boolean) => void): OutlinePanel {
   const q = h("input", { placeholder: "이름 거르기" }) as HTMLInputElement;
   const info = h("span", { class: "outline-info" });
+  // 쿼리 단위 — 함수 아래에 SELECT·UPDATE·EXEC SQL … 한 문장씩
+  const sqlBtn = h("button", { class: `outline-sql${outlineSqlPref() ? " on" : ""}`, title: "쿼리(SQL 한 문장)까지 보기 — 함수·프로시저 아래에 SELECT · UPDATE · EXEC SQL …", onclick: () => {
+    const on = !outlineSqlPref();
+    setOutlineSqlPref(on);
+    sqlBtn.classList.toggle("on", on);
+    sig = "";
+    draw();
+  } }, "쿼리");
   const list = h("div", { class: "outline-list" });
   const el = h("div", { class: "side-pane outline-pane" },
-    h("div", { class: "outline-bar" }, q, info),
+    h("div", { class: "outline-bar" }, q, sqlBtn, info),
     list,
     h("small", { class: "hint" }, "누르면 그 자리로 · Ctrl+Shift+O 찾아 가기 · Alt+← 돌아오기"));
   let view: EditorView | null = null;
@@ -37,7 +46,8 @@ export function outlinePanel(onState?: (has: boolean) => void): OutlinePanel {
   const draw = () => {
     timer = 0;
     const doc = view?.state.doc;
-    const items = doc ? navOutline(navOf(doc).tree) : [];
+    const withSql = outlineSqlPref();
+    const items = doc ? navOutline(navOf(doc).tree, withSql) : [];
     const now = items.length > 0;
     if (now !== has) { has = now; onState?.(now); }
     if (!visible) return;
@@ -47,18 +57,18 @@ export function outlinePanel(onState?: (has: boolean) => void): OutlinePanel {
     items.forEach((x, i) => { if (x.node.from <= here && here <= x.node.to) cur = i; });
     const words = q.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const shown = items.map((x, i) => ({ ...x, i })).filter((x) => words.every((w) => `${x.node.name} ${KIND_LABEL[x.node.kind]}`.toLowerCase().includes(w)));
-    const s = `${doc?.length}|${items.map((x) => `${x.node.kind}${x.node.name}${x.node.from}`).join(",")}|${cur}|${q.value}`;
+    const s = `${withSql}|${doc?.length}|${items.map((x) => `${x.node.kind}${x.node.name}${x.node.from}`).join(",")}|${cur}|${q.value}`;
     if (s === sig) return;
     sig = s;
     info.textContent = items.length ? `${items.length}개` : "";
     if (!view) { list.replaceChildren(h("div", { class: "empty" }, "열린 문서가 없습니다")); return; }
     if (!items.length) {
-      list.replaceChildren(h("div", { class: "empty" }, "이 문서에는 PACKAGE · PROCEDURE · FUNCTION 이 없습니다", h("br"), "편집기에서 프로시저·패키지 이름 위에 F4 를 누르면 소스가 열리고 여기에 목록이 나옵니다"));
+      list.replaceChildren(h("div", { class: "empty" }, "이 문서에는 PACKAGE · PROCEDURE · FUNCTION 이 없습니다", h("br"), "편집기에서 프로시저·패키지 이름 위에 F4 를 누르면 소스가 열리고 여기에 목록이 나옵니다 (Pro*C 파일은 C 함수 · EXEC SQL 이 나온다)"));
       return;
     }
     const v = view;
     list.replaceChildren(...(shown.length ? shown.map(({ node, depth, i }) => h("div", {
-      class: `outline-item${i === cur ? " on" : ""}${node.decl && (node.kind === "procedure" || node.kind === "function") ? " decl" : ""}`,
+      class: `outline-item k-${node.kind.replace(" ", "-")}${i === cur ? " on" : ""}${node.decl && (node.kind === "procedure" || node.kind === "function") ? " decl" : ""}`,
       style: `padding-left:${8 + depth * 14}px`,
       title: `${KIND_LABEL[node.kind]} ${node.name} — ${v.state.doc.lineAt(node.from).number}행${node.decl ? " (선언)" : ""}`,
       onmousedown: (e: Event) => { e.preventDefault(); navJump(v, node.from); },

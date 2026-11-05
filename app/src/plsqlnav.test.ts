@@ -39,7 +39,7 @@ END pkg_order;
 /
 `;
 const tree = parseNav(BODY);
-eq(show(tree), "package body app.pkg_order[cursor? c_ord, type? t_ids, function fn_calc[case CASE], procedure proc_settle[loop FOR LOOP[if IF], begin BEGIN]]", "패키지 본문");
+eq(show(tree), "package body app.pkg_order[cursor? c_ord, type? t_ids, function fn_calc[case CASE], procedure proc_settle[loop FOR LOOP[sql SELECT ord, if IF], begin BEGIN[sql UPDATE ord]]]", "패키지 본문");
 const settle = tree[0].children[3];
 eq(BODY.slice(settle.end, settle.to), "END proc_settle;", "프로시저 끝");
 eq(BODY.slice(tree[0].end, tree[0].to), "END pkg_order;", "패키지 끝");

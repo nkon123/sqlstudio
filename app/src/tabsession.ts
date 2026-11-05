@@ -17,6 +17,8 @@ export interface SavedTab {
   /** 마지막으로 고친 때 (왼쪽 목록의 날짜 묶음) — 예전 파일에는 없다 */
   used?: number;
   tag?: string | null;
+  /** 파일 없는 탭의 이름 (DB 에서 연 소스는 객체 이름) */
+  name?: string | null;
 }
 
 interface SavedSession { v: 1; at: number; active: number; tabs: SavedTab[] }

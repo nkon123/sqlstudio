@@ -73,6 +73,9 @@ function draftNotes(v) {
 const args = process.argv.slice(2);
 if (args[0] === "--check") check(args[1]);
 
+// 릴리스 전 cargo test·빌드가 이어진다 — 하루 지난 target/debug 는 이참에 지운다
+execFileSync(process.execPath, [p("scripts/clean-target.mjs")], { stdio: "inherit" });
+
 const cur = versions()[0][1];
 const v = next(cur, args[0]);
 for (const [f, , set] of SPOTS) {

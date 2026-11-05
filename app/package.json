@@ -8,10 +8,11 @@
     "build": "node scripts/notices.mjs && tsc --noEmit && vite build",
     "notices": "node scripts/notices.mjs",
     "mock": "vite --mode mock --port 1430 --strictPort --open",
-    "tauri": "tauri",
-    "tauri:mock": "tauri dev --config src-tauri/tauri.mock.json",
+    "tauri": "node ../scripts/clean-target.mjs && tauri",
+    "tauri:mock": "node ../scripts/clean-target.mjs && tauri dev --config src-tauri/tauri.mock.json",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/test.mjs"
+    "test": "node scripts/test.mjs",
+    "clean": "node ../scripts/clean-target.mjs --now"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.0",

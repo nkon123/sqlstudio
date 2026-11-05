@@ -73,6 +73,79 @@ pub fn write_sql_file(path: String, text: String, encoding: String) -> R<()> {
     Ok(())
 }
 
+/// 탭 자동 저장 (tabs.json + tabs/<key>.sql). 문서 내용은 탭마다 따로 — 바뀐 탭만 다시 쓴다
+/// (큰 소스를 여러 개 열어 두면 몇 초마다 통째로 쓰는 것이 무겁다)
+fn tab_dir() -> std::path::PathBuf {
+    config_path().parent().map(|p| p.to_path_buf()).unwrap_or_default()
+}
+
+fn tab_key_ok(k: &str) -> bool {
+    !k.is_empty() && k.len() <= 64 && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> R<()> {
+    let tmp = sqls_core::config::temp_path(path);
+    std::fs::write(&tmp, bytes).map_err(|e| ErrView::msg("io", format!("{}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        ErrView::msg("io", format!("{}: {e}", path.display()))
+    })
+}
+
+/// `index` 는 tabs.json 본문(탭마다 "key"), `texts` 는 바뀐 탭의 내용. 목록에 없는 탭 파일은 지운다
+#[tauri::command]
+pub fn save_tab_session(index: String, texts: std::collections::HashMap<String, String>) -> R<()> {
+    let dir = tab_dir();
+    let sub = dir.join("tabs");
+    std::fs::create_dir_all(&sub).map_err(|e| ErrView::msg("io", format!("{}: {e}", sub.display())))?;
+    for (k, t) in &texts {
+        if !tab_key_ok(k) {
+            return Err(ErrView::msg("invalid", format!("탭 키가 올바르지 않습니다: {k}")));
+        }
+        write_atomic(&sub.join(format!("{k}.sql")), t.as_bytes())?;
+    }
+    // 내용을 다 쓴 뒤 목록 — 중간에 죽어도 목록이 없는 파일을 가리키지 않게
+    write_atomic(&dir.join("tabs.json"), index.as_bytes())?;
+    let keep: std::collections::HashSet<String> = tab_keys(&index).into_iter().collect();
+    if let Ok(rd) = std::fs::read_dir(&sub) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Some(k) = name.strip_suffix(".sql") {
+                if !keep.contains(k) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn tab_keys(index: &str) -> Vec<String> {
+    let v: serde_json::Value = serde_json::from_str(index).unwrap_or_default();
+    v.get("tabs")
+        .and_then(|t| t.as_array())
+        .map(|a| a.iter().filter_map(|t| t.get("key")?.as_str().map(str::to_string)).filter(|k| tab_key_ok(k)).collect())
+        .unwrap_or_default()
+}
+
+#[derive(Serialize)]
+pub struct TabSession {
+    index: String,
+    texts: std::collections::HashMap<String, String>,
+}
+
+/// 저장해 둔 탭 — 없으면 None. 예전 형식(내용이 tabs.json 안에)은 texts 가 비어 있다
+#[tauri::command]
+pub fn load_tab_session() -> Option<TabSession> {
+    let dir = tab_dir();
+    let index = std::fs::read_to_string(dir.join("tabs.json")).ok()?;
+    let texts = tab_keys(&index)
+        .into_iter()
+        .filter_map(|k| std::fs::read_to_string(dir.join("tabs").join(format!("{k}.sql"))).ok().map(|t| (k, t)))
+        .collect();
+    Some(TabSession { index, texts })
+}
+
 /// 이미지 같은 바이너리 저장. 본문은 바이트 그대로 받고 (JSON 으로 바꾸면 몇 배로 커진다),
 /// 경로는 "path" 헤더에 URI 인코딩해서 받는다 (헤더는 ASCII 만 된다).
 #[tauri::command]
@@ -168,5 +241,18 @@ mod tests {
     #[test]
     fn cp949_rejects_unrepresentable() {
         assert!(encode("이모지 😀", "cp949").is_err());
+    }
+}
+
+#[cfg(test)]
+mod tab_session_tests {
+    use super::*;
+
+    #[test]
+    fn keys_from_index() {
+        let idx = r#"{"v":2,"tabs":[{"key":"mw3-ab_1"},{"key":"../x"},{"text":"옛 형식"},{"key":"zz"}]}"#;
+        assert_eq!(tab_keys(idx), ["mw3-ab_1", "zz"], "경로를 벗어나는 키는 버린다");
+        assert!(tab_keys("깨진 글").is_empty());
+        assert!(!tab_key_ok("") && !tab_key_ok("a/b") && !tab_key_ok("a.sql"));
     }
 }

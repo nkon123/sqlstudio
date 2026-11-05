@@ -306,6 +306,25 @@ const DB: Record<string, (a: Args) => unknown> = {
   rollback: () => { txn = false; return null; },
   explain: (a) => mockPlan(String(a.sql)),
   count_rows: (a) => ({ rows: String(findTable(/\bFROM\s+([\w$#."]+)/i.exec(a.sql as string)?.[1] ?? "")?.count ?? 1), elapsed_ms: 3 }),
+  // 탭 자동 저장 — 브라우저 저장소에 (탭 되살리기를 가짜 모드에서도). 내용은 key 마다
+  load_tab_session: () => {
+    const index = localStorage.getItem("mocktabs:index");
+    if (index == null) return null;
+    const texts: Record<string, string> = {};
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)!;
+      if (k.startsWith("mocktabs:t:")) texts[k.slice(11)] = localStorage.getItem(k)!;
+    }
+    return { index, texts };
+  },
+  save_tab_session: (a) => {
+    for (const [k, t] of Object.entries(a.texts as Record<string, string>)) localStorage.setItem(`mocktabs:t:${k}`, t);
+    localStorage.setItem("mocktabs:index", String(a.index));
+    const keep = new Set((JSON.parse(String(a.index)).tabs as { key?: string }[]).map((t) => t.key));
+    for (const k of Object.keys(localStorage)) if (k.startsWith("mocktabs:t:") && !keep.has(k.slice(11))) localStorage.removeItem(k);
+    (window as unknown as { __mockSaves?: number[] }).__mockSaves = [...((window as unknown as { __mockSaves?: number[] }).__mockSaves ?? []), Object.keys(a.texts as object).length];
+    return null;
+  },
   list_schemas: () => ["SCOTT", "HR", "ERP_OWNER"],
   set_schema: (a) => String((a.schema as string | null) ?? "SCOTT").toUpperCase(),
   list_objects: (a) => {
@@ -579,7 +598,7 @@ const LOCAL: Record<string, (a: Args) => unknown> = {
     const words = String(a.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
     return rows.filter((r) => (!a.profile || r.profile === a.profile) && words.every((w) => r.sql.toLowerCase().includes(w)));
   },
-  client_log: () => null,
+  client_log: (a) => { console.log(String(a.message)); return null; },
   conn_event: () => null,
   // 파일은 브라우저 저장소에 (탭 되살리기·저장을 시험할 수 있게)
   read_sql_file: (a) => {

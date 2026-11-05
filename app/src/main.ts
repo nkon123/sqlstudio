@@ -16,7 +16,7 @@ import { showSpace } from "./space";
 import { enableTabDrag, tabsSidePref } from "./tabdrag";
 import { cellCondition, listCondition, listText, placeCondition, type CondOp, type ListCond, type ListText } from "./cond";
 import { changeCase } from "./editor";
-import { autoFormat, formatSql, loadPrefs, startsWithDml } from "./format";
+import { autoFormat, formatSql, loadPrefs, preloadFormatter, startsWithDml } from "./format";
 import { findList, wrapList } from "./listwrap";
 import { vw } from "./sqlfmt";
 import type { GitPanel } from "./git";
@@ -25,7 +25,7 @@ import { aliasMap, showColumns } from "./colpopup";
 import { showMenu, type MenuItem } from "./ctxmenu";
 import { showUsage } from "./usage";
 import { showColumnSource } from "./colsource";
-import { showRowTrace, showValueTrace, type TraceHooks } from "./valuetrace";
+import type { TraceHooks } from "./valuetrace";
 import { showDiff, type Snapshot } from "./resultdiff";
 import { openCopyData } from "./copydata";
 import { historyPanel, openHistory } from "./history";
@@ -37,12 +37,11 @@ import { showShortcuts } from "./shortcuts";
 import { fromLineStart, hasManualLayout, manualLayout } from "./autofmt";
 import { initSession, loadSession, restoreEnabled, saveSession } from "./tabsession";
 import { loadSnippets } from "./snippets";
-import { alertBox, applyTheme, bindBox, confirmBox, h, modal, passwordBox, toast } from "./ui";
+import { alertBox, applyTheme, bindBox, confirmBox, h, icon, modal, passwordBox, toast } from "./ui";
 import { Tab } from "./tab";
 import { SideLayout } from "./layout";
 import { connMenu, fileMenu, palette, runMenu, toolsMenu } from "./menus";
 import { openPalette } from "./palette";
-import { icon, settings } from "./settings";
 import { docGroupKey, docGroupPref, GROUP_LABEL, setDocGroupPref, sortGroupKeys, type DocGroup } from "./docgroups";
 import { profileOptions } from "./conngroups";
 import { editToSelect } from "./editcmd";
@@ -378,10 +377,15 @@ export class App {
     if (!force && now - this.lastEditAt < 2000 && now - this.lastSavedAt < 30_000) return;
     this.savingTabs = true;
     try {
+      // 내용은 지난번 뒤로 바뀐 탭만
+      const changed = new Map<string, string>();
+      const docs = this.tabs.map((t) => t.editor.view.state.doc);
+      this.tabs.forEach((t, i) => { if (t.savedDoc !== docs[i]) changed.set(t.saveKey, t.editor.text()); });
       await saveSession(active, this.tabs.map((t) => ({
-        text: t.editor.text(), filePath: t.filePath, encoding: t.encoding, eol: t.eol, dirty: t.dirty,
+        key: t.saveKey, filePath: t.filePath, encoding: t.encoding, eol: t.eol, dirty: t.dirty,
         cursor: t.editor.cursor(), profile: t.conn?.profile ?? t.lastProfile, used: t.used, tag: t.tag, name: t.name, schema: t.schema,
-      })));
+      })), changed);
+      this.tabs.forEach((t, i) => { t.savedDoc = docs[i]; });
       this.savedTabsSig = sig;
       this.lastSavedAt = performance.now();
     } catch { /* 다음 차례에 다시 */ } finally {
@@ -399,34 +403,42 @@ export class App {
     let unsaved = 0;
     // 되살릴 때는 저장된 순서 그대로 (새 문서를 맨 위로 올리지 않는다)
     this.restoring = true;
-    for (const st of s.tabs) {
-      let { text, encoding, eol, dirty } = st;
-      // 파일로 저장해 둔 탭은 디스크에서 다시 (밖에서 고쳤을 수 있다). 파일이 없어졌으면 남긴 내용을 저장 안 함으로
-      if (st.filePath && !st.dirty) {
-        try {
-          const f = await api.readFile(st.filePath);
+    // 파일로 저장해 둔 탭은 디스크에서 다시 (밖에서 고쳤을 수 있다) — 한꺼번에 (네트워크 드라이브면 하나씩은 느리다)
+    const files = await Promise.all(s.tabs.map((st) => (st.filePath && !st.dirty ? api.readFile(st.filePath).catch(() => null) : Promise.resolve(undefined))));
+    try {
+      for (const [i, st] of s.tabs.entries()) {
+        let { text, encoding, eol, dirty } = st;
+        // 파일이 없어졌으면 남긴 내용을 저장 안 함으로
+        const f = files[i];
+        if (f === null) dirty = true;
+        else if (f) {
           text = f.text;
           encoding = f.encoding;
           eol = f.text.includes("\r\n") ? "\r\n" : "\n";
-        } catch { dirty = true; }
+        }
+        const t = this.newTab(false, text);
+        t.filePath = st.filePath;
+        t.encoding = encoding;
+        t.eol = eol;
+        t.setDirty(dirty);
+        t.lastProfile = st.profile ?? null;
+        t.schema = st.schema ?? null;
+        if (st.used) t.used = st.used;
+        t.tag = st.tag ?? null;
+        t.name = st.name ?? null;
+        t.refreshTitle();
+        // 숨은 편집기는 스크롤할 수 없다 — 처음 보일 때 커서 쪽으로 (activate)
+        t.editor.view.dispatch({ selection: { anchor: Math.min(st.cursor, t.editor.view.state.doc.length) } });
+        t.revealCursor = true;
+        // 내용 파일이 이미 있다 (새 형식) — 고치기 전에는 다시 쓰지 않는다. 파일에서 다시 읽었으면 내용이 다를 수 있어 쓴다
+        if (st.key && !f) { t.saveKey = st.key; t.savedDoc = t.editor.view.state.doc; }
+        if (dirty) unsaved++;
       }
-      const t = this.newTab(false, text);
-      t.filePath = st.filePath;
-      t.encoding = encoding;
-      t.eol = eol;
-      t.setDirty(dirty);
-      t.lastProfile = st.profile ?? null;
-      t.schema = st.schema ?? null;
-      if (st.used) t.used = st.used;
-      t.tag = st.tag ?? null;
-      t.name = st.name ?? null;
-      t.refreshTitle();
-      t.editor.view.dispatch({ selection: { anchor: Math.min(st.cursor, t.editor.view.state.doc.length) }, scrollIntoView: true });
-      if (dirty) unsaved++;
+    } finally {
+      this.restoring = false;
     }
-    this.restoring = false;
     this.renderDocs();
-    const act = this.tabs[s.active];
+    const act = this.tabs[s.active] ?? this.tabs[0];
     if (act) this.activate(act);
     // 접속은 되살리지 않는다 (운영 DB 일 수 있다) — 그 탭의 프로필만 골라 둔다
     const prof = s.tabs[s.active]?.profile;
@@ -455,6 +467,7 @@ export class App {
     // 첫 글자 앞 들여쓰기도 같이 (앞에 공백만 있을 때)
     from = fromLineStart(view.state, from);
     const src = view.state.sliceDoc(from, to);
+    await preloadFormatter().catch(() => {});
     const r = formatSql(src);
     if (!r.ok) return toast(r.reason, "error", 6000);
     if (r.text === src) return toast("이미 정리되어 있습니다", "info");
@@ -573,10 +586,10 @@ export class App {
     void invoke("client_log", { level: "info", message: `시작(화면 앞): 문서 요청 시각 ${new Date(performance.timeOrigin).toISOString()} · 문서 요청 ${ms(nav?.requestStart)} · 응답 시작 ${ms(nav?.responseStart)} · 문서 받음 ${ms(nav?.responseEnd)} · main.js 받기 ${ms(js?.startTime)}~${ms(js?.responseEnd)} · 모듈 실행 끝 ${ms(tModules)} · 첫 화면 구성 ${ms(tBuilt - tModules)} · 시작 작업 시작 ${ms(t0)}` }).catch(() => {});
     // 몇 초마다 바뀐 탭이 있으면 저장 (프로그램이 죽어도 쓰던 SQL 이 남게)
     window.setInterval(() => void this.saveTabs(), 3000);
-    if (localStorage.getItem("git.last")) {
-      const later = (f: () => void) => ("requestIdleCallback" in window ? requestIdleCallback(f, { timeout: 4000 }) : setTimeout(f, 2000));
-      later(() => void this.loadGit());
-    }
+    const later = (f: () => void) => ("requestIdleCallback" in window ? requestIdleCallback(f, { timeout: 4000 }) : setTimeout(f, 2000));
+    // 첫 화면이 뜬 뒤 쉬는 틈에 — 포맷(자동 포맷 포함)이 기다리지 않게
+    later(() => void preloadFormatter().catch(() => {}));
+    if (localStorage.getItem("git.last")) later(() => void this.loadGit());
     this.refresh();
     getCurrentWindow().onCloseRequested(async (e) => {
       await this.saveTabs(true).catch(() => {});
@@ -619,6 +632,11 @@ export class App {
     }
     this.enableTabDrag(t);
     this.tabBodies.append(t.root);
+    // 되살리는 중에는 탭마다 목록을 다시 그리고 포커스를 옮기지 않는다 — 끝에 한 번 (탭이 많으면 시작이 늦어진다)
+    if (this.restoring) {
+      t.root.hidden = true;
+      return t;
+    }
     this.renderDocs();
     this.activate(t);
     if (sameConnection && prev?.conn) this.connect(t, prev.conn.profile);
@@ -791,6 +809,10 @@ export class App {
     else this.browserList.replaceChildren(h("div", { class: "empty" }, "접속하면 객체 목록이 나옵니다"));
     this.outline.attach(t.editor.view);
     t.editor.focus();
+    if (t.revealCursor) {
+      t.revealCursor = false;
+      t.editor.view.dispatch({ scrollIntoView: true });
+    }
   }
 
   /** 왼쪽 영역을 펼치고 그 화면으로 (명령 검색에서) */
@@ -1055,6 +1077,7 @@ export class App {
       // 첫 글자 앞 들여쓰기도 같이 (앞에 공백만 있을 때)
       const start = fromLineStart(t.editor.view.state, cur.from);
       const src = t.editor.view.state.sliceDoc(start, cur.to);
+      if (startsWithDml(src)) await preloadFormatter().catch(() => {});
       const r = startsWithDml(src) ? formatSql(src) : null;
       if (r?.ok && r.text !== src) {
         t.editor.view.dispatch({ changes: { from: start, to: cur.to, insert: r.text }, selection: { anchor: start + r.text.length }, userEvent: "input.format" });
@@ -1091,12 +1114,15 @@ export class App {
     t.lastError = undefined;
     await this.running(t, async () => {
       try {
+        const t0 = performance.now();
         const r = await api.execute(t.conn!.id, stmt.text, binds, confirmed);
+        const t1 = performance.now();
         if (r.outcome.type === "rows") {
           t.lastQuery = { sql: stmt.text, binds };
           this.endGridEdit(t);
         }
         this.showResult(t, r);
+        perfLog(r, t0, t1);
         this.noteSchema(t, stmt.text);
       } catch (e) {
         this.showError(t, errOf(e), stmt.text, from);
@@ -1441,7 +1467,7 @@ export class App {
     const t = this.active;
     if (!t) return;
     // 접속 없이도 연다 — 다른 곳에서 내보낸 결과(.sqla)를 가져와 본다
-    t.analysis().open(owner, name);
+    void t.analysis().then((a) => a.open(owner, name));
   }
 
   async txn(kind: "commit" | "rollback") {
@@ -2208,14 +2234,14 @@ export class App {
       openSource: (owner, name, kind, line) => this.openSource(id, owner, name, kind, line),
       showUsage: (table, c) => void showUsage(id, table, c, async (owner, name, kind) =>
         this.newTab(true, await api.getDdl(id, kind, `"${owner}"."${name}"`).catch((e) => `-- ${errOf(e).message}`))),
-      openAnalysis: () => { t.analysis(); },
+      openAnalysis: () => void t.analysis(),
     });
   }
 
   private traceHooks(t: Tab, id: number): TraceHooks {
     return {
       openSource: (owner, name, kind, line) => this.openSource(id, owner, name, kind, line),
-      openAnalysis: () => { t.analysis(); },
+      openAnalysis: () => void t.analysis(),
       explain: (text, out) => this.ai.explainInto(text, out),
       cancelExplain: () => this.ai.cancelCurrent(),
     };
@@ -2227,7 +2253,7 @@ export class App {
     if (!q || !t.conn || !r) return;
     const id = t.conn.id;
     const row: [string, string | null][] = r.map((v, i) => [t.grid.columnAt(i)?.name ?? "", v]);
-    void showValueTrace(id, q.sql, col, column, row, this.traceHooks(t, id));
+    void import("./valuetrace").then((m) => m.showValueTrace(id, q.sql, col, column, row, this.traceHooks(t, id)));
   }
 
   /** 행 추적 — 이 키의 행은 왜 없나. sql 의 첫 테이블과 WHERE 의 `키 = 값` 으로 미리 채운다 (없으면 에디터의 지금 문장) */
@@ -2240,7 +2266,7 @@ export class App {
       const cur = await this.currentStatement(t).catch(() => null);
       q = cur ? t.editor.view.state.doc.sliceString(cur.from, cur.to) : null;
     }
-    void showRowTrace(id, q, null, this.traceHooks(t, id));
+    void import("./valuetrace").then((m) => m.showRowTrace(id, q, null, this.traceHooks(t, id)));
   }
 
   /** 셀 값을 조회 조건으로 */
@@ -2560,11 +2586,22 @@ export class App {
 
   /** 설정 — settings.ts */
   async settings(page = "접속") {
+    // 쓸 때 불러온다 — 시작에 필요 없는 큰 화면
+    const [{ settings }] = await Promise.all([import("./settings"), preloadFormatter().catch(() => {})]);
     await settings(this, page);
   }
 }
 
 /** 자주 나는 접속 오류에 해결 방법을 붙인다 */
+/** 서버 밖에서 오래 걸렸으면 로그에 ('성능 화면') — 받기(전달)와 그리기 중 어디가 느린지. 서버 시간은 백엔드가 남긴다 */
+function perfLog(r: ExecView, t0: number, t1: number) {
+  const recv = Math.round(t1 - t0 - r.elapsed_ms);
+  const draw = Math.round(performance.now() - t1);
+  if (recv + draw < 200) return;
+  const rows = r.outcome.type === "rows" ? `${r.outcome.rows.length}행 × ${r.outcome.columns.length}열` : r.outcome.type;
+  void invoke("client_log", { level: "info", message: `성능 화면: ${rows} — 서버 ${r.elapsed_ms}ms · 받기 ${recv}ms · 그리기 ${draw}ms` }).catch(() => {});
+}
+
 /** 소스를 여는 코드 객체 */
 const CODE_TYPES = ["PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY"];
 

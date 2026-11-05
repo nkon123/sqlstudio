@@ -11,6 +11,7 @@ import { setTabsSidePref, tabsSidePref } from "./tabdrag";
 import { DEFAULT_SNIPPETS, parse as parseSnippets, saveSnippets, snippets, type Snip } from "./snippets";
 import { applyTheme, confirmBox, editorColorNow, field, h, modal, setEditorColor, themePref, toast, type EditorColorKey, type ThemePref } from "./ui";
 import type { App } from "./main";
+import { icon } from "./ui";
 
 /** 설정 페이지 — 왼쪽 목록의 이름·아이콘, 위의 한 줄 설명 */
 const PAGES: { name: string; icon: string; desc: string; make: (app: App) => Promise<HTMLElement> }[] = [
@@ -27,17 +28,6 @@ function markActive(list: HTMLElement, name: string | undefined) {
   for (const b of list.querySelectorAll<HTMLElement>("[data-name]")) b.classList.toggle("active", !!name && b.dataset.name === name);
 }
 
-/** 선 아이콘 (24×24, 선만) */
-export function icon(d: string): SVGSVGElement {
-  const ns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS(ns, "path");
-  path.setAttribute("d", d);
-  svg.append(path);
-  return svg;
-}
 
 /** 페이지를 카드로 — 소제목(h3·h4)마다 한 장, 소제목이 없으면 통째로 한 장 */
 function cards(page: HTMLElement): HTMLElement {

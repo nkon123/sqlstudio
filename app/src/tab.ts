@@ -3,7 +3,7 @@
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api, errOf, type Connected } from "./api";
 import { sqlCompletion } from "./completion";
-import { AnalysisView } from "./analysis";
+import type { AnalysisView } from "./analysis";
 import { DebugView } from "./debugger";
 import { MonitorView } from "./monitor";
 import { SqlEditor } from "./editor";
@@ -47,6 +47,11 @@ export class Tab {
   lastProfile: string | null = null;
   /** 계정을 적지 않은 이름을 찾을 스키마 (ALTER SESSION SET CURRENT_SCHEMA) — null 이면 접속 계정. 같은 프로필로 다시 접속하면 다시 건다 */
   schema: string | null = null;
+  /** 되살린 뒤 아직 보인 적이 없다 — 처음 보일 때 커서 쪽으로 스크롤 */
+  revealCursor = false;
+  /** 자동 저장의 내용 파일 이름 (tabs/<key>.sql)과 마지막으로 쓴 문서 — 같으면 내용은 다시 쓰지 않는다 */
+  saveKey = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  savedDoc: unknown = null;
   filePath: string | null = null;
   encoding = "utf-8";
   /** 읽은 파일의 줄 끝 — 저장할 때 되돌린다 (편집기 안은 \n). CRLF 파일을 LF 로 바꿔 Git 에서 모든 줄이 바뀐 것처럼 보이지 않게 */
@@ -104,13 +109,17 @@ export class Tab {
   }
 
   /** PL/SQL 분석 화면 (탭의 접속 프로필 기준) */
-  analysis(): AnalysisView {
+  async analysis(): Promise<AnalysisView> {
     if (!this.an) {
-      this.an = new AnalysisView(() => this.conn?.id, () => this.showEditor(), {
-        source: (id, owner, name, kind, line) => void this.app.openSource(id, owner, name, kind, line),
-        table: (id, name) => void this.app.openTable(id, name),
-      });
-      this.root.append(this.an.el);
+      // 쓸 때 불러온다 — 시작에 필요 없는 큰 화면
+      const { AnalysisView } = await import("./analysis");
+      if (!this.an) {
+        this.an = new AnalysisView(() => this.conn?.id, () => this.showEditor(), {
+          source: (id, owner, name, kind, line) => void this.app.openSource(id, owner, name, kind, line),
+          table: (id, name) => void this.app.openTable(id, name),
+        });
+        this.root.append(this.an.el);
+      }
     }
     if (this.cmp) this.cmp.el.hidden = true;
     for (const p of this.editorParts) p.hidden = true;

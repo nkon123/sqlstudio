@@ -217,3 +217,15 @@ export function toast(text: string, kind: "info" | "error" | "ok" = "info", ms =
 export function field(label: string, input: HTMLElement, hint?: string) {
   return h("label", { class: "field" }, h("span", {}, label), input, hint ? h("small", {}, hint) : null);
 }
+
+/** 선 아이콘 (24×24, 선만) */
+export function icon(d: string): SVGSVGElement {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(ns, "path");
+  path.setAttribute("d", d);
+  svg.append(path);
+  return svg;
+}

@@ -9,7 +9,17 @@
 // 토큰으로 쪼개 공백·줄바꿈·키워드 대소문자 말고 달라진 게 있으면 적용하지 않는다.
 // PL/SQL 블록(BEGIN/DECLARE/CREATE PACKAGE ...)은 건드리지 않는다.
 
-import { format, type FormatOptionsWithLanguage } from "sql-formatter";
+import type { FormatOptionsWithLanguage } from "sql-formatter";
+
+// sql-formatter(약 280KB)는 왼쪽 정렬·DDL 에만 — 시작할 때 싣지 않고 뒤에서 불러 둔다 (preloadFormatter)
+let sqlFormatter: typeof import("sql-formatter") | null = null;
+let loading: Promise<void> | null = null;
+
+/** 왼쪽 정렬 포맷에 쓰는 sql-formatter 를 불러 둔다 — 시작이 끝난 뒤, 그리고 포맷하기 전에 */
+export function preloadFormatter(): Promise<void> {
+  loading ??= import("sql-formatter").then((m) => { sqlFormatter = m; }).catch((e) => { loading = null; throw e; });
+  return loading;
+}
 import { formatRiver } from "./sqlfmt";
 
 export type FormatStyle = "river" | "compact" | "left";
@@ -198,7 +208,11 @@ function formatLeft(sql: string, prefs: FormatPrefs): string {
     logicalOperatorNewline: prefs.logicalBefore ? "before" : "after",
     linesBetweenQueries: 1,
   };
-  return format(sql, opts);
+  if (!sqlFormatter) {
+    void preloadFormatter();
+    throw new Error("포맷 기능을 불러오는 중입니다 — 잠시 뒤 다시 하세요");
+  }
+  return sqlFormatter.format(sql, opts);
 }
 
 export function formatSql(sql: string, prefs: FormatPrefs = loadPrefs()): FormatResult {

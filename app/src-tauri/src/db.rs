@@ -655,6 +655,10 @@ pub async fn execute(st: State<'_, AppState>, args: ExecArgs) -> R<ExecView> {
         txn.store(b, Ordering::Relaxed);
     }
     let r = r?;
+    perf_page("실행", args.id, started, match &r.outcome {
+        sqls_core::session::ExecOutcome::Rows(p) => Some(p),
+        _ => None,
+    });
     track_txn(&s, r.kind, &r.outcome, &txn);
     if matches!(r.kind, StmtKind::Ddl | StmtKind::PlsqlUnit) {
         crate::complete::after_ddl(&st, args.id);
@@ -760,7 +764,25 @@ pub async fn execute_script(
 #[tauri::command]
 pub async fn fetch_more(st: State<'_, AppState>, id: u64, rows: usize) -> R<RowPage> {
     let (s, _, _) = st.session(id)?;
-    Ok(s.fetch_more(rows.clamp(1, 100_000)).await?)
+    let started = std::time::Instant::now();
+    let p = s.fetch_more(rows.clamp(1, 100_000)).await?;
+    perf_page("더 가져오기", id, started, Some(&p));
+    Ok(p)
+}
+
+/// 느린 실행·가져오기를 로그에 ('성능 …') — 실제 DB 에서 어디가 느린지 (서버·행 수·크기). 0.3초 넘을 때만
+fn perf_page(what: &str, id: u64, started: std::time::Instant, page: Option<&sqls_core::session::RowPage>) {
+    let ms = started.elapsed().as_millis();
+    if ms < 300 {
+        return;
+    }
+    match page {
+        Some(p) => {
+            let bytes: usize = p.rows.iter().flatten().map(|c| c.as_ref().map_or(0, |v| v.len())).sum();
+            tracing::info!("성능 {what} #{id}: {ms}ms · {}행 × {}열 · 글자 {}KB · 누적 {}행", p.rows.len(), p.columns.len(), bytes / 1024, p.fetched_total);
+        }
+        None => tracing::info!("성능 {what} #{id}: {ms}ms"),
+    }
 }
 
 #[tauri::command]
@@ -881,7 +903,11 @@ async fn describe_one(st: &AppState, id: u64, name: &str) -> R<meta::TableDesc> 
         return Ok(d);
     }
     let s = lookup_session(st, id)?;
+    let started = std::time::Instant::now();
     let d = meta::describe(&s, name).await?;
+    if started.elapsed().as_millis() >= 300 {
+        tracing::info!("성능 구조 보기 #{id} {name}: {}ms · 컬럼 {}", started.elapsed().as_millis(), d.columns.len());
+    }
     if let Some(h) = &hub {
         h.remember_describe(name, &d);
     }

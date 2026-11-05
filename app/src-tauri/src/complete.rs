@@ -166,7 +166,28 @@ impl MetaHub {
     async fn load(self: &Arc<Self>, progressive: bool) {
         let Some(s) = self.session() else { return };
         let hub = self.clone();
+        // 단계마다 걸린 시간 — 큰 스키마에서 무엇이 오래 걸리는지 (로그 '성능 자동완성')
+        let started = std::time::Instant::now();
+        let mut prev = started;
+        let mut laps: Vec<String> = Vec::new();
         let r = load::load_user_schema(&s, &self.cache, progressive, move |p| {
+            // 단계 이름은 그 단계가 끝났다는 뜻 — 앞 단계 끝부터 걸린 시간
+            let now = std::time::Instant::now();
+            let label = match p {
+                load::Phase::Objects => Some("객체"),
+                load::Phase::Columns => Some("컬럼"),
+                load::Phase::Synonyms => Some("동의어"),
+                load::Phase::Keys => Some("키·패키지"),
+                load::Phase::Done => None,
+            };
+            if let Some(l) = label {
+                laps.push(format!("{l} {}ms", (now - prev).as_millis()));
+            }
+            prev = now;
+            if matches!(p, load::Phase::Done) {
+                let (objects, columns) = hub.cache.rd().stats();
+                tracing::info!("성능 자동완성 {}: 객체 {objects} · 컬럼 {columns} — {} · 합계 {}ms", hub.profile, laps.join(" · "), started.elapsed().as_millis());
+            }
             let name = match p {
                 load::Phase::Objects => "objects",
                 load::Phase::Columns => "columns",

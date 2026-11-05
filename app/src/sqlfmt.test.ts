@@ -1,5 +1,7 @@
 // npm test — 포맷 결과가 원하는 모양인지, 같은 SQL 인지
-import { detectPrefs, formatSql, sameSql, startsWithDml, DEFAULT_PREFS, type FormatPrefs } from "./format";
+import { detectPrefs, formatSql, preloadFormatter, sameSql, startsWithDml, DEFAULT_PREFS, type FormatPrefs } from "./format";
+
+await preloadFormatter();
 
 // 자동 포맷이 손댈 문장인지 — PL/SQL 조각·DDL 은 아니다
 for (const [s, want] of [["select 1 from dual", true], ["  -- 주석\n  WITH a AS (select 1 from dual) select * from a", true], ["(select a from t) union select b from u", true],

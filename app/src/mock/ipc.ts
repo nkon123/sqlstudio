@@ -303,8 +303,7 @@ const DB: Record<string, (a: Args) => unknown> = {
   abandon: () => null,
   commit: () => { txn = false; return null; },
   rollback: () => { txn = false; return null; },
-  explain: (a) => ["Plan hash value: 1234567890 (가짜)", "", "| Id | Operation         | Name |", "|  0 | SELECT STATEMENT  |      |",
-    `|  1 |  TABLE ACCESS FULL| ${/\bFROM\s+([\w$#.]+)/i.exec(a.sql as string)?.[1]?.toUpperCase() ?? "?"} |`],
+  explain: (a) => mockPlan(String(a.sql)),
   count_rows: (a) => ({ rows: String(findTable(/\bFROM\s+([\w$#."]+)/i.exec(a.sql as string)?.[1] ?? "")?.count ?? 1), elapsed_ms: 3 }),
   list_schemas: () => ["SCOTT", "HR"],
   list_objects: (a) => {
@@ -625,6 +624,41 @@ const MOCK_UNIT = {
       facts: MOCK_FACTS([{ name: "EMP", ops: "RU", lines: [25, 33] }]) },
   ],
 };
+
+/** DBMS_XPLAN 꼴의 가짜 실행계획 — 조인·GROUP BY·ORDER BY 를 보고 줄을 만든다 */
+function mockPlan(sql: string): string[] {
+  const tables = [...sql.matchAll(/\b(?:FROM|JOIN)\s+([\w$#."]+)/gi)].map((m) => m[1].replace(/"/g, "").split(".").pop()!.toUpperCase());
+  const rowsOf = (t: string) => findTable(t)?.count ?? 100;
+  const order = /\bORDER\s+BY\b/i.test(sql);
+  const group = /\bGROUP\s+BY\b/i.test(sql);
+  const ops: { op: string; name: string; rows: number }[] = [{ op: "SELECT STATEMENT", name: "", rows: 0 }];
+  const n = Math.max(1, ...tables.map(rowsOf));
+  const out = group ? Math.ceil(n / 12) : n;
+  let d = 1;
+  if (order) ops.push({ op: `${" ".repeat(d++)}SORT ORDER BY`, name: "", rows: out });
+  if (group) ops.push({ op: `${" ".repeat(d++)}HASH GROUP BY`, name: "", rows: out });
+  const join = tables.length >= 2 ? d : -1;
+  if (tables.length >= 2) {
+    ops.push({ op: `${" ".repeat(d++)}HASH JOIN`, name: "", rows: n });
+    ops.push({ op: `${" ".repeat(d)}TABLE ACCESS FULL`, name: tables[0], rows: rowsOf(tables[0]) });
+    ops.push({ op: `${" ".repeat(d)}TABLE ACCESS FULL`, name: tables[1], rows: rowsOf(tables[1]) });
+  } else ops.push({ op: `${" ".repeat(d)}TABLE ACCESS FULL`, name: tables[0] ?? "DUAL", rows: n });
+  ops[0].rows = out;
+  const row = (id: string, op: string, name: string, rows: string, bytes: string, cost: string, time: string) =>
+    `| ${id.padStart(3)} | ${op.padEnd(26)} | ${name.padEnd(11)} | ${rows.padStart(5)} | ${bytes.padStart(6)} | ${cost.padStart(11)} | ${time.padEnd(8)} |`;
+  const head = row("Id", "Operation", "Name", "Rows", "Bytes", "Cost (%CPU)", "Time").replace("|  Id |", "| Id  |");
+  const line = "-".repeat(head.length);
+  const body = ops.map((x, i) => row(String(i), x.op, x.name, String(x.rows), String(x.rows * 26), `${4 + (ops.length - i) * 3}   (${i <= 1 ? 25 : 0})`, "00:00:01"));
+  const key = tables[0] === "ORDERS" || tables[1] === "ORDERS" ? "ORDER_ID" : "DEPTNO";
+  return [
+    `Plan hash value: ${2944128587 + sql.length * 7919}`, "", line,
+    head, line,
+    ...body, line, "",
+    ...(join >= 0 ? ["Predicate Information (identified by operation id):", "---------------------------------------------------", "",
+      `   ${join} - access("${tables[0].slice(0, 1)}"."${key}"="${tables[1].slice(0, 1)}"."${key}")`, ""] : []),
+    "Note", "-----", "   - 가짜 DB 모드: 실행계획 모양만 흉내 낸 것입니다",
+  ];
+}
 
 function banner(where: string) {
   const b = document.createElement("div");

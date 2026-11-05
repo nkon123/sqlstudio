@@ -10,7 +10,7 @@ AI 는 로컬 LLM(Ollama, LM Studio, vLLM)과 프론티어 모델(Claude, OpenAI
 |---|---|---|
 | ![grid](docs/images/grid.png) | ![ai](docs/images/ai.png) | ![plan](docs/images/plan.png) |
 
-<sub>화면은 Oracle 11g XE 에 붙인 실제 앱이다. AI 답은 테스트용 가짜 모델이 낸 것이다.</sub>
+<sub>화면은 가짜 DB 모드(`npm run mock`, Oracle 없이)로 찍었다 — 예제 테이블, 흉내 낸 실행계획, 미리 정해 둔 AI 답.</sub>
 
 ---
 

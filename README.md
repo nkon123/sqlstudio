@@ -12,7 +12,7 @@ SQLLM combines the database tools developers already need with AI that understan
 |---|---|---|
 | ![grid](docs/images/grid.png) | ![ai](docs/images/ai.png) | ![plan](docs/images/plan.png) |
 
-<sub>Screenshots are from the real app connected to Oracle 11g XE. AI responses come from a test model.</sub>
+<sub>Screenshots are from the app in fake-DB mode (`npm run mock`, no Oracle needed) — sample tables, a simulated execution plan and canned AI answers.</sub>
 
 > 한국어 문서: [README.ko.md](README.ko.md)
 

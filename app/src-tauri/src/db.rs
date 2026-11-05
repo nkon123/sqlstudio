@@ -464,6 +464,7 @@ pub async fn connect(
             profile: p.name.clone(),
             txn_pending: Arc::new(AtomicBool::new(false)),
             stop_script: Arc::new(AtomicBool::new(false)),
+            schema: Arc::new(std::sync::Mutex::new(None)),
         },
     );
     Ok(Connected {
@@ -788,6 +789,19 @@ pub async fn commit(st: State<'_, AppState>, id: u64, confirmed: Option<bool>) -
     Ok(())
 }
 
+/// 계정을 적지 않은 이름을 찾을 스키마. 비우면 접속 계정으로 되돌린다
+#[tauri::command]
+pub async fn set_schema(st: State<'_, AppState>, id: u64, schema: Option<String>) -> R<String> {
+    let (s, _, _) = st.session(id)?;
+    let schema = schema.map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).unwrap_or_else(|| s.info().user.clone());
+    s.set_current_schema(&schema).await?;
+    if let Some(o) = st.sessions.lk().get(&id) {
+        *o.schema.lk() = Some(schema.clone());
+    }
+    tracing::info!("탭 #{id} 기준 스키마 {schema}");
+    Ok(schema)
+}
+
 #[tauri::command]
 pub async fn rollback(st: State<'_, AppState>, id: u64) -> R<()> {
     let (s, txn, _) = st.session(id)?;
@@ -838,19 +852,38 @@ pub async fn list_objects(
     name_like: Option<String>,
 ) -> R<Vec<meta::ObjectEntry>> {
     let (s, _, _) = st.session(id)?;
+    // 계정을 주지 않으면 기준 스키마에서 — 거기 없으면 접속 계정
+    if owner.is_none() {
+        if let Some(o) = st.tab_schema(id) {
+            let v = meta::list_objects(&s, Some(&o), object_type.as_deref(), name_like.as_deref(), 5000).await?;
+            if !v.is_empty() {
+                return Ok(v);
+            }
+        }
+    }
     Ok(meta::list_objects(&s, owner.as_deref(), object_type.as_deref(), name_like.as_deref(), 5000).await?)
 }
 
 #[tauri::command]
 pub async fn describe(st: State<'_, AppState>, id: u64, name: String) -> R<meta::TableDesc> {
-    let hub = crate::complete::hub_for(&st, id).ok();
-    if let Some(d) = hub.as_ref().and_then(|h| h.cached_describe(&name)) {
+    // 기준 스키마를 골랐으면 그 스키마에서 먼저 — 없으면 (동의어 등) 적은 그대로
+    if let Some(q) = st.qualify(id, &name) {
+        if let Ok(d) = describe_one(&st, id, &q).await {
+            return Ok(d);
+        }
+    }
+    describe_one(&st, id, &name).await
+}
+
+async fn describe_one(st: &AppState, id: u64, name: &str) -> R<meta::TableDesc> {
+    let hub = crate::complete::hub_for(st, id).ok();
+    if let Some(d) = hub.as_ref().and_then(|h| h.cached_describe(name)) {
         return Ok(d);
     }
-    let s = lookup_session(&st, id)?;
-    let d = meta::describe(&s, &name).await?;
+    let s = lookup_session(st, id)?;
+    let d = meta::describe(&s, name).await?;
     if let Some(h) = &hub {
-        h.remember_describe(&name, &d);
+        h.remember_describe(name, &d);
     }
     Ok(d)
 }
@@ -870,7 +903,8 @@ pub async fn count_rows(st: State<'_, AppState>, id: u64, sql: String, binds: Ve
     if body.is_empty() || !matches!(head.as_str(), "SELECT" | "WITH") {
         return Err(ErrView::msg("invalid", "조회(SELECT)의 결과만 셀 수 있습니다"));
     }
-    let s = lookup_session(&st, id)?;
+    // 기준 스키마를 골랐으면 작업 세션으로 — 사전 조회 세션은 접속 계정 기준이라 이름을 다르게 찾는다
+    let s = if st.tab_schema(id).is_some() { st.session(id)?.0 } else { lookup_session(&st, id)? };
     let started = std::time::Instant::now();
     let page = s.query(&format!("SELECT COUNT(*) FROM (
 {body}
@@ -926,6 +960,11 @@ pub async fn table_sizes(st: State<'_, AppState>, id: u64, owner: Option<String>
 #[tauri::command]
 pub async fn column_usage(st: State<'_, AppState>, id: u64, table: String, column: String) -> R<meta::Usage> {
     let s = lookup_session(&st, id)?;
+    if let Some(q) = st.qualify(id, &table) {
+        if let Ok(u) = meta::column_usage(&s, &q, &column).await {
+            return Ok(u);
+        }
+    }
     Ok(meta::column_usage(&s, &table, &column).await?)
 }
 
@@ -933,6 +972,11 @@ pub async fn column_usage(st: State<'_, AppState>, id: u64, table: String, colum
 #[tauri::command]
 pub async fn object_deps(st: State<'_, AppState>, id: u64, name: String) -> R<meta::ObjectDeps> {
     let s = lookup_session(&st, id)?;
+    if let Some(q) = st.qualify(id, &name) {
+        if let Ok(d) = meta::object_deps(&s, &q).await {
+            return Ok(d);
+        }
+    }
     Ok(meta::object_deps(&s, &name).await?)
 }
 
@@ -955,6 +999,7 @@ fn lookup_session(st: &AppState, id: u64) -> R<sqls_core::Session> {
 /// 둘 다 없으면 None (화면이 describe 로 묻는다)
 #[tauri::command]
 pub fn describe_fast(st: State<'_, AppState>, id: u64, name: String) -> Option<meta::TableDesc> {
+    let name = st.qualify(id, &name).unwrap_or(name);
     let hub = crate::complete::hub_for(&st, id).ok()?;
     if let Some(d) = hub.cached_describe(&name) {
         return Some(d);
@@ -979,6 +1024,11 @@ pub async fn object_section(st: State<'_, AppState>, id: u64, owner: String, nam
 #[tauri::command]
 pub async fn get_ddl(st: State<'_, AppState>, id: u64, object_type: String, name: String) -> R<String> {
     let (s, _, _) = st.session(id)?;
+    if let Some(q) = st.qualify(id, &name) {
+        if let Ok(d) = meta::get_ddl(&s, &object_type, &q).await {
+            return Ok(d);
+        }
+    }
     Ok(meta::get_ddl(&s, &object_type, &name).await?)
 }
 

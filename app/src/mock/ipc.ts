@@ -22,6 +22,7 @@ function classify(sql: string): StmtKind {
   const t = sql.replace(/^(\s|--[^\n]*\n|\/\*[\s\S]*?\*\/)+/, "").toUpperCase();
   if (/^(SELECT|WITH|\()/.test(t)) return "query";
   if (/^(INSERT|UPDATE|DELETE|MERGE)\b/.test(t)) return "dml";
+  if (/^ALTER\s+SESSION/.test(t)) return "session";
   if (PLSQL_HEAD.test(t)) return t.startsWith("CREATE") ? "plsql_unit" : "plsql";
   if (/^(CREATE|ALTER|DROP|TRUNCATE|COMMENT|GRANT|REVOKE|RENAME)\b/.test(t)) return "ddl";
   if (/^(COMMIT|ROLLBACK|SAVEPOINT)\b/.test(t)) return "tcl";
@@ -305,7 +306,8 @@ const DB: Record<string, (a: Args) => unknown> = {
   rollback: () => { txn = false; return null; },
   explain: (a) => mockPlan(String(a.sql)),
   count_rows: (a) => ({ rows: String(findTable(/\bFROM\s+([\w$#."]+)/i.exec(a.sql as string)?.[1] ?? "")?.count ?? 1), elapsed_ms: 3 }),
-  list_schemas: () => ["SCOTT", "HR"],
+  list_schemas: () => ["SCOTT", "HR", "ERP_OWNER"],
+  set_schema: (a) => String((a.schema as string | null) ?? "SCOTT").toUpperCase(),
   list_objects: (a) => {
     // LIKE 의 \_ · \% 는 글자 그대로
     const like = ((a.nameLike as string | undefined) ?? "").replace(/\\([_%\\])|%/g, (_, c) => c ?? "").toUpperCase();

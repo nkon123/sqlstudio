@@ -230,6 +230,8 @@ enum Cmd {
     Commit { reply: Reply<()> },
     Rollback { reply: Reply<()> },
     Ping { reply: Reply<()> },
+    /// ALTER SESSION SET CURRENT_SCHEMA — 읽기 전용 세션에서도 (데이터를 바꾸지 않는다)
+    SetSchema { schema: String, reply: Reply<()> },
     /// 여러 행을 한 번에 (array DML) — 데이터 가져오기
     Batch { sql: String, rows: Vec<Vec<Option<String>>>, skip_errors: bool, reply: Reply<BatchResult> },
     /// 따로 읽는 커서 — 결과 커서와 별개로 (접속 간 데이터 복사). 열기 / 다음 행들 / 닫기
@@ -506,6 +508,17 @@ impl Session {
         self.call(|reply| Cmd::Ping { reply }).await
     }
 
+    /// 계정을 적지 않은 이름을 찾을 기준 스키마 (ALTER SESSION SET CURRENT_SCHEMA).
+    /// 권한은 바꾸지 않는다 — 그 스키마 객체에 대한 권한이 있어야 읽힌다. 다시 접속하면 풀린다
+    pub async fn set_current_schema(&self, schema: &str) -> Result<()> {
+        let schema = schema.trim();
+        if schema.is_empty() || schema.contains('"') || schema.len() > 128 {
+            return Err(Error::Invalid(format!("스키마 이름이 올바르지 않습니다: {schema}")));
+        }
+        let schema = schema.to_string();
+        self.call(|reply| Cmd::SetSchema { schema, reply }).await
+    }
+
     /// PL/SQL 블록을 실행하고 OUT 바인드(`outs` 이름 순서) 값을 문자열로 받는다.
     /// 숫자·날짜는 블록 안에서 문자열로 바뀐다. 읽기 전용 세션에서는 쓸 수 없다.
     pub async fn call_plsql(
@@ -733,6 +746,10 @@ impl Worker {
             }
             Cmd::Ping { reply } => {
                 let _ = reply.send(self.conn.ping().map_err(Error::from));
+            }
+            Cmd::SetSchema { schema, reply } => {
+                let sql = format!("ALTER SESSION SET CURRENT_SCHEMA = \"{schema}\"");
+                let _ = reply.send(self.conn.execute(&sql, &[]).map(|_| ()).map_err(Error::from));
             }
             Cmd::Parse { sql, reply } => {
                 let r = self

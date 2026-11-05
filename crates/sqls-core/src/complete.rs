@@ -1374,6 +1374,11 @@ impl<'a> Out<'a> {
 
 /// 분석 결과와 캐시로 후보를 만든다. 캐시에 없어 못 만든 것은 `missing` 에 담는다.
 pub fn suggest(a: &Analysis, cache: &SchemaCache, limit: usize) -> Completion {
+    suggest_in(a, cache, limit, None)
+}
+
+/// `schema` — 계정을 적지 않은 이름을 찾을 스키마 (ALTER SESSION SET CURRENT_SCHEMA). None·접속 계정이면 접속 계정의 객체
+fn suggest_in(a: &Analysis, cache: &SchemaCache, limit: usize, schema: Option<&str>) -> Completion {
     let mut out = Out {
         prefix: &a.prefix,
         upper: a.prefix.to_uppercase(),
@@ -1389,6 +1394,17 @@ pub fn suggest(a: &Analysis, cache: &SchemaCache, limit: usize) -> Completion {
         floor: i32::MIN,
     };
     let mut missing: Vec<Missing> = Vec::new();
+    // 계정 없이 쓰는 이름의 후보 — 기준 스키마를 골랐으면 그 스키마의 객체 (처음이면 읽어 오게)
+    let own: &[ObjInfo] = match schema {
+        Some(o) if o != cache.user => match cache.schema_objects.get(o) {
+            Some(v) => v,
+            None => {
+                missing.push(Missing::Schema { owner: o.to_string() });
+                &[]
+            }
+        },
+        _ => &cache.objects,
+    };
 
     // 별칭 → 테이블
     let resolve_ref = |r: &TableRef| -> Option<Key> {
@@ -1510,7 +1526,7 @@ pub fn suggest(a: &Analysis, cache: &SchemaCache, limit: usize) -> Completion {
                     }
                 }
             }
-            for o in &cache.objects {
+            for o in own {
                 if !o.kind.table_like() {
                     continue;
                 }
@@ -1554,7 +1570,7 @@ pub fn suggest(a: &Analysis, cache: &SchemaCache, limit: usize) -> Completion {
             }
         }
         Ctx::Procedure => {
-            for o in &cache.objects {
+            for o in own {
                 if matches!(o.kind, ObjKind::Procedure | ObjKind::Package | ObjKind::Function) {
                     out.name(&o.name, kind_name(o.kind), 300, || Some(kind_label(o.kind).into()), None);
                 }
@@ -1756,6 +1772,28 @@ fn ctx_name(c: &Ctx) -> String {
 /// 한 번에: 분석 + 후보
 pub fn complete(src: &str, cursor: usize, cache: &SchemaCache, limit: usize) -> Completion {
     suggest(&analyze(src, cursor), cache, limit)
+}
+
+/// [`complete`] 와 같되 계정을 적지 않은 테이블을 `schema` 에서 찾는다 (탭의 기준 스키마).
+/// 그 스키마 객체를 이미 읽었고 거기 없는 이름이면 동의어로 남긴다
+pub fn complete_in(src: &str, cursor: usize, cache: &SchemaCache, limit: usize, schema: Option<&str>) -> Completion {
+    let mut a = analyze(src, cursor);
+    let schema = schema.map(str::to_uppercase).filter(|o| !o.is_empty() && *o != cache.user);
+    if let Some(o) = &schema {
+        let known = cache.schema_objects.get(o);
+        let ctes: HashSet<String> = a.ctes.keys().cloned().collect();
+        for r in a.refs.iter_mut().chain(a.target.iter_mut()) {
+            let Some(n) = r.name.as_deref() else { continue };
+            if r.owner.is_some() || r.derived.is_some() || ctes.contains(n) {
+                continue;
+            }
+            if known.is_some_and(|v| !v.iter().any(|x| x.name == n)) {
+                continue;
+            }
+            r.owner = Some(o.clone());
+        }
+    }
+    suggest_in(&a, cache, limit, schema.as_deref())
 }
 
 /// 조회 결과 컬럼 이름 → 설명(COMMENT). FROM 의 테이블들을 캐시로만 풀어 찾는다 (DB 왕복 없음).

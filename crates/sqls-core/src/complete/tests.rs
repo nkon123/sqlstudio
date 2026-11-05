@@ -532,3 +532,24 @@ fn lineage_star_of_unknown_table() {
     let l = lin("select * from xyz_a, xyz_b", None, "QTY");
     assert_eq!(l.kind, "unknown");
 }
+
+#[test]
+fn current_schema_resolves_unqualified_names() {
+    let mut c = cache();
+    // 아직 ERP 객체를 모르면 — 읽어 오라고 하고, 계정 없는 테이블은 ERP 것으로 본다
+    let pos = "select e.".len();
+    let r = complete_in("select e. from orders e", pos, &c, 200, Some("erp"));
+    assert!(r.missing.contains(&Missing::Schema { owner: "ERP".into() }) || r.missing.contains(&Missing::Columns { owner: "ERP".into(), table: "ORDERS".into() }), "{:?}", r.missing);
+    c.set_schema_objects("ERP", vec![ObjInfo { owner: "ERP".into(), name: "ORDERS".into(), kind: ObjKind::Table, comment: None }]);
+    c.set_columns("ERP", "ORDERS", vec![col("ORDER_ID", "NUMBER"), col("AMOUNT", "NUMBER")]);
+    let r = complete_in("select e. from orders e", pos, &c, 200, Some("ERP"));
+    assert!(has(&r, "order_id") && has(&r, "amount"), "{:?}", labels(&r, 10));
+    // 테이블 자리 후보도 ERP 의 것 — 접속 계정(SCOTT) 것은 계정을 적어야
+    let r = complete_in("select * from ", 14, &c, 200, Some("ERP"));
+    assert!(has(&r, "orders") && !has(&r, "emp"), "{:?}", labels(&r, 10));
+    // 적은 계정은 그대로, 접속 계정을 고르면 예전과 같다
+    let r = complete_in("select e. from scott.emp e", pos, &c, 200, Some("ERP"));
+    assert!(has(&r, "empno"));
+    let r = complete_in("select * from ", 14, &c, 200, Some("SCOTT"));
+    assert!(has(&r, "emp"));
+}

@@ -41,6 +41,7 @@ import { alertBox, applyTheme, bindBox, confirmBox, h, modal, passwordBox, toast
 import { Tab } from "./tab";
 import { SideLayout } from "./layout";
 import { connMenu, fileMenu, palette, runMenu, toolsMenu } from "./menus";
+import { openPalette } from "./palette";
 import { icon, settings } from "./settings";
 import { docGroupKey, docGroupPref, GROUP_LABEL, setDocGroupPref, sortGroupKeys, type DocGroup } from "./docgroups";
 import { profileOptions } from "./conngroups";
@@ -91,6 +92,10 @@ export class App {
   /** 접속 단추 — 프로필·상태를 보이고, 누르면 프로필 고르기·끊기 메뉴 */
   private connName = h("span", { class: "conn-name" });
   private connSub = h("span", { class: "conn-sub" });
+  /** 기준 스키마 — 접속은 그대로, 계정을 적지 않은 이름을 찾을 곳 */
+  private schemaName = h("span", { class: "schema-name" });
+  private schemaPill = h("button", { class: "schema-pill", hidden: true, onclick: () => void this.pickSchema() },
+    h("span", { class: "schema-label" }, "스키마"), this.schemaName, h("span", { class: "caret" }, "▾"));
   private connPill = h("button", { class: "conn-pill" }, h("span", { class: "conn-dot" }), this.connName, this.connSub, h("span", { class: "caret" }, "▾"));
   /** 실행 단추 묶음 (실행 중에는 중지 단추로 바뀐다) */
   private runGroup!: HTMLElement;
@@ -170,6 +175,7 @@ export class App {
       // 앱 아이콘 — 제목 표시줄이 없으니 왼쪽 위에 작게 (끌면 창이 움직인다)
       h("img", { class: "app-icon", src: appIcon, alt: "SQLStudio", title: "SQLStudio", draggable: false, ...drag }),
       this.connPill,
+      this.schemaPill,
       h("span", { class: "sep" }),
       this.runGroup, this.btn.cancel, this.btn.explain,
       this.txnGroup,
@@ -364,7 +370,7 @@ export class App {
   private async saveTabs(force = false) {
     if (this.savingTabs || !restoreEnabled() || !this.tabs.length) return;
     const active = Math.max(0, this.active ? this.tabs.indexOf(this.active) : 0);
-    const sig = [active, ...this.tabs.flatMap((t) => [t.editor.view.state.doc, t.filePath, t.dirty, t.encoding, t.conn?.profile ?? t.lastProfile, t.tag])];
+    const sig = [active, ...this.tabs.flatMap((t) => [t.editor.view.state.doc, t.filePath, t.dirty, t.encoding, t.conn?.profile ?? t.lastProfile, t.tag, t.schema])];
     if (!force && sig.length === this.savedTabsSig.length && sig.every((x, i) => x === this.savedTabsSig[i])) return;
     // 치는 동안은 쓰지 않는다 — 손을 멈추고 2초 뒤에 (모든 탭을 통째로 쓰므로 큰 문서면 무겁다).
     // 쉬지 않고 쳐도 30초에 한 번은 남긴다
@@ -374,7 +380,7 @@ export class App {
     try {
       await saveSession(active, this.tabs.map((t) => ({
         text: t.editor.text(), filePath: t.filePath, encoding: t.encoding, eol: t.eol, dirty: t.dirty,
-        cursor: t.editor.cursor(), profile: t.conn?.profile ?? t.lastProfile, used: t.used, tag: t.tag, name: t.name,
+        cursor: t.editor.cursor(), profile: t.conn?.profile ?? t.lastProfile, used: t.used, tag: t.tag, name: t.name, schema: t.schema,
       })));
       this.savedTabsSig = sig;
       this.lastSavedAt = performance.now();
@@ -410,6 +416,7 @@ export class App {
       t.eol = eol;
       t.setDirty(dirty);
       t.lastProfile = st.profile ?? null;
+      t.schema = st.schema ?? null;
       if (st.used) t.used = st.used;
       t.tag = st.tag ?? null;
       t.name = st.name ?? null;
@@ -872,11 +879,14 @@ export class App {
         const c = await api.connect(p.name, password, remember);
         if (password != null) batch?.pw.set(p.name, { password, remember });
         t.conn = { ...c, profile: p.name, at: Date.now() };
+        if (t.lastProfile !== p.name) t.schema = null;
         t.lastProfile = p.name;
         t.txnPending = false;
         t.refreshTitle();
         t.log(`접속: ${c.user}@${c.connect_string} — ${c.server_version}${c.read_only ? " (읽기 전용)" : ""}`, "ok");
         this.status(`${p.name} 접속됨`);
+        // 같은 프로필로 다시 접속했으면 고른 기준 스키마를 다시 건다 (세션 설정은 접속과 함께 사라진다)
+        if (t.schema) await this.applySchema(t, t.schema, true);
         this.refresh();
         if (t === this.active) {
           this.loadBrowser();
@@ -1087,6 +1097,7 @@ export class App {
           this.endGridEdit(t);
         }
         this.showResult(t, r);
+        this.noteSchema(t, stmt.text);
       } catch (e) {
         this.showError(t, errOf(e), stmt.text, from);
       }
@@ -1190,6 +1201,7 @@ export class App {
         t.log(`── 완료: ${s.ok}개 성공, ${s.failed}개 실패${s.stopped ? ", 중단됨" : ""}${s.txn_pending ? " — 커밋 전" : ""}`, s.failed ? "err" : "ok");
         this.status(`스크립트: ${s.ok}/${s.total} 성공`);
         if (lost) void this.recover(t, "스크립트 실행 중 DB 접속이 끊겼습니다");
+        else this.noteSchema(t, script);
         if (firstErrorLine) {
           const doc = t.editor.view.state.doc;
           const baseLine = doc.lineAt(scriptFrom).number - 1;
@@ -1476,6 +1488,52 @@ export class App {
     return { sessionId: t?.conn?.id, profile: t?.conn?.profile, sql: sql?.trim() || undefined, error: t?.lastError, tables: [...this.pickedTables] };
   }
 
+  // ── 기준 스키마 ─────────────────────────
+
+  /** 계정을 적지 않은 이름을 찾을 스키마 — 고르지 않았으면 접속 계정 */
+  ownerOf(t: Tab): string {
+    return t.schema ?? t.conn?.user ?? "";
+  }
+
+  /** 기준 스키마를 건다 (null = 접속 계정). quiet 면 실패해도 창을 띄우지 않고 접속 계정으로 둔다 */
+  async applySchema(t: Tab, schema: string | null, quiet = false) {
+    if (!t.conn) return;
+    try {
+      const r = await api.setSchema(t.conn.id, schema);
+      t.schema = r === t.conn.user ? null : r;
+      t.log(t.schema ? `기준 스키마: ${r} — 계정을 적지 않은 이름은 ${r} 에서 찾습니다` : `기준 스키마: 접속 계정 (${r})`, "ok");
+    } catch (e) {
+      t.schema = null;
+      const m = errOf(e).message;
+      t.log(`기준 스키마를 걸지 못했습니다: ${m}`, "err");
+      if (!quiet) toast(m, "error");
+    }
+    if (t === this.active) { this.refresh(); void this.loadBrowser(); }
+  }
+
+  /** 상단 '스키마' — 접속은 그대로 두고, 계정을 적지 않은 테이블을 어느 스키마에서 찾을지 고른다 */
+  async pickSchema() {
+    const t = this.active;
+    if (!t?.conn) return;
+    const me = t.conn.user;
+    const cur = this.ownerOf(t);
+    const schemas = await api.listSchemas(t.conn.id).catch(() => [] as string[]);
+    const mark = (s: string) => (s === cur ? "✓ " : "　");
+    openPalette([
+      { group: "접속 계정", label: `${mark(me)}${me}`, alias: "기본", run: () => void this.applySchema(t, null) },
+      ...schemas.filter((s) => s !== me).map((s) => ({ group: "다른 스키마", label: `${mark(s)}${s}`, run: () => void this.applySchema(t, s) })),
+    ], { placeholder: "기준 스키마 — 계정을 적지 않은 테이블을 이 스키마에서 찾습니다 (그 객체에 권한이 있어야 읽힙니다)", keepOrder: true, start: Math.max(0, cur === me ? 0 : schemas.filter((s) => s !== me).indexOf(cur) + 1) });
+  }
+
+  /** 편집기에서 직접 ALTER SESSION SET CURRENT_SCHEMA 를 실행했으면 상단 표시도 맞춘다 (마지막 것) */
+  private noteSchema(t: Tab, sql: string) {
+    const all = [...sql.matchAll(/ALTER\s+SESSION\s+SET\s+CURRENT_SCHEMA\s*=\s*"?([A-Za-z_][\w$#]*)"?/gi)];
+    const m = all[all.length - 1];
+    if (!m || !t.conn) return;
+    const s = m[0].includes('"') ? m[1] : m[1].toUpperCase();
+    if (s !== this.ownerOf(t)) void this.applySchema(t, s, true);
+  }
+
   // ── 객체 탐색기 / 자동완성 ─────────────────────────
 
   private async loadBrowser() {
@@ -1483,7 +1541,8 @@ export class App {
     if (!t?.conn) return;
     try {
       const schemas = await api.listSchemas(t.conn.id);
-      const me = t.conn.user;
+      const me = this.ownerOf(t);
+      if (!schemas.includes(me)) schemas.unshift(me);
       this.browserOwner.replaceChildren(...schemas.map((s) => h("option", { value: s, selected: s === me }, s)));
       await this.loadObjects();
     } catch (e) {
@@ -1517,7 +1576,7 @@ export class App {
         check, h("span", {}, o.name), this.browserType.value ? "" : h("small", { class: "obj-type" }, o.object_type));
       row.addEventListener("click", () => this.showObject(o));
       row.addEventListener("contextmenu", (e) => this.objectMenu(o, e));
-      row.addEventListener("dblclick", () => t?.editor.insert(o.owner === t.conn?.user ? o.name : q));
+      row.addEventListener("dblclick", () => t?.editor.insert(o.owner === this.ownerOf(t) ? o.name : q));
       frag.append(row);
     }
     if (this.browserObjs.length > 3000) frag.append(h("div", { class: "empty" }, `… ${this.browserObjs.length - 3000}개 더 (필터를 좁히세요)`));
@@ -1957,7 +2016,7 @@ export class App {
     const id = t.conn!.id;
     const type = o.object_type.toUpperCase();
     const q = `"${o.owner}"."${o.name}"`;
-    const shown = o.owner === t.conn!.user ? o.name : `${o.owner}.${o.name}`;
+    const shown = o.owner === this.ownerOf(t) ? o.name : `${o.owner}.${o.name}`;
     const insert = (text: string) => { t.editor.insert(text); t.editor.view.focus(); };
     // 컬럼·기본 키만 있으면 되는 것(팝업·SQL 만들기)은 캐시로 바로
     const withDesc = (f: (d: TableDesc) => void) => () => {
@@ -2480,6 +2539,16 @@ export class App {
     this.connPill.classList.toggle("prod", !!c?.production);
     this.connPill.classList.toggle("on", !!c);
     this.connPill.style.setProperty("--conn-color", c?.color || "");
+    this.schemaPill.hidden = !c;
+    this.schemaPill.disabled = busy;
+    if (c && t) {
+      this.schemaName.textContent = this.ownerOf(t);
+      this.schemaPill.classList.toggle("other", !!t.schema);
+      this.schemaPill.title = t.schema
+        ? `기준 스키마 ${t.schema} — 계정을 적지 않은 테이블은 ${t.schema}.이름 으로 찾습니다. 접속 계정은 ${c.user}
+누르면 바꾸기`
+        : `기준 스키마: 접속 계정 (${c.user}) — 누르면 다른 스키마를 골라 계정 없이 쓴 테이블을 그 스키마에서 찾습니다`;
+    }
     if (!busy) this.statusRight.textContent = c ? c.server_version : "";
     for (const x of this.tabs) x.refreshTitle();
   }

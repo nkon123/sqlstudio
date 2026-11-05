@@ -159,6 +159,8 @@ export const api = {
   rollback: (id: number) => invoke<void>("rollback", { id }),
   explain: (id: number, sql: string) => invoke<string[]>("explain", { id, sql }),
   analyze: (text: string, cursor: number, selection?: string, id?: number) => invoke<Analyzed>("analyze_sql", { text, cursor, selection, id }),
+  /** 계정을 적지 않은 이름을 찾을 스키마 — null 이면 접속 계정으로. 건 스키마 이름을 돌려준다 */
+  setSchema: (id: number, schema: string | null) => invoke<string>("set_schema", { id, schema }),
   listSchemas: (id: number) => invoke<string[]>("list_schemas", { id }),
   listObjects: (id: number, owner?: string, objectType?: string, nameLike?: string) =>
     invoke<ObjectEntry[]>("list_objects", { id, owner, objectType, nameLike }),

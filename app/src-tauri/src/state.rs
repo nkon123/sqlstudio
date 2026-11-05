@@ -19,6 +19,8 @@ pub struct OpenSession {
     pub txn_pending: Arc<AtomicBool>,
     /// 스크립트 실행을 멈추라는 신호
     pub stop_script: Arc<AtomicBool>,
+    /// 계정을 적지 않은 이름을 찾을 스키마 (ALTER SESSION SET CURRENT_SCHEMA). None 이면 접속 계정
+    pub schema: Arc<Mutex<Option<String>>>,
 }
 
 pub struct AppState {
@@ -90,6 +92,23 @@ impl AppState {
         let map = self.sessions.lk();
         let s = map.get(&id).ok_or_else(|| ErrView::msg("session_closed", "세션이 닫혀 있습니다"))?;
         Ok((s.session.clone(), s.txn_pending.clone(), s.stop_script.clone()))
+    }
+
+    /// 탭의 기준 스키마 — 접속 계정과 같거나 고르지 않았으면 None
+    pub fn tab_schema(&self, id: u64) -> Option<String> {
+        let map = self.sessions.lk();
+        let s = map.get(&id)?;
+        let o = s.schema.lk().clone()?;
+        (o != s.session.info().user).then_some(o)
+    }
+
+    /// 계정 없이 쓴 이름에 기준 스키마를 붙인다 (`ORDERS` → `APP.ORDERS`). 붙일 것이 없으면 None
+    pub fn qualify(&self, id: u64, name: &str) -> Option<String> {
+        let n = name.trim();
+        if n.is_empty() || n.contains('.') {
+            return None;
+        }
+        self.tab_schema(id).map(|o| format!("\"{o}\".{n}"))
     }
 
     pub fn next_id(&self) -> u64 {

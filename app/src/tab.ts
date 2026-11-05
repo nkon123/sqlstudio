@@ -45,6 +45,8 @@ export class Tab {
   conn: Conn | null = null;
   /** 마지막으로 접속했던 프로필 — 끊긴 뒤(앱을 다시 연 뒤 포함)에도 남아 '탭 모두 다시 접속' 이 쓴다 */
   lastProfile: string | null = null;
+  /** 계정을 적지 않은 이름을 찾을 스키마 (ALTER SESSION SET CURRENT_SCHEMA) — null 이면 접속 계정. 같은 프로필로 다시 접속하면 다시 건다 */
+  schema: string | null = null;
   filePath: string | null = null;
   encoding = "utf-8";
   /** 읽은 파일의 줄 끝 — 저장할 때 되돌린다 (편집기 안은 \n). CRLF 파일을 LF 로 바꿔 Git 에서 모든 줄이 바뀐 것처럼 보이지 않게 */

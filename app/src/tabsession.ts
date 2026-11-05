@@ -19,6 +19,8 @@ export interface SavedTab {
   tag?: string | null;
   /** 파일 없는 탭의 이름 (DB 에서 연 소스는 객체 이름) */
   name?: string | null;
+  /** 기준 스키마 (profile 로 다시 접속할 때) */
+  schema?: string | null;
 }
 
 interface SavedSession { v: 1; at: number; active: number; tabs: SavedTab[] }

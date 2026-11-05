@@ -232,6 +232,7 @@ pub fn run() {
             db::cancel,
             db::abandon,
             db::commit,
+            db::set_schema,
             db::rollback,
             db::explain,
             db::analyze_sql,

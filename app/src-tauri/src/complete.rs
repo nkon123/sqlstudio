@@ -283,12 +283,13 @@ pub(crate) fn hub_for(st: &AppState, id: u64) -> Result<Arc<MetaHub>, ErrView> {
 #[tauri::command]
 pub async fn complete(st: State<'_, AppState>, id: u64, text: String, cursor: usize) -> Result<Completion, ErrView> {
     let hub = hub_for(&st, id)?;
+    let schema = st.tab_schema(id);
     let cursor = cursor.min(text.len());
     let mut last = None;
     for _ in 0..3 {
         let c = {
             let cache = hub.cache.rd();
-            complete::complete(&text, cursor, &cache, LIMIT)
+            complete::complete_in(&text, cursor, &cache, LIMIT, schema.as_deref())
         };
         if c.missing.is_empty() {
             return Ok(c);

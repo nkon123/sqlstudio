@@ -244,3 +244,88 @@ pub fn schema_compare_close(run: u64) {
         r.cancel.store(true, Ordering::Relaxed);
     }
 }
+
+// ─────────────────────────────────────────────────────────────
+// 결과 비교 — 같은 조회를 다른 접속에서 (읽기 전용)
+// ─────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct OtherResult {
+    page: sqls_core::RowPage,
+    ms: u64,
+    /// "프로필 · 계정"
+    label: String,
+    /// 기준 스키마를 걸지 못했으면 그 사유 (접속 계정 기준으로 실행)
+    note: Option<String>,
+}
+
+/// 프로필마다 하나 — 비교를 여러 번 해도 다시 접속하지 않게
+fn others() -> &'static Mutex<HashMap<String, Session>> {
+    static M: OnceLock<Mutex<HashMap<String, Session>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 조회를 다른 접속(프로필)에서 읽기 전용 세션으로 실행한다. `schema` 를 주면 그 스키마 기준으로 (탭의 기준 스키마).
+/// 비밀번호를 모르면 "password_required" — 화면이 물어 password 로 다시 부른다
+#[tauri::command]
+pub async fn query_other(
+    st: State<'_, AppState>,
+    profile: String,
+    sql: String,
+    binds: Vec<(String, Option<String>)>,
+    schema: Option<String>,
+    password: Option<String>,
+    max_rows: usize,
+) -> R<OtherResult> {
+    if !sqls_core::sql::is_read_only(&sql) {
+        return Err(ErrView::msg("invalid", "다른 접속에서는 조회(SELECT)만 실행합니다"));
+    }
+    let p = st.cfg.rd().profile(&profile).cloned().ok_or_else(|| ErrView::msg("invalid", format!("접속 프로필이 없습니다: {profile}")))?;
+    let key = p.name.to_uppercase();
+    let cached = others().lk().get(&key).filter(|s| !s.is_lost() && !s.is_abandoned()).cloned();
+    let s = match cached {
+        Some(s) => s,
+        None => {
+            let typed = password.filter(|x| !x.is_empty());
+            let pw = typed
+                .clone()
+                .or_else(|| st.passwords.rd().get(&key).cloned())
+                .or_else(|| p.stored_password())
+                .ok_or_else(|| ErrView::msg("password_required", format!("{} 비밀번호를 입력하세요", p.name)))?;
+            let mut spec = compare_spec(&p, pw.clone());
+            spec.module = "SQLStudio-ResultCompare".into();
+            let s = open(spec).await.map_err(|e| match e {
+                sqls_core::Error::Db { code: 1017, .. } => ErrView::msg("password_required", format!("{} 비밀번호가 틀렸습니다 (ORA-01017)", p.name)),
+                e => e.into(),
+            })?;
+            if typed.is_some() {
+                st.passwords.wr().insert(key.clone(), pw);
+            }
+            if let Some(old) = others().lk().insert(key.clone(), s.clone()) {
+                old.close();
+            }
+            s
+        }
+    };
+    // 기준 스키마 — 없거나 못 걸면 접속 계정 (앞에서 건 것이 남지 않게 늘 다시 건다)
+    let me = s.info().user.clone();
+    let want = schema.map(|x| x.trim().to_uppercase()).filter(|x| !x.is_empty()).unwrap_or_else(|| me.clone());
+    let mut note = None;
+    if let Err(e) = s.set_current_schema(&want).await {
+        note = Some(format!("{}: 기준 스키마 {want} 를 걸지 못해 접속 계정({me}) 기준으로 실행했습니다 — {e}", p.name));
+        let _ = s.set_current_schema(&me).await;
+    }
+    let started = std::time::Instant::now();
+    let mut page = s.query(&sql, binds, max_rows.clamp(1, 200_000)).await?;
+    let ms = started.elapsed().as_millis() as u64;
+    // 결과 그리드와 같은 모양으로 (긴 글자는 4000자에서 자른다) — 그래야 같은 값이 같게 나온다
+    for r in page.rows.iter_mut() {
+        for c in r.iter_mut() {
+            if let Some(v) = c.take() {
+                *c = Some(sqls_core::session::truncate_chars(v, 4000));
+            }
+        }
+    }
+    tracing::info!("결과 비교: {} 에서 조회 {}행 ({ms}ms)", p.name, page.rows.len());
+    Ok(OtherResult { page, ms, label: format!("{} · {}", p.name, want), note })
+}

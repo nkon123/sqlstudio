@@ -26,7 +26,7 @@ import { showMenu, type MenuItem } from "./ctxmenu";
 import { showUsage } from "./usage";
 import { showColumnSource } from "./colsource";
 import type { TraceHooks } from "./valuetrace";
-import { showDiff, type Snapshot } from "./resultdiff";
+import type { Snapshot } from "./resultdiff";
 import { openCopyData } from "./copydata";
 import { historyPanel, openHistory } from "./history";
 import { outlinePanel } from "./outline";
@@ -42,6 +42,7 @@ import { Tab } from "./tab";
 import { SideLayout } from "./layout";
 import { connMenu, fileMenu, palette, runMenu, toolsMenu } from "./menus";
 import { openPalette } from "./palette";
+import { guessTable } from "./export-text";
 import { docGroupKey, docGroupPref, GROUP_LABEL, setDocGroupPref, sortGroupKeys, type DocGroup } from "./docgroups";
 import { profileOptions } from "./conngroups";
 import { editToSelect } from "./editcmd";
@@ -1121,7 +1122,7 @@ export class App {
           t.lastQuery = { sql: stmt.text, binds };
           this.endGridEdit(t);
         }
-        this.showResult(t, r);
+        this.showResult(t, r, stmt.text);
         perfLog(r, t0, t1);
         this.noteSchema(t, stmt.text);
       } catch (e) {
@@ -1130,12 +1131,16 @@ export class App {
     });
   }
 
-  private showResult(t: Tab, r: ExecView) {
+  private showResult(t: Tab, r: ExecView, sql = "") {
     t.txnPending = r.txn_pending;
     const ms = `${r.elapsed_ms.toLocaleString()} ms`;
     switch (r.outcome.type) {
       case "rows":
+        // 지금 결과는 직전 결과로 — 새 결과와 자동으로 비교한다
+        t.rememberResult();
         t.grid.setPage(r.outcome);
+        t.resultShown(sql);
+        void this.resolvePk(t, sql);
         this.loadNotes(t);
         t.show("result");
         if (r.outcome.rows.length) t.revealResults();
@@ -1161,6 +1166,17 @@ export class App {
       t.show("output");
     }
     this.refresh();
+  }
+
+  /** 조회한 테이블(첫 FROM)의 기본 키 — 결과 비교의 키 열로. 캐시에 없으면 DB 에 묻는다 */
+  private async resolvePk(t: Tab, sql: string) {
+    const table = guessTable(sql);
+    const id = t.conn?.id;
+    if (!table || id == null) return;
+    try {
+      const d = (await api.describeFast(id, table)) ?? (await api.describe(id, table));
+      if (d.primary_key?.length) t.setResultPk(d.primary_key);
+    } catch { /* 키 없이 — 값이 겹치지 않는 열로 맞춘다 */ }
   }
 
   private showError(t: Tab, err: ErrView, sqlText: string, stmtFrom: number) {
@@ -1743,7 +1759,7 @@ export class App {
       try {
         const r = await api.execute(t.conn!.id, sql, [], false);
         if (r.outcome.type === "rows") { t.lastQuery = { sql, binds: [] }; this.endGridEdit(t); }
-        this.showResult(t, r);
+        this.showResult(t, r, sql);
       } catch (e) {
         this.showError(t, errOf(e), sql, 0);
       }
@@ -2212,18 +2228,65 @@ export class App {
 
   compareMenu(t: Tab, e: MouseEvent) {
     const b = this.compareBase;
+    const cur = () => t.captureResult();
+    const recent: MenuItem[] = t.recent.map((s, i) => ({
+      label: `${i ? "이전" : "직전"} 결과와 — ${s.label}`, hint: `${s.rows.length.toLocaleString()}행`,
+      run: () => { const now = cur(); if (now) t.openDiff(s, now); else toast("비교할 지금 결과가 없습니다", "info"); },
+    }));
+    const q = t.lastQuery;
+    const others = this.profiles.filter((p) => p.name !== t.conn?.profile);
     showMenu(e.clientX, e.clientY, [
-      { title: b ? `기준: ${b.label} · ${b.rows.length.toLocaleString()}행` : "담아 둔 기준이 없습니다" },
-      { label: "이 결과를 기준으로 담기", hint: "고치기 전 · 다른 DB", run: () => void t.snapshot().then((s) => {
+      { title: "결과 비교" },
+      ...(recent.length ? recent : [{ label: "직전 결과 없음 — 다시 실행하면 자동으로 비교합니다", disabled: true }]),
+      { sep: true },
+      { label: "다른 접속에서 실행해 비교", hint: "같은 쿼리 · 읽기 전용", disabled: !q || !t.conn || !others.length,
+        sub: others.map((p): MenuItem => ({ label: p.name, hint: `${p.user}${p.production ? " · 운영" : ""}`, run: () => void this.compareOther(t, p.name) })) },
+      { sep: true },
+      { title: b ? `담아 둔 기준: ${b.label} · ${b.rows.length.toLocaleString()}행` : "담아 둔 기준 없음 — 다른 탭의 결과와 비교할 때" },
+      { label: "이 결과를 기준으로 담기", hint: "다른 탭에서 비교", run: () => void t.snapshot().then((s) => {
         if (!s) return;
         this.compareBase = s;
-        toast(`기준으로 담았습니다 (${s.rows.length.toLocaleString()}행) — 쿼리를 고치거나 다른 접속에서 실행한 뒤 '기준과 비교'`, "ok", 5000);
+        toast(`기준으로 담았습니다 (${s.rows.length.toLocaleString()}행) — 다른 탭·접속의 결과에서 '기준과 비교'`, "ok", 5000);
       }) },
-      { label: "기준과 비교", hint: b ? "지금 결과 ↔ 기준" : "", disabled: !b, run: () => void t.snapshot().then((s) => { if (s && b) showDiff(b, s); }) },
-      { sep: true },
+      { label: "기준과 비교", hint: b ? "지금 결과 ↔ 기준" : "", disabled: !b, run: () => void t.snapshot().then((s) => { if (s && b) t.openDiff(b, s); }) },
       { label: "기준 비우기", disabled: !b, run: () => { this.compareBase = null; } },
     ]);
   }
+
+  /** 지금 결과의 쿼리를 다른 접속에서 (읽기 전용) 실행해 결과 자리에서 비교 — 기준 = 이 탭, 지금 = 다른 접속 */
+  private async compareOther(t: Tab, profile: string) {
+    const q = t.lastQuery;
+    const base = t.captureResult();
+    if (!q || !base) return toast("먼저 조회하세요", "info");
+    const p = this.profiles.find((x) => x.name === profile);
+    if (!p) return;
+    // 이 탭에서 가져온 만큼 (최소 1000행) — 서버에 더 남았으면 그만큼만 맞춰 본다
+    const max = Math.max(1000, base.rows.length);
+    let password: string | null = null;
+    this.status(`${profile} 에서 같은 쿼리 실행 중…`);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const r = await api.queryOther(profile, q.sql, q.binds, t.schema, password, max);
+        const other = { label: r.label, columns: r.page.columns, rows: r.page.rows, partial: r.page.has_more, pk: base.pk };
+        if (r.note) toast(r.note, "info", 8000);
+        this.status(`${profile}: ${r.page.rows.length.toLocaleString()}행 · ${r.ms.toLocaleString()} ms`);
+        t.openDiff({ ...base, label: `${t.conn?.profile ?? "이 탭"} (${base.label})` }, other);
+        return;
+      } catch (e) {
+        const err = errOf(e);
+        if (err.kind === "password_required") {
+          if (attempt) toast(err.message, "error");
+          const pw = await passwordBox(p.name, p.user);
+          if (!pw) { this.status("취소"); return; }
+          password = pw.password;
+          continue;
+        }
+        this.status("다른 접속 실행 실패");
+        return void toast(`${profile}: ${err.message}`, "error", 8000);
+      }
+    }
+  }
+
 
   private showValueSource(t: Tab, col: number, column: Column) {
     const q = t.lastQuery;
@@ -2367,7 +2430,7 @@ export class App {
     await this.running(t, async () => {
       try {
         const r = await api.execute(t.conn!.id, sql, [], false);
-        this.showResult(t, r);
+        this.showResult(t, r, sql);
       } catch (e) {
         this.showError(t, errOf(e), sql, 0);
       }

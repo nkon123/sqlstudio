@@ -1190,7 +1190,8 @@ fn wrap_columns(sql_text: &str, cols: &[(String, Option<String>)]) -> Option<Str
 )", list.join(", ")))
 }
 
-fn truncate_chars(s: String, max: usize) -> String {
+/// 셀 글자를 `max` 자로 (넘으면 끝에 …) — 결과 그리드와 같은 모양으로 맞출 때
+pub fn truncate_chars(s: String, max: usize) -> String {
     if s.len() <= max {
         return s;
     }

@@ -280,6 +280,7 @@ pub fn run() {
             analyze::analysis_discard_import,
             analyze::analysis_merge_set,
             analyze::analysis_remove_set,
+            schemacmp::query_other,
             schemacmp::schema_compare_start,
             schemacmp::schema_compare_cancel,
             schemacmp::schema_compare_detail,

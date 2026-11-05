@@ -325,6 +325,16 @@ const DB: Record<string, (a: Args) => unknown> = {
     (window as unknown as { __mockSaves?: number[] }).__mockSaves = [...((window as unknown as { __mockSaves?: number[] }).__mockSaves ?? []), Object.keys(a.texts as object).length];
     return null;
   },
+  // 결과 비교: 다른 접속에서 같은 쿼리 — 운영 DB 처럼 조금 다르게 (한 행 빠지고, 한 칸 바뀌고)
+  query_other: async (a) => {
+    await sleep(300);
+    const c = query(String(a.sql));
+    const p = page(c, Number(a.maxRows) || 1000);
+    const rows = p.rows.map((r) => r.slice());
+    if (rows.length > 3) rows.splice(2, 1);
+    if (rows.length && rows[0].length > 1) { const k = rows[0].length - 1; rows[0][k] = `${rows[0][k] ?? ""}*`; }
+    return { page: { ...p, rows }, ms: 42, label: `${a.profile} · SCOTT`, note: null };
+  },
   list_schemas: () => ["SCOTT", "HR", "ERP_OWNER"],
   set_schema: (a) => String((a.schema as string | null) ?? "SCOTT").toUpperCase(),
   list_objects: (a) => {

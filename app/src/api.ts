@@ -157,6 +157,9 @@ export const api = {
   abandon: (id: number) => invoke<void>("abandon", { id }),
   commit: (id: number, confirmed = false) => invoke<void>("commit", { id, confirmed }),
   rollback: (id: number) => invoke<void>("rollback", { id }),
+  /** 같은 조회를 다른 접속(프로필)에서 읽기 전용으로 — 결과 비교. schema 는 탭의 기준 스키마 */
+  queryOther: (profile: string, sql: string, binds: [string, string | null][], schema: string | null, password: string | null, maxRows: number) =>
+    invoke<{ page: RowPage; ms: number; label: string; note: string | null }>("query_other", { profile, sql, binds, schema, password, maxRows }),
   explain: (id: number, sql: string) => invoke<string[]>("explain", { id, sql }),
   analyze: (text: string, cursor: number, selection?: string, id?: number) => invoke<Analyzed>("analyze_sql", { text, cursor, selection, id }),
   /** 계정을 적지 않은 이름을 찾을 스키마 — null 이면 접속 계정으로. 건 스키마 이름을 돌려준다 */

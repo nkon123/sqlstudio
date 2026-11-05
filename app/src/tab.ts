@@ -10,7 +10,7 @@ import { SqlEditor } from "./editor";
 import { ResultGrid } from "./grid";
 import { guessTable, toCsv as toCsvText, toInserts as toInsertsText, unsupported as unsupportedCols } from "./export-text";
 import { SchemaCompareView } from "./schemacmp";
-import { type Snapshot } from "./resultdiff";
+import { diffView, quickDiff, showDiff, type Snapshot } from "./resultdiff";
 import { field, h, modal, toast } from "./ui";
 import type { App } from "./main";
 import { dragSplit } from "./layout";
@@ -47,6 +47,16 @@ export class Tab {
   lastProfile: string | null = null;
   /** 계정을 적지 않은 이름을 찾을 스키마 (ALTER SESSION SET CURRENT_SCHEMA) — null 이면 접속 계정. 같은 프로필로 다시 접속하면 다시 건다 */
   schema: string | null = null;
+  /** 직전 결과들 (새것이 앞, 3개까지) — 다시 실행하면 자동으로 비교한다 */
+  recent: Snapshot[] = [];
+  /** 지금 결과의 이름과 조회한 테이블의 기본 키 (키 열 자동 선택) */
+  private curLabel = "";
+  private curPk: string[] | undefined;
+  /** 결과 위의 '직전과 비교' 표시 */
+  private diffBadge = h("button", { class: "small rdiff-badge", hidden: true });
+  /** 결과 영역 안의 비교 화면 (그리드 자리에) */
+  private diffHost = h("div", { class: "rdiff-host", hidden: true });
+  private badgeTimer = 0;
   /** 되살린 뒤 아직 보인 적이 없다 — 처음 보일 때 커서 쪽으로 스크롤 */
   revealCursor = false;
   /** 자동 저장의 내용 파일 이름 (tabs/<key>.sql)과 마지막으로 쓴 문서 — 같으면 내용은 다시 쓰지 않는다 */
@@ -199,7 +209,7 @@ export class Tab {
     this.discardBtn.onclick = () => this.grid.discardChanges();
     this.addRowBtn.onclick = () => this.grid.addRow();
     this.delRowBtn.onclick = () => this.grid.toggleDeleteSelected();
-    const gridPane = h("div", { class: "pane result" }, this.grid.el);
+    const gridPane = h("div", { class: "pane result" }, this.grid.el, this.diffHost);
     // 내보내기: 엑셀 · CSV · INSERT 문 (보이는 열·정렬·거르기 그대로)
     const exportSel = h("select", { class: "small export-sel", title: "결과 내보내기 — 보이는 열·정렬·거르기 그대로" },
       h("option", { value: "" }, "내보내기…"), h("option", { value: "xlsx" }, "엑셀 (.xlsx)"), h("option", { value: "csv" }, "CSV 파일"),
@@ -214,11 +224,12 @@ export class Tab {
     };
     const bottom = h("section", { class: "bottom" },
       h("nav", { class: "pane-tabs" }, btn("result", "결과"), btn("output", "출력"), btn("plan", "실행계획"), btn("desc", "구조"),
+        // 비교는 앞에 — 줄이 좁아도 보이게 (다시 실행하면 옆에 차이가 나온다)
+        h("button", { class: "small", title: "결과 비교 — 직전 결과 · 다른 접속에서 같은 쿼리 · 담아 둔 기준과 행·열 단위로 (다시 실행하면 옆에 차이가 자동으로 나온다)", onclick: (e: Event) => app.compareMenu(this, e as MouseEvent) }, "비교 ▾"), this.diffBadge,
         this.filterIn, this.notesBtn, this.editBtn, this.addRowBtn, this.delRowBtn, this.applyBtn, this.discardBtn,
         h("span", { class: "spacer" }), this.gridStatus,
         h("button", { class: "small", title: "가져온 행을 CSV 로 복사", onclick: () => this.copyCsv() }, "CSV 복사"),
         exportSel,
-        h("button", { class: "small", title: "결과 비교 — 이 결과를 기준으로 담고, 고친 쿼리·다른 DB 의 결과와 행·열 단위로 비교", onclick: (e: Event) => app.compareMenu(this, e as MouseEvent) }, "비교"),
         h("span", { class: "pane-size" },
           h("button", { class: "small", title: "결과 영역 키우기 (에디터를 줄인다) — 경계선을 끌어도 된다", onclick: () => this.resizePane("grow") }, "▲"),
           h("button", { class: "small", title: "결과 영역 줄이기", onclick: () => this.resizePane("shrink") }, "▼"),
@@ -380,6 +391,79 @@ export class Tab {
     this.output.scrollTop = this.output.scrollHeight;
   }
 
+  /** 지금 결과를 그대로 (가져온 행까지, 묻지 않는다). 결과가 없으면 null */
+  captureResult(): Snapshot | null {
+    if (!this.grid.columnAt(0)) return null;
+    const d = this.grid.exportData();
+    return { label: this.curLabel || "지금 결과", columns: d.columns, rows: d.rows, partial: this.grid.hasMoreRows(), pk: this.curPk };
+  }
+
+  /** 새 결과를 띄우기 전에 — 지금 결과를 직전 결과로 기억한다 (아주 큰 결과는 메모리 때문에 빼고) */
+  rememberResult() {
+    const s = this.captureResult();
+    if (s && s.rows.length <= 200_000) this.recent = [s, ...this.recent].slice(0, 3);
+  }
+
+  /** 새 결과를 띄운 뒤 — 이름을 붙이고 직전 결과와 자동 비교 */
+  resultShown(sql: string) {
+    const one = sql.replace(/\s+/g, " ").trim();
+    this.curLabel = `${new Date().toTimeString().slice(0, 8)} ${one.length > 40 ? `${one.slice(0, 40)}…` : one}`;
+    this.curPk = undefined;
+    this.closeDiff();
+    this.updateBadge();
+  }
+
+  /** 조회한 테이블의 기본 키를 알게 되면 — 키 열을 그것으로 다시 맞춘다 */
+  setResultPk(pk: string[]) {
+    this.curPk = pk;
+    this.updateBadge();
+  }
+
+  /** '직전과 ~5 +2 −1' — 같은 모양의 결과일 때만 (사이에 다른 쿼리를 돌렸으면 그 앞 결과와). 그리기를 막지 않게 뒤에서 */
+  private updateBadge() {
+    clearTimeout(this.badgeTimer);
+    this.diffBadge.hidden = true;
+    if (!this.recent.length) return;
+    this.badgeTimer = window.setTimeout(() => {
+      const cur = this.captureResult();
+      if (!cur) return;
+      let prev: Snapshot | undefined, d: ReturnType<typeof quickDiff> = null, at = 0;
+      for (const [i, s] of this.recent.entries()) {
+        d = quickDiff(s, cur);
+        if (d) { prev = s; at = i; break; }
+      }
+      if (!prev || !d) return;
+      const c = d.counts;
+      const same = !c.chg && !c.add && !c.del;
+      const what = at ? "이전과" : "직전과";
+      this.diffBadge.textContent = same ? `${what} 같음` : `${what} ${[c.chg && `~${c.chg.toLocaleString()}`, c.add && `+${c.add.toLocaleString()}`, c.del && `−${c.del.toLocaleString()}`].filter(Boolean).join(" ")}`;
+      this.diffBadge.classList.toggle("same", same);
+      this.diffBadge.title = `${at ? "이전" : "직전"} 결과(${prev.label})와 비교 — 변경 ${c.chg} · 추가 ${c.add} · 삭제 ${c.del}${d.key.length ? ` (키 ${d.key.join(", ")})` : " (키 없음 — 행 전체로 맞춤)"}\n누르면 결과 자리에 비교를 연다`;
+      const base = prev;
+      this.diffBadge.onclick = () => { const now = this.captureResult(); if (now) this.openDiff(base, now); };
+      this.diffBadge.hidden = false;
+    }, 30);
+  }
+
+  /** 결과 자리에 비교 화면을 연다 (a = 기준, b = 지금). '✕ 결과로' 로 돌아간다 */
+  openDiff(a: Snapshot, b: Snapshot) {
+    const back = h("button", { class: "small", title: "결과 그리드로 돌아간다 (Esc)", onclick: () => this.closeDiff() }, "✕ 결과로");
+    const big = h("button", { class: "small", title: "큰 창으로", onclick: () => showDiff(a, b) }, "창으로");
+    this.diffHost.replaceChildren(diffView(a, b, [big, back]));
+    this.diffHost.onkeydown = (e) => { if (e.key === "Escape") { e.stopPropagation(); this.closeDiff(); } };
+    this.grid.el.hidden = true;
+    this.diffHost.hidden = false;
+    this.show("result");
+    this.revealResults();
+  }
+
+  closeDiff() {
+    if (this.diffHost.hidden) return;
+    this.diffHost.hidden = true;
+    this.diffHost.replaceChildren();
+    this.grid.el.hidden = false;
+  }
+
   /** 비교용으로 지금 결과를 담는다 (보이는 열·정렬·거르기 그대로). 서버에 행이 남았으면 끝까지 가져올지 묻는다 */
   async snapshot(): Promise<Snapshot | null> {
     if (!this.grid.columnAt(0)) {
@@ -410,7 +494,7 @@ export class Tab {
       }
     }
     const d = this.grid.exportData();
-    return { label: `${this.title()} ${new Date().toTimeString().slice(0, 8)}`, columns: d.columns, rows: d.rows, partial: this.grid.hasMoreRows() };
+    return { label: `${this.title()} ${new Date().toTimeString().slice(0, 8)}`, columns: d.columns, rows: d.rows, partial: this.grid.hasMoreRows(), pk: this.curPk };
   }
 
   /** 결과 내보내기: 엑셀 · CSV 파일 · INSERT 문(새 탭 / 파일). 보이는 열·정렬·거르기 그대로 */

@@ -1,9 +1,10 @@
 // Oracle 구문 강조 — CodeMirror 의 PLSQL 방언에 빠진 키워드(MERGE, MATCHED, PIVOT …)를 더하고
 // 내장 함수(DECODE, NVL …)를 함수 색으로 칠한다. 자동완성의 함수 목록은 Rust(sqls-core::complete)에 따로 있다.
 
-import { PLSQL, SQLDialect } from "@codemirror/lang-sql";
-import { HighlightStyle } from "@codemirror/language";
+import { PLSQL, SQLDialect, sql, type SQLConfig } from "@codemirror/lang-sql";
+import { foldNodeProp, HighlightStyle, LanguageSupport, LRLanguage } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
+import { ExternalTokenizer, type InputStream, type LRParser, type Stack } from "@lezer/lr";
 
 /** PLSQL 방언에 없는 Oracle 키워드 */
 const EXTRA_KEYWORDS = [
@@ -43,6 +44,37 @@ export const ORACLE = SQLDialect.define({
   keywords: `${PLSQL.spec.keywords ?? ""} ${EXTRA_KEYWORDS}`,
   builtin: `${PLSQL.spec.builtin ?? ""} ${FUNCTIONS}`,
 });
+
+// 블록 주석은 Oracle 처럼 처음 나오는 "*/" 에서 끝낸다.
+// CodeMirror 는 주석 안의 "/*" 를 중첩으로 세서, "/*-- 머리말 /* 메모 */" 뒤 코드를 모두 주석으로 칠한다.
+// 주석만 가로채고 나머지 낱말은 원래 토크나이저에 맡긴다
+function oracleLanguage(base: LRLanguage): LRLanguage {
+  const parser = base.parser as LRParser & { tokenizers?: readonly unknown[] };
+  // 내부 필드(tokenizers, token)에 기댄다 — 바뀌면 원래 언어를 그대로 쓴다
+  const orig = parser.tokenizers?.find((x) => x instanceof ExternalTokenizer) as { token?: (input: InputStream, stack: Stack) => void } | undefined;
+  const comment = parser.nodeSet.types.find((x) => x.name === "BlockComment")?.id;
+  const token = orig?.token;
+  if (!orig || typeof token !== "function" || comment == null) return base;
+  const tokens = new ExternalTokenizer((input, stack) => {
+    if (input.peek(0) !== 47 /* / */ || input.peek(1) !== 42 /* * */) return token(input, stack);
+    input.advance(2);
+    while (input.peek(0) >= 0 && !(input.peek(0) === 42 && input.peek(1) === 47)) input.advance();
+    if (input.peek(0) >= 0) input.advance(2);
+    input.acceptToken(comment);
+  });
+  return base.configure({
+    tokenizers: [{ from: orig as ExternalTokenizer, to: tokens }],
+    // ; 로 끊은 "문장" 접기는 PL/SQL 에서 엉뚱하다 — 블록 접기는 codenav 가 한다 (주석 접기는 둔다)
+    props: [foldNodeProp.add({ Statement: () => null })],
+  });
+}
+
+const ORACLE_LANG = oracleLanguage(ORACLE.language);
+
+/** 편집기·디버거·비교 화면이 함께 쓰는 Oracle SQL 언어 */
+export function oracleSql(config: Omit<SQLConfig, "dialect"> = {}): LanguageSupport {
+  return new LanguageSupport(ORACLE_LANG, sql({ ...config, dialect: ORACLE }).support);
+}
 
 /** 내장 함수(builtin) 색 — 기본 강조에는 없다 */
 export const oracleHighlight = HighlightStyle.define([

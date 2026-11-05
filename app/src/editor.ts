@@ -9,19 +9,21 @@
 //   Ctrl+]           짝 괄호로 (감싼 괄호의 끝 ↔ 처음)
 //   Ctrl+Shift+]     괄호 안쪽 선택 (넓힌 뒤면 한 겹 안쪽으로) · Ctrl+Shift+[ 바깥 괄호 안쪽으로 넓히기
 //   Ctrl+Alt+] [     같은 높이의 다음·이전 괄호 안쪽으로
+//   Ctrl+클릭 · F12  정의로 이동 (문서 안, 없으면 DB 의 테이블·프로시저·패키지)
+//   Ctrl+Shift+O     구조 보기 · Alt+← → 커서 뒤로·앞으로 · Ctrl+Shift+- = 블록 접기·펴기 (codenav.ts)
 //
 // 여러 곳 편집 (열 편집):
 //   Alt+드래그            사각형(열) 선택
 //   Alt+Shift+방향키      키보드로 사각형 선택
-//   Ctrl+클릭             커서 추가 · Ctrl+D 같은 단어 하나 더 선택 · Esc 커서 하나로
+//   Ctrl+클릭(빈 곳) · Ctrl+Alt+클릭  커서 추가 · Ctrl+D 같은 단어 하나 더 선택 · Esc 커서 하나로
 
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, startCompletion, type CompletionSource } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab, toggleComment } from "@codemirror/commands";
-import { sql } from "@codemirror/lang-sql";
-import { ORACLE, oracleHighlight } from "./oracle-dialect";
+import { oracleSql, oracleHighlight } from "./oracle-dialect";
 import { snippetSource } from "./snippets";
 import { quickMenu } from "./quickmenu";
 import { gotoMatchingParen, parenHighlight, parenSelect } from "./brackets";
+import { codeNav, nameAt, foldUnits, foldCode, navBack, navForward, navReset, openOutline, unfoldAll, unfoldCode } from "./codenav";
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import type { Command } from "@codemirror/view";
@@ -91,6 +93,8 @@ export interface EditorActions {
   describe: () => void;
   /** F8 — SQL 실행 이력 */
   history: () => void;
+  /** Ctrl+클릭 · F12 — pos 의 이름이 정의된 곳으로 (문서 안, 없으면 DB 객체) */
+  gotoDefinition?: (pos: number) => void;
   /** 글이 바뀜 — 치기·붙여 넣기·잘라내기·되돌리기·끌어 놓기·포맷 모두 (파일을 불러와 바꾼 것은 아니다) */
   edited?: () => void;
 }
@@ -184,6 +188,15 @@ export class SqlEditor {
           // Ctrl+Alt+글자 — Windows 에서는 AltGr 로 보고 한글 입력 상태의 키(ㅣ)를 영문(L)으로 바꿔 찾지 않는다 (CodeMirror).
           // 그래서 키맵에 두면 한/영이 '한글' 일 때 먹지 않는다 — 물리 키로 직접 받는다
           Prec.highest(EditorView.domEventHandlers({
+            // Ctrl+클릭: 이름 위면 정의로 (빈 곳이면 기본대로 커서 추가, 이름 위에 커서를 더하려면 Ctrl+Alt+클릭)
+            mousedown: (e, view) => {
+              if (!e.ctrlKey || e.altKey || e.shiftKey || e.metaKey || e.button !== 0 || !actions.gotoDefinition) return false;
+              const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+              if (pos == null || !nameAt(view.state, pos)) return false;
+              e.preventDefault();
+              actions.gotoDefinition(pos);
+              return true;
+            },
             keydown: (e, view) => {
               if (!(e.ctrlKey && e.altKey) || e.shiftKey || e.metaKey) return false;
               const f = e.code === "KeyL" ? () => actions.wrapList() : e.code === "KeyU" ? () => changeCase("lower")(view) : null;
@@ -209,8 +222,9 @@ export class SqlEditor {
           }),
           // 컬럼 후보에서 → — 구절·타입에 맞는 꼴(= '' · IS NULL …)
           quickMenu(),
-          sql({ dialect: ORACLE, upperCaseKeywords: true }),
+          oracleSql({ upperCaseKeywords: true }),
           marks,
+          codeNav,
           autoFormatExtension(),
           EditorView.updateListener.of((u) => {
             if (u.docChanged && !u.transactions.some((tr) => tr.annotation(loaded))) actions.edited?.();
@@ -231,6 +245,7 @@ export class SqlEditor {
             { key: "Ctrl-Alt-l", mac: "Cmd-Alt-l", run: run(actions.wrapList), preventDefault: true },
             { key: "Ctrl-Shift-f", mac: "Cmd-Shift-f", run: run(actions.format), preventDefault: true },
             { key: "F4", run: run(actions.describe), preventDefault: true },
+            { key: "F12", run: (v) => { actions.gotoDefinition?.(v.state.selection.main.head); return true; }, preventDefault: true },
             { key: "F8", run: run(actions.history), preventDefault: true },
             { key: "Alt-Shift-ArrowUp", run: blockMove(-1, 0), preventDefault: true },
             { key: "Alt-Shift-ArrowDown", run: blockMove(1, 0), preventDefault: true },
@@ -238,6 +253,13 @@ export class SqlEditor {
             { key: "Alt-Shift-ArrowRight", run: blockMove(0, 1), preventDefault: true },
             { key: "Ctrl-Space", run: startCompletion },
             { key: "Mod-]", run: gotoMatchingParen, preventDefault: true },
+            { key: "Ctrl-Shift-o", mac: "Cmd-Shift-o", run: openOutline, preventDefault: true },
+            { key: "Alt-ArrowLeft", run: navBack, preventDefault: true },
+            { key: "Alt-ArrowRight", run: navForward, preventDefault: true },
+            { key: "Ctrl-Shift--", run: foldCode, preventDefault: true },
+            { key: "Ctrl-Shift-=", run: unfoldCode, preventDefault: true },
+            { key: "Ctrl-Alt--", run: foldUnits, preventDefault: true },
+            { key: "Ctrl-Alt-=", run: unfoldAll, preventDefault: true },
             ...closeBracketsKeymap,
             ...completionKeymap,
             ...searchKeymap,
@@ -256,7 +278,7 @@ export class SqlEditor {
   }
 
   setText(t: string) {
-    this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: t }, annotations: loaded.of(true) });
+    this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: t }, annotations: [loaded.of(true), navReset.of(true)] });
   }
 
   cursor() {
@@ -323,5 +345,12 @@ export class SqlEditor {
 
   focus() {
     this.view.focus();
+  }
+
+  /** 코드 탐색 — 명령 검색에서 */
+  nav(what: "outline" | "back" | "forward" | "foldAll" | "unfoldAll") {
+    const f = { outline: openOutline, back: navBack, forward: navForward, foldAll: foldUnits, unfoldAll }[what];
+    this.view.focus();
+    f(this.view);
   }
 }

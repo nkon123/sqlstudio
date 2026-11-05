@@ -54,6 +54,8 @@ export class Tab {
   used = Date.now();
   /** 태그 (한 문서에 하나) — 왼쪽 목록을 태그로 묶을 때 */
   tag: string | null = null;
+  /** DB 에서 연 코드 소스 ("접속|OWNER.NAME|종류") — 같은 것을 다시 열면 이 탭으로 */
+  sourceKey: string | null = null;
   txnPending = false;
   /** 끊긴 접속을 다시 여는 중 */
   recovering = false;
@@ -223,6 +225,7 @@ export class Tab {
       format: () => app.formatSql(),
       wrapList: () => void app.wrapSelectList(),
       describe: () => app.describeAtCursor(),
+      gotoDefinition: (pos) => void app.gotoDefinition(this, pos),
       history: () => app.showHistory(),
       // 붙여 넣기·되돌리기처럼 DOM input 이 나지 않는 편집도 — 탭의 ● (저장하지 않은 편집)
       edited: () => { this.setDirty(true); this.refreshSub(); app.docTouched(this); },

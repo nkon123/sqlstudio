@@ -7,6 +7,7 @@ import type { Channel } from "@tauri-apps/api/core";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { byteToUtf16, utf16ToByte, type Column, type CompletionItem, type RowPage, type ScriptEvent, type Statement, type StmtKind } from "../api";
 import { ddlOf, findTable, OTHER_OBJECTS, TABLES } from "./data";
+import { mockPlsql } from "./plsql";
 
 type Args = Record<string, unknown>;
 const fail = (message: string, kind = "mock") => { throw { kind, message }; };
@@ -307,9 +308,11 @@ const DB: Record<string, (a: Args) => unknown> = {
   count_rows: (a) => ({ rows: String(findTable(/\bFROM\s+([\w$#."]+)/i.exec(a.sql as string)?.[1] ?? "")?.count ?? 1), elapsed_ms: 3 }),
   list_schemas: () => ["SCOTT", "HR"],
   list_objects: (a) => {
-    const like = ((a.nameLike as string | undefined) ?? "").replace(/%/g, "").toUpperCase();
+    // LIKE 의 \_ · \% 는 글자 그대로
+    const like = ((a.nameLike as string | undefined) ?? "").replace(/\\([_%\\])|%/g, (_, c) => c ?? "").toUpperCase();
+    const owner = (a.owner as string | undefined)?.toUpperCase();
     const all = [...Object.values(TABLES).map((t) => ({ owner: t.desc.owner, name: t.desc.name, object_type: "TABLE" })), ...OTHER_OBJECTS];
-    return all.filter((o) => (!a.objectType || o.object_type === a.objectType) && (!like || o.name.includes(like)))
+    return all.filter((o) => (!a.objectType || o.object_type === a.objectType) && (!owner || o.owner === owner) && (!like || o.name.includes(like)))
       .map((o) => ({ ...o, status: "VALID", last_ddl_time: "2026-10-01 03:00:00" }));
   },
   describe: async (a) => { await sleep(80); const t = findTable(a.name as string); if (!t) fail(`'${a.name}' 를 찾지 못했습니다 (가짜 모드)`, "not_found"); return t!.desc; },
@@ -329,6 +332,8 @@ const DB: Record<string, (a: Args) => unknown> = {
     return { object: `SCOTT.${n}`, used_by: by, uses };
   },
   get_ddl: (a) => {
+    const code = mockPlsql(String(a.objectType ?? ""), String(a.name ?? ""));
+    if (code) return code;
     // 흐름도의 가짜 패키지 — 줄 번호가 보이게
     if (String(a.name).includes("PKG_SAL")) return `\n  CREATE OR REPLACE PACKAGE BODY "SCOTT"."PKG_SAL" AS\n${Array.from({ length: 39 }, (_, i) => `  -- ${i + 2}행`).join("\n")}`;
     const t = findTable(a.name as string); return t ? ddlOf(t.desc) : `-- (가짜 모드) ${a.objectType} ${a.name} 의 소스는 없습니다`; },
@@ -623,7 +628,7 @@ const MOCK_UNIT = {
 
 function banner(where: string) {
   const b = document.createElement("div");
-  b.textContent = `가짜 DB 모드 (${where}) — 테이블 EMP · DEPT · ORDERS · ORDER_ITEMS · WIDE_LOG(열 150)`;
+  b.textContent = `가짜 DB 모드 (${where}) — 테이블 EMP · DEPT · ORDERS · ORDER_ITEMS · WIDE_LOG(열 150) · PL/SQL 소스 PKG_ORDER 외 3개`;
   b.style.cssText = "position:fixed;right:8px;bottom:6px;z-index:99999;padding:2px 8px;border-radius:4px;background:#c0392b;color:#fff;font:600 11px sans-serif;pointer-events:none;opacity:.85";
   const add = () => document.body.append(b);
   if (document.body) add(); else addEventListener("DOMContentLoaded", add);

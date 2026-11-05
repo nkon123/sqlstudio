@@ -1,7 +1,7 @@
 {
   "name": "sqlstudio-app",
   "private": true,
-  "version": "0.5.67",
+  "version": "0.5.68",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -23,6 +23,7 @@
     "@codemirror/state": "^6.4.0",
     "@codemirror/view": "^6.34.0",
     "@lezer/highlight": "^1.2.5",
+    "@lezer/lr": "^1.4.12",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.8.1",
     "cytoscape": "^3.30.2",

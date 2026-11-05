@@ -149,7 +149,8 @@ For example, ask Claude Desktop *"If we change a column in ORDERS, which batch j
 SQLLM is an active, working prototype. It starts with the Oracle environments that generic AI coding tools often overlook. Everything described above is implemented and tested against a real Oracle 11g database:
 
 - Desktop IDE: editor, grid with sorting, filtering, editing, result diff and export (CSV, Excel, INSERT), execution plans, PL/SQL debugger (`DBMS_DEBUG`), session and lock monitor
-- Workspace: a sidebar with open documents (grouped by date, connection or tag), tables, project folder and git, and searchable run history; it collapses to an icon rail
+- Workspace: a sidebar with open documents (grouped by date, connection or tag), database objects, a PL/SQL outline, project folder and git, and searchable run history; it collapses to an icon rail
+- PL/SQL navigation: Ctrl+click / F12 go to definition (in the file, else the database — `pkg.proc` opens the package body at that procedure), outline (Ctrl+Shift+O), breadcrumb, back/forward (Alt+←/→), block folding
 - Cross-database tools: schema compare with sync scripts, data copy between connections (append, replace or merge, creating the target table if missing), value and row tracing, data-flow diagrams, space usage
 - AI copilot with local and frontier providers and ACP agents (such as opencode), plus the MCP server with 10 read-only tools
 - PL/SQL analysis engine with an app UI, an overnight batch CLI and a model-quality evaluation harness

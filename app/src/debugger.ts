@@ -6,8 +6,7 @@
 // 디버그는 블록을 실제로 실행한다. 대상 세션의 변경은 끝날 때 기본으로 롤백한다.
 
 import { invoke } from "@tauri-apps/api/core";
-import { sql } from "@codemirror/lang-sql";
-import { ORACLE, oracleHighlight } from "./oracle-dialect";
+import { oracleSql, oracleHighlight } from "./oracle-dialect";
 import { syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { EditorState, RangeSet, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, EditorView, GutterMarker, gutter, lineNumbers, type DecorationSet } from "@codemirror/view";
@@ -139,7 +138,7 @@ export class DebugView {
               },
             },
           }),
-          sql({ dialect: ORACLE }), syntaxHighlighting(oracleHighlight),
+          oracleSql(), syntaxHighlighting(oracleHighlight),
           syntaxHighlighting(defaultHighlightStyle),
           EditorView.theme({ "&": { height: "100%" }, ".cm-scroller": { fontFamily: "var(--mono)" } }),
         ],
@@ -148,7 +147,7 @@ export class DebugView {
     this.blockView = new EditorView({
       state: EditorState.create({
         doc: "BEGIN\n  NULL;\nEND;",
-        extensions: [lineNumbers(), sql({ dialect: ORACLE }), syntaxHighlighting(oracleHighlight), syntaxHighlighting(defaultHighlightStyle),
+        extensions: [lineNumbers(), oracleSql(), syntaxHighlighting(oracleHighlight), syntaxHighlighting(defaultHighlightStyle),
           EditorView.theme({ "&": { height: "100%" }, ".cm-scroller": { fontFamily: "var(--mono)" } })],
       }),
     });

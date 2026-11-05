@@ -99,6 +99,8 @@ export const OTHER_OBJECTS = [
   { owner: "SCOTT", name: "PKG_ORDER", object_type: "PACKAGE" },
   { owner: "SCOTT", name: "PKG_ORDER", object_type: "PACKAGE BODY" },
   { owner: "SCOTT", name: "P_CLOSE_DAY", object_type: "PROCEDURE" },
+  { owner: "SCOTT", name: "FN_EMP_GRADE", object_type: "FUNCTION" },
+  { owner: "SCOTT", name: "TRG_ORDERS_AUDIT", object_type: "TRIGGER" },
   { owner: "SCOTT", name: "SEQ_ORDER", object_type: "SEQUENCE" },
 ];
 

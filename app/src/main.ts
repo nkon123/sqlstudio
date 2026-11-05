@@ -29,6 +29,9 @@ import { showRowTrace, showValueTrace, type TraceHooks } from "./valuetrace";
 import { showDiff, type Snapshot } from "./resultdiff";
 import { openCopyData } from "./copydata";
 import { historyPanel, openHistory } from "./history";
+import { outlinePanel } from "./outline";
+import { localDefinition, navJump, navOf } from "./codenav";
+import type { NavNode } from "./plsqlnav";
 import { openImport } from "./importer";
 import { showShortcuts } from "./shortcuts";
 import { fromLineStart, hasManualLayout, manualLayout } from "./autofmt";
@@ -115,6 +118,10 @@ export class App {
   private gitPane = h("div", { class: "git" });
   private gitLoading: Promise<GitPanel> | null = null;
   private gitBadge = h("span", { class: "git-badge" });
+  /** 왼쪽 '개요' — 지금 문서의 프로시저·함수 목록 */
+  private outline = outlinePanel((has) => this.browserEl?.querySelector(".side-item[data-k=outline]")?.classList.toggle("dim", !has));
+  /** 왼쪽 아래 영역 바꾸기 (문서·객체·개요·프로젝트·실행 이력) */
+  private showSide!: (k: string) => void;
   layout!: SideLayout;
 
   constructor(root: HTMLElement) {
@@ -227,7 +234,7 @@ export class App {
     const docPane = h("div", { class: "side-pane doc-pane" },
       h("div", { class: "doc-section-row" }, docsHead, h("span", { class: "doc-icons" }, searchBtn, groupBtn)), searchRow, this.docList);
     const nav = h("nav", { class: "side-nav" });
-    const panes: Record<string, HTMLElement> = { doc: docPane, table: tablePane, git: this.gitPane, hist: this.histPanel.el };
+    const panes: Record<string, HTMLElement> = { doc: docPane, table: tablePane, outline: this.outline.el, git: this.gitPane, hist: this.histPanel.el };
     const showSide = (k: string) => {
       this.sideTab = k;
       for (const [n, el] of Object.entries(panes)) el.hidden = n !== k;
@@ -236,19 +243,28 @@ export class App {
       if (k === "git") this.loadGit().then((g) => g.setVisible(true));
       else this.git?.setVisible(false);
       if (k === "hist") void this.histPanel.load();
+      this.outline.setVisible(k === "outline");
       this.placeTabs();
     };
+    this.showSide = showSide;
     // 접힌 아이콘 줄에서 누르면 펼치고 그 화면으로 (새 문서·설정·도움말은 펼치지 않는다)
     const item = (k: string, label: string, path: string, title: string, run: () => void) =>
       h("button", { class: "side-item", "data-k": k, title, onclick: () => {
         if (!this.leftOpen && k in panes) { this.layout.toggle("left", true); showSide(k); return; }
         run();
       } }, icon(path), h("span", {}, label));
+    // '문서' 오른쪽 끝의 + — 새 문서 (같은 접속으로). 접힌 아이콘 줄에서는 숨고 편집기 위 탭 줄의 + 를 쓴다
+    const docItem = item("doc", "문서", "M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5", "열린 문서 목록 (탭)", () => showSide("doc"));
+    docItem.append(h("span", { class: "side-plus", role: "button", title: "새 문서 (같은 접속으로)", onclick: (e: Event) => {
+      e.stopPropagation();
+      showSide("doc");
+      this.newTab(true);
+    } }, icon("M12 5v14M5 12h14")));
     nav.append(
-      item("new", "새 문서", "M12 5v14M5 12h14", "새 탭 (같은 접속으로)", () => { showSide("doc"); this.newTab(true); }),
-      // 아래 영역을 바꾸는 넷 — 지금 보는 것이 강조된다. 테이블·프로젝트·실행 이력은 다시 눌러도 문서 목록으로
-      item("doc", "문서", "M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5", "열린 문서 목록 (탭)", () => showSide("doc")),
-      item("table", "테이블", "M4 5h16v14H4zM4 10h16M4 15h16M10 5v14", "테이블·뷰 목록 — 클릭: 구조 · 더블클릭: 이름 넣기 · 체크: AI 문맥", () => showSide(this.sideTab === "table" ? "doc" : "table")),
+      // 아래 영역을 바꾸는 다섯 — 지금 보는 것이 강조된다. 객체·개요·프로젝트·실행 이력은 다시 누르면 문서 목록으로
+      docItem,
+      item("table", "객체", "M4 5h16v14H4zM4 10h16M4 15h16M10 5v14", "DB 객체 목록 — 테이블·뷰·패키지·프로시저… (종류를 골라서) · 클릭: 구조 · 더블클릭: 이름 넣기 · 체크: AI 문맥", () => showSide(this.sideTab === "table" ? "doc" : "table")),
+      item("outline", "개요", "M4 5h9M8 12h12M8 19h12M4 5v14", "지금 문서의 패키지·프로시저·함수 목록 — 누르면 그 자리로 (PL/SQL 소스를 열면 여기로)", () => showSide(this.sideTab === "outline" ? "doc" : "outline")),
       item("git", "프로젝트", "M6 3v12M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9", "프로젝트 폴더·git", () => showSide(this.sideTab === "git" ? "doc" : "git")),
       item("hist", "실행 이력", "M12 7v5l3 2M3.5 9A9 9 0 1 1 3 12M3 4v5h5", "실행한 SQL 이력 — 더블클릭: 넣기 · F8: 넓게 보기", () => showSide(this.sideTab === "hist" ? "doc" : "hist")),
     );
@@ -259,7 +275,7 @@ export class App {
       item("help", "도움말", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5V14M12 17.5h.01", "단축키 목록 (F1)", () => showShortcuts()),
       // 접기 — 접으면 아이콘 줄의 맨 아래에서 같은 단추로 펼친다 (화살표가 돌아간다)
       item("collapse", "접기", "M15 6l-6 6 6 6M20 4v16", "왼쪽 패널 접기/펼치기 — 접으면 아이콘 줄만 (Ctrl+Shift+1) · 경계선을 끌면 너비 조절", () => this.layout.toggle("left")));
-    const browser = h("aside", { class: "browser" }, nav, docPane, tablePane, this.gitPane, this.histPanel.el, foot);
+    const browser = h("aside", { class: "browser" }, nav, docPane, tablePane, this.outline.el, this.gitPane, this.histPanel.el, foot);
     this.browserEl = browser;
     let sideTab = "doc";
     try { const s = localStorage.getItem("side.tab"); if (s && s in panes) sideTab = s; } catch { /* 기본 */ }
@@ -526,6 +542,14 @@ export class App {
     await this.ai.load();
     mark("AI 공급자");
     await this.restoreTabs();
+    // 가짜 DB 모드: PL/SQL 소스를 열어 볼 시험 문서 (배포 빌드에서는 빠진다)
+    if (import.meta.env.VITE_MOCK) {
+      const { PLSQL_SAMPLE } = await import("./mock/plsql");
+      const t = this.tabs.find((x) => x.editor.text().startsWith(PLSQL_SAMPLE.slice(0, 20))) ?? this.newTab(true, PLSQL_SAMPLE);
+      // 목록에서 찾기 쉽게 꼬리표, 시작하면 이 문서를 연다
+      if (!t.tag) { t.tag = "코드탐색"; t.refreshTitle(); this.renderDocs(); }
+      this.activate(t);
+    }
     mark(`탭 ${this.tabs.length}개`);
     void invoke("client_log", { level: "info", message: `시작(화면): ${lap.join(" · ")} · 합계 ${Math.round(performance.now() - t0)}ms (화면을 불러온 지 ${Math.round(t0)}ms 뒤 시작)` }).catch(() => {});
     // 그 앞 — 문서·스크립트 받기, 모듈 실행, 첫 화면 구성 (어디서 몇 초가 걸리는지)
@@ -675,8 +699,43 @@ export class App {
       } },
       { label: "태그 빼기", disabled: !t.tag, run: () => setTag(null) },
       { sep: true },
-      { label: "닫기", run: () => void this.closeTab(t) },
+      ...this.closeItems(t),
     ]);
+  }
+
+  /** 탭 닫기 메뉴 — 보이는 순서로 (왼쪽 목록이면 위·아래, 위 탭 줄이면 왼쪽·오른쪽) */
+  private closeItems(t: Tab): MenuItem[] {
+    const shown = [...this.tabs].sort((a, b) => (a.tabEl.compareDocumentPosition(b.tabEl) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+    const i = shown.indexOf(t);
+    const vertical = !!this.tabStrip.closest(".browser");
+    const before = shown.slice(0, i);
+    const after = shown.slice(i + 1);
+    const others = shown.filter((x) => x !== t);
+    const n = (xs: Tab[]) => (xs.length ? ` (${xs.length})` : "");
+    return [
+      { label: "닫기", run: () => void this.closeTab(t) },
+      { label: `다른 탭 모두 닫기${n(others)}`, disabled: !others.length, run: () => void this.closeTabs(others) },
+      { label: `${vertical ? "위쪽" : "왼쪽"} 탭 닫기${n(before)}`, disabled: !before.length, run: () => void this.closeTabs(before) },
+      { label: `${vertical ? "아래쪽" : "오른쪽"} 탭 닫기${n(after)}`, disabled: !after.length, run: () => void this.closeTabs(after) },
+      { label: `모두 닫기${n(shown)}`, run: () => void this.closeTabs(shown) },
+    ];
+  }
+
+  /** 여러 탭 닫기 — 저장 안 한 문서는 한 번에 묻는다 (실행 중·커밋 안 한 변경은 탭마다 묻는다) */
+  async closeTabs(list: Tab[]) {
+    const dirty = list.filter((x) => x.dirty);
+    let discard = false;
+    if (dirty.length > 1) {
+      const r = await modal("저장하지 않은 문서", h("div", {},
+        h("p", {}, `닫을 ${list.length}개 중 ${dirty.length}개를 저장하지 않았습니다.`),
+        h("ul", { class: "close-dirty" }, ...dirty.slice(0, 8).map((x) => h("li", {}, x.title())), dirty.length > 8 ? h("li", {}, `… 외 ${dirty.length - 8}개`) : "")), [
+        { label: "취소", value: "cancel" }, { label: "저장 안 한 것은 남기기", value: "keep" }, { label: "모두 버리고 닫기", value: "discard", kind: "danger" },
+      ]);
+      if (!r || r === "cancel") return;
+      if (r === "keep") list = list.filter((x) => !x.dirty);
+      else discard = true;
+    }
+    for (const x of list) if (this.tabs.includes(x)) await this.closeTab(x, discard);
   }
 
   private filterDocs() {
@@ -716,7 +775,19 @@ export class App {
     this.refresh();
     if (t.conn) this.loadBrowser();
     else this.browserList.replaceChildren(h("div", { class: "empty" }, "접속하면 객체 목록이 나옵니다"));
+    this.outline.attach(t.editor.view);
     t.editor.focus();
+  }
+
+  /** 왼쪽 영역을 펼치고 그 화면으로 (명령 검색에서) */
+  openSide(k: "doc" | "table" | "outline" | "git" | "hist") {
+    if (!this.leftOpen) this.layout.toggle("left", true);
+    this.showSide(k);
+  }
+
+  /** PL/SQL 소스를 연 뒤 — 왼쪽을 '개요' 로 (접혀 있으면 그대로) */
+  private sourceOpened() {
+    if (this.leftOpen) this.showSide("outline");
   }
 
   private showTabList() {
@@ -735,7 +806,8 @@ export class App {
     return { label: `탭 모두 다시 접속${n ? ` (${n}개)` : ""}`, disabled: !n || this.reconnecting, run: () => void this.reconnectAll() };
   }
 
-  async closeTab(t: Tab) {
+  /** discard: 저장 안 한 편집을 묻지 않고 버린다 (여러 탭 닫기에서 이미 물었다) */
+  async closeTab(t: Tab, discard = false) {
     if (t.running && !(await confirmBox("실행 중", "실행 중인 쿼리가 있습니다. 세션을 버리고 닫을까요?", "닫기"))) return;
     if (t.txnPending && t.conn) {
       const r = await modal("커밋하지 않은 변경", h("p", {}, `${t.title()} 에 커밋하지 않은 변경이 있습니다.`), [
@@ -745,7 +817,7 @@ export class App {
       try { await (r === "commit" ? api.commit(t.conn.id) : api.rollback(t.conn.id)); }
       catch (e) { return toast(errOf(e).message, "error"); }
     }
-    if (t.dirty && !(await confirmBox("저장하지 않음", `${t.title()} 의 편집을 버릴까요?`, "버리기"))) return;
+    if (t.dirty && !discard && !(await confirmBox("저장하지 않음", `${t.title()} 의 편집을 버릴까요?`, "버리기"))) return;
     if (t.conn) (t.running ? api.abandon(t.conn.id) : api.disconnect(t.conn.id)).catch(() => {});
     t.root.remove();
     t.tabEl.remove();
@@ -1612,13 +1684,65 @@ export class App {
 
   /** 객체 소스(DDL)를 새 탭에 — line 은 소스(ALL_SOURCE)의 줄 번호 */
   async openSource(id: number, owner: string, name: string, kind: string, line?: number) {
-    const ddl = await api.getDdl(id, kind, `"${owner}"."${name}"`).catch((e) => `-- ${errOf(e).message}`);
-    const nt = this.newTab(true, ddl);
+    let nt: Tab | null;
+    if (CODE_TYPES.includes(kind.toUpperCase())) nt = await this.openCode(id, owner, name, kind);
+    else nt = this.newTab(true, await api.getDdl(id, kind, `"${owner}"."${name}"`).catch((e) => `-- ${errOf(e).message}`));
+    if (!nt) return;
+    const ddl = nt.editor.text();
     if (line) {
       // DDL 앞의 빈 줄을 건너 CREATE 줄이 소스의 1번째 줄
       const base = ddl.split("\n").findIndex((l) => /^\s*CREATE\b/i.test(l));
       nt.editor.gotoLine((base < 0 ? 0 : base) + line);
     }
+  }
+
+  /** 코드 객체 소스 탭 — 이미 열었으면 그 탭으로. quiet: 못 열면 알리지 않는다 (패키지 본문이 없을 때) */
+  private async openCode(id: number, owner: string, name: string, type: string, quiet = false): Promise<Tab | null> {
+    const key = `${id}|${owner}.${name}|${type}`.toUpperCase();
+    const open = this.tabs.find((x) => x.sourceKey === key);
+    if (open) { this.activate(open); this.sourceOpened(); return open; }
+    try {
+      const ddl = await api.getDdl(id, type, `"${owner}"."${name}"`);
+      const nt = this.newTab(true, ddl);
+      nt.sourceKey = key;
+      this.sourceOpened();
+      return nt;
+    } catch (e) {
+      if (!quiet) toast(errOf(e).message, "error");
+      return null;
+    }
+  }
+
+  /** pkg.proc · owner.pkg.proc — 패키지 본문을 열고 그 프로시저·함수로. 패키지가 아니면 false */
+  private async openMember(t: Tab, raw: string): Promise<boolean> {
+    const parts = raw.replace(/"/g, "").split(".").filter(Boolean);
+    if (parts.length < 2 || parts.length > 3 || !t.conn) return false;
+    const member = parts[parts.length - 1].toUpperCase();
+    const o = await this.resolveObject(t, [{ name: parts.slice(0, -1).join(".") }]);
+    const type = o?.object_type.toUpperCase() ?? "";
+    if (!o || !["PACKAGE", "PACKAGE BODY", "TYPE", "TYPE BODY"].includes(type)) return false;
+    const body = type.startsWith("TYPE") ? "TYPE BODY" : "PACKAGE BODY";
+    const nt = (await this.openCode(t.conn.id, o.owner, o.name, body, true)) ?? (await this.openCode(t.conn.id, o.owner, o.name, body.replace(" BODY", "")));
+    if (!nt) return true;
+    // 본문의 정의 (없으면 명세의 선언)
+    const found: NavNode[] = [];
+    const walk = (list: NavNode[]) => { for (const x of list) { if ((x.kind === "procedure" || x.kind === "function") && x.name.split(".").pop()!.toUpperCase() === member) found.push(x); walk(x.children); } };
+    walk(navOf(nt.editor.view.state.doc).tree);
+    const at = found.find((x) => !x.decl) ?? found[0];
+    if (at) navJump(nt.editor.view, at.from);
+    else toast(`${o.name} 에서 ${member} 를 찾지 못했습니다`, "info");
+    return true;
+  }
+
+  /** Ctrl+클릭 · F12 — 문서 안의 정의로, 없으면 DB 객체로 (F4 와 같다) */
+  async gotoDefinition(t: Tab, pos: number) {
+    const view = t.editor.view;
+    const def = localDefinition(view.state, pos);
+    if (def != null) return navJump(view, def);
+    if (this.active !== t) this.activate(t);
+    view.dispatch({ selection: { anchor: pos } });
+    if (!t.conn) return toast("이 문서에는 정의가 없습니다 — 접속하면 DB 의 테이블·프로시저·패키지로 찾아 갑니다", "info");
+    await this.describeAtCursor();
   }
 
   /** 테이블 구조(컬럼) 팝업 — name: "OWNER.TABLE" 또는 TABLE */
@@ -1795,13 +1919,13 @@ export class App {
     const c = view.coordsAtPos(pos);
     const r = await this.resolveTable(t, tries);
     if ("d" in r) return this.openColumns(r.d, c ? { x: c.left, y: c.bottom } : undefined, r.alias);
+    // pkg.proc — 패키지 본문의 그 프로시저로
+    if (await this.openMember(t, raw)) return;
     // 테이블이 아니면 다른 객체: 코드(프로시저·함수·패키지·트리거·타입)는 소스를 새 탭에, 그 밖은 구조 탭의 상세로
     const o = await this.resolveObject(t, tries);
     if (o) {
       const type = o.object_type.toUpperCase();
-      if (["PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY"].includes(type)) {
-        return api.getDdl(t.conn.id, type, `"${o.owner}"."${o.name}"`).then((x) => this.newTab(true, x)).catch((e) => toast(errOf(e).message, "error"));
-      }
+      if (CODE_TYPES.includes(type)) return void this.openCode(t.conn.id, o.owner, o.name, type);
       return this.showObject(o);
     }
     toast(`'${raw}' 를 찾지 못했습니다${r.error ? ` — ${errOf(r.error).message}` : ""}`, "error");
@@ -2353,6 +2477,9 @@ export class App {
 }
 
 /** 자주 나는 접속 오류에 해결 방법을 붙인다 */
+/** 소스를 여는 코드 객체 */
+const CODE_TYPES = ["PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY"];
+
 function hintFor(err: ErrView): string {
   const m = err.message;
   const tips: [RegExp, string][] = [

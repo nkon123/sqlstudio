@@ -1,15 +1,14 @@
 // npm test — 괄호 쌍 찾기 (문법 트리로 — 문자열·주석 안의 괄호는 세지 않는다)
-import { sql } from "@codemirror/lang-sql";
 import { EditorState } from "@codemirror/state";
 import { childPairs, enclosingPair, innerRange, outerPair, siblingPairs, wider } from "./brackets";
-import { ORACLE } from "./oracle-dialect";
+import { oracleSql } from "./oracle-dialect";
 
 let n = 0;
 /** `|` 자리의 커서를 감싼 쌍을 "(…)" 글로 */
 function at(src: string): string | null {
   const pos = src.indexOf("|");
   const doc = src.replace("|", "");
-  const state = EditorState.create({ doc, extensions: [sql({ dialect: ORACLE })] });
+  const state = EditorState.create({ doc, extensions: [oracleSql()] });
   const p = enclosingPair(state, pos);
   n++;
   return p ? doc.slice(p.open, p.close + 1) : null;
@@ -30,7 +29,7 @@ eq(at("select f(a /* ) */, |b) from t"), "(a /* ) */, b)", "주석 안 )");
 // 한 겹 바깥 — 같은 쌍으로 맴돌지 않는다 (Ctrl+Shift+] 를 거듭 누를 때)
 {
   const doc = "select a from (select nvl(c, 0) from t) x where (b)";
-  const state = EditorState.create({ doc, extensions: [sql({ dialect: ORACLE })] });
+  const state = EditorState.create({ doc, extensions: [oracleSql()] });
   const inner = enclosingPair(state, doc.indexOf("0"))!;
   eq(doc.slice(inner.open, inner.close + 1), "(c, 0)", "안쪽");
   const outer = outerPair(state, inner)!;
@@ -41,7 +40,7 @@ eq(at("select f(a /* ) */, |b) from t"), "(a /* ) */, b)", "주석 안 )");
 // 고르는 범위는 괄호 안쪽 — 괄호와 그 바로 안의 공백·줄바꿈은 뺀다
 {
   const doc = "select * from (\n  select a\n    from t\n) x";
-  const state = EditorState.create({ doc, extensions: [sql({ dialect: ORACLE })] });
+  const state = EditorState.create({ doc, extensions: [oracleSql()] });
   const r = innerRange(state, enclosingPair(state, doc.indexOf("a\n"))!);
   eq(doc.slice(r.from, r.to), "select a\n    from t", "서브쿼리 안쪽");
   n++;
@@ -49,7 +48,7 @@ eq(at("select f(a /* ) */, |b) from t"), "(a /* ) */, b)", "주석 안 )");
 // Ctrl+Shift+[ — 지금 고른 것보다 넓은 가장 안쪽 괄호
 {
   const doc = "select a from (select nvl(c, 0) from t) x where (b)";
-  const state = EditorState.create({ doc, extensions: [sql({ dialect: ORACLE })] });
+  const state = EditorState.create({ doc, extensions: [oracleSql()] });
   const text = (p: ReturnType<typeof wider>) => (p ? doc.slice(p.open, p.close + 1) : null);
   const c = doc.indexOf("c, 0");
   eq(text(wider(state, c, c + 1)), "(c, 0)", "글자 하나 → 감싼 괄호");
@@ -61,7 +60,7 @@ eq(at("select f(a /* ) */, |b) from t"), "(a /* ) */, b)", "주석 안 )");
 // 안쪽으로 들어갈 곳 · 같은 높이의 괄호들
 {
   const doc = "select * from (select a from t where b in (1, 2) and nvl(c, 0) = 1) x where (y)";
-  const state = EditorState.create({ doc, extensions: [sql({ dialect: ORACLE })] });
+  const state = EditorState.create({ doc, extensions: [oracleSql()] });
   const texts = (ps: { open: number; close: number }[]) => ps.map((p) => doc.slice(p.open, p.close + 1)).join(" | ");
   const sub = enclosingPair(state, doc.indexOf("where b"))!;
   eq(texts(childPairs(state, sub)), "(1, 2) | (c, 0)", "바로 안의 괄호들 (더 깊은 것 빼고)");

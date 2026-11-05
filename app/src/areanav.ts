@@ -1,7 +1,7 @@
 // 영역 이동 (Ctrl+Shift+2) — 가운데에 4방향 표시를 띄우고 방향키·넘패드로 고른다.
 //
 //            ↑ 편집기
-//   ← 테이블 목록      AI →
+//   ← 왼쪽 영역        AI →
 //            ↓ 결과 그리드
 //
 // Ctrl+Shift 를 누르고 있는 동안 띄우지 않는다 — 편집기의 Ctrl+Shift+←/→ (낱말 단위로 넓혀 고르기)와 부딪힌다.
@@ -10,7 +10,7 @@ import { h } from "./ui";
 
 export type Area = "editor" | "grid" | "left" | "right";
 
-const LABEL: Record<Area, string> = { editor: "편집기", grid: "결과 그리드", left: "테이블 목록", right: "AI" };
+const LABEL: Record<Area, string> = { editor: "편집기", grid: "결과 그리드", left: "왼쪽 영역", right: "AI" };
 const ARROW: Record<Area, string> = { editor: "↑", grid: "↓", left: "←", right: "→" };
 /** 물리 키(code) — 넘패드는 NumLock 이 꺼져 있어도 code 가 같다 */
 const KEYS: Record<string, Area> = {

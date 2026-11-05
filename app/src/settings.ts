@@ -290,7 +290,7 @@ function editorPage(app: App) {
       const cb = h("input", { type: "checkbox", checked: tabsSidePref() }) as HTMLInputElement;
       cb.onchange = () => { setTabsSidePref(cb.checked); app.placeTabs(); };
       return cb;
-    })(), "문서 탭을 왼쪽 목록으로 — 왼쪽의 '문서' 에 열린 탭을 세로로 보이고, 왼쪽을 접거나 테이블·프로젝트를 보면 편집기 위 탭 줄로 돌아옵니다. 끄면 늘 위 탭 줄"),
+    })(), "문서 탭을 왼쪽 목록으로 — 왼쪽의 '문서' 에 열린 탭을 세로로 보이고, 왼쪽을 접거나 다른 화면(객체·개요·프로젝트·실행 이력)을 보면 편집기 위 탭 줄로 돌아옵니다. 끄면 늘 위 탭 줄"),
     h("h3", {}, "결과 영역"),
     h("label", { class: "check" }, (() => {
       const cb = h("input", { type: "checkbox", checked: revealEnabled() }) as HTMLInputElement;

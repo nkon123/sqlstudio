@@ -37,6 +37,7 @@ export function diffView(a: Snapshot, b: Snapshot, head: HTMLElement[] = []): HT
     onContextMenu: (_r, _c, e) => showMenu(e.clientX, e.clientY, [
       { label: "고른 셀 복사", hint: "Ctrl+C", run: () => navigator.clipboard.writeText(grid.selectionText()).catch(() => {}) },
       { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(grid.selectionText(true)).catch(() => {}) },
+      { label: "머리 포함 복사 (서식)", hint: "Ctrl+Alt+C", run: () => grid.copySelection(true, true) },
     ]),
   });
   const summary = h("div", { class: "row" });

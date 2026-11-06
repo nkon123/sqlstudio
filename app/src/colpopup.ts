@@ -173,6 +173,7 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
           ...(x && o.openObject ? [{ label: x.kind === "TABLE" ? "컬럼 보기" : "소스 열기", hint: "더블클릭", run: () => openDep(_r) }, { sep: true as const }] : []),
           { label: "고른 셀 복사", hint: "Ctrl+C", run: () => navigator.clipboard.writeText(grid.selectionText()).catch(() => {}) },
           { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(grid.selectionText(true)).catch(() => {}) },
+          { label: "머리 포함 복사 (서식)", hint: "Ctrl+Alt+C", run: () => grid.copySelection(true, true) },
           { label: "객체 이름 복사", run: () => navigator.clipboard.writeText([...new Set(grid.selectedRows().map((r) => r[1]).filter(Boolean))].join("\n")).catch(() => {}) },
         ]);
         return;
@@ -184,6 +185,7 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
         { label: "쉼표로 이어 복사", run: () => navigator.clipboard.writeText(names().join(", ")).catch(() => {}) },
         { label: "고른 셀 복사", hint: "Ctrl+C", run: () => navigator.clipboard.writeText(grid.selectionText()).catch(() => {}) },
         { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(grid.selectionText(true)).catch(() => {}) },
+        { label: "머리 포함 복사 (서식)", hint: "Ctrl+Alt+C", run: () => grid.copySelection(true, true) },
         { sep: true },
         { label: "컬럼 넣기", run: () => o.insert(names().join(", ")) },
         ...(o.place ? [{ label: "절에 맞춰 넣기", sub: placeItems() }] : []),
@@ -394,18 +396,3 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   return { update };
 }
 
-/** 문서에서 별칭 → 테이블 ("FROM orders o", "JOIN app.customers AS c", ", items i") */
-export function aliasMap(sql: string): Map<string, string> {
-  const m = new Map<string, string>();
-  const kw = new Set(["FROM", "WHERE", "ON", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "GROUP", "ORDER", "UNION", "MINUS", "INTERSECT", "SET", "CONNECT", "START", "HAVING", "FETCH", "PARTITION", "USING", "AND", "OR", "WITH", "VALUES", "SELECT", "INTO", "NATURAL", "AS"]);
-  const name = String.raw`([A-Za-z_][\w$#]*(?:\.[A-Za-z_][\w$#]*)?)`;
-  // 따로 훑는다 — 한쪽이 글자를 먹어 다른 쪽을 놓치지 않게 ("SELECT o.id, c.name FROM orders o")
-  for (const re of [new RegExp(String.raw`\b(?:FROM|JOIN|UPDATE|INTO)\s+${name}(?:\s+(?:AS\s+)?([A-Za-z_][\w$#]*))?`, "gi"),
-    new RegExp(String.raw`,\s*${name}\s+(?:AS\s+)?([A-Za-z_][\w$#]*)`, "gi")]) {
-    for (const x of sql.matchAll(re)) {
-      const alias = x[2]?.toUpperCase();
-      if (alias && !kw.has(alias) && !kw.has(x[1].toUpperCase())) m.set(alias, x[1].toUpperCase());
-    }
-  }
-  return m;
-}

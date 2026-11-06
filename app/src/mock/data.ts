@@ -91,7 +91,34 @@ export const TABLES: Record<string, MockTable> = {
     count: 2000,
     row: (i) => [String(i + 1), ...Array.from({ length: 149 }, (_, k) => (k % 3 ? `값 ${i}-${k}${"x".repeat((i + k) % 12)}` : String(((i * 7 + k * 13) % 100000) / 100)))],
   },
+  // MERGE 점검 연습 — 소스에 A001-1 이 두 번(ORA-30926), 대상에 없는 B001-1 이 두 번(ORA-00001), B002 는 STATUS 로 걸러짐
+  MC_TARGET: {
+    desc: {
+      owner: "SCOTT", name: "MC_TARGET", object_type: "TABLE", comment: "MERGE 점검 연습 — 대상", num_rows: "2",
+      columns: [c("ORD_NO", "VARCHAR2(10)", "주문 번호", false), c("LINE_NO", "NUMBER(4)", "줄 번호", false), c("AMT", "NUMBER(12,2)", "금액"), c("UPD_DT", "DATE", "고친 날")],
+      primary_key: ["ORD_NO", "LINE_NO"],
+      indexes: [{ name: "MC_TARGET_PK", unique: true, columns: ["ORD_NO", "LINE_NO"] }],
+    },
+    count: 2,
+    row: (i) => MC_TARGET_ROWS[i],
+  },
+  MC_SOURCE: {
+    desc: {
+      owner: "SCOTT", name: "MC_SOURCE", object_type: "TABLE", comment: "MERGE 점검 연습 — 소스 (중복이 섞여 있다)", num_rows: "6",
+      columns: [c("ORD_NO", "VARCHAR2(10)", "주문 번호"), c("LINE_NO", "NUMBER(4)", "줄 번호"), c("AMT", "NUMBER(12,2)", "금액"), c("STATUS", "VARCHAR2(2)", "OK 만 반영")],
+      primary_key: [],
+      indexes: [],
+    },
+    count: 6,
+    row: (i) => MC_SOURCE_ROWS[i],
+  },
 };
+
+export const MC_TARGET_ROWS: string[][] = [["A001", "1", "100", "2026-11-01 09:00:00"], ["A002", "1", "200", "2026-11-01 09:00:00"]];
+export const MC_SOURCE_ROWS: string[][] = [
+  ["A001", "1", "110", "OK"], ["A001", "1", "120", "OK"], ["A002", "1", "210", "OK"],
+  ["B001", "1", "300", "OK"], ["B001", "1", "310", "OK"], ["B002", "1", "400", "NO"],
+];
 
 /** 목록에만 보이는 객체 (뷰·프로시저 등) */
 export const OTHER_OBJECTS = [

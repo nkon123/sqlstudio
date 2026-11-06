@@ -6,7 +6,7 @@
 import type { Channel } from "@tauri-apps/api/core";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { byteToUtf16, utf16ToByte, type Column, type CompletionItem, type RowPage, type ScriptEvent, type Statement, type StmtKind } from "../api";
-import { ddlOf, findTable, OTHER_OBJECTS, TABLES } from "./data";
+import { ddlOf, findTable, MC_SOURCE_ROWS, MC_TARGET_ROWS, OTHER_OBJECTS, TABLES } from "./data";
 import { mockPlsql } from "./plsql";
 
 type Args = Record<string, unknown>;
@@ -144,13 +144,47 @@ function page(c: Cursor, n: number): RowPage {
   return { columns: c.columns, rows, has_more: c.pos < c.total, fetched_total: c.pos };
 }
 
+/** MERGE 점검 연습 (MC_TARGET ← MC_SOURCE) — MERGE 는 ORA-30926 으로 실패, 점검 쿼리는 실제로 계산해 답한다.
+ *  ON 은 ORD_NO·LINE_NO 로 본다. 소스는 STATUS = 'OK' 조건이 문장에 있을 때만 거른다 */
+function mergeDemo(sql: string): Cursor | null {
+  const text = sql.replace(/--[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  if (!/\bMC_SOURCE\b/i.test(text)) return null;
+  const okOnly = /\bSTATUS\s*=\s*'OK'/i.test(text);
+  const src = MC_SOURCE_ROWS.filter((r) => !okOnly || r[3] === "OK");
+  const key = (r: string[]) => `${r[0]}\t${r[1]}`;
+  const col = (name: string, type_name = "VARCHAR2(10)"): Column => ({ name, type_name, nullable: true });
+  // 서브쿼리가 STATUS 를 고르지 않으면 S.* 에 STATUS 가 없다
+  const fromAt = text.search(/\bFROM\s+MC_SOURCE\b/i);
+  const list = fromAt < 0 ? "*" : text.slice(text.slice(0, fromAt).toUpperCase().lastIndexOf("SELECT") + 6, fromAt);
+  const sCols = fromAt < 0 || /\*|\bSTATUS\b/i.test(list) ? 4 : 3;
+  const srcCols = [col("ORD_NO"), col("LINE_NO", "NUMBER(4)"), col("AMT", "NUMBER(12,2)"), col("STATUS", "VARCHAR2(2)")].slice(0, sCols);
+  const fixed = (columns: Column[], rows: (string | null)[][]): Cursor => ({ columns, make: (i) => rows[i], total: rows.length, pos: 0 });
+  if (/\bMATCH_CNT__\b/i.test(text)) {
+    const rows: string[][] = [];
+    MC_TARGET_ROWS.forEach((t, ti) => {
+      const hit = src.filter((s) => key(s) === key(t));
+      if (hit.length > 1) for (const s of hit) rows.push([String(hit.length), `AAAMcTAAEAAAAJ${"ABCDEFGH"[ti]}AAA`, ...s.slice(0, sCols)]);
+    });
+    return fixed([col("MATCH_CNT__", "NUMBER"), col("TARGET_ROWID__", "ROWID"), ...srcCols], rows);
+  }
+  if (/\bCNT__\b/i.test(text) && /\bGROUP\s+BY\b/i.test(text)) {
+    const n = new Map<string, number>();
+    for (const s of src) n.set(key(s), (n.get(key(s)) ?? 0) + 1);
+    const rows = [...n].filter(([, c]) => c > 1).sort((a, b) => b[1] - a[1]).map(([k, c]) => [...k.split("\t"), String(c)]);
+    return fixed([col("ORD_NO"), col("LINE_NO", "NUMBER(4)"), col("CNT__", "NUMBER")], rows);
+  }
+  return null;
+}
+
 let txn = false;
 async function execute(a: { id: number; sql: string; page_size?: number }) {
   await sleep(120);
   const kind = classify(a.sql);
   const t0 = performance.now();
+  if (kind === "dml" && /^\s*MERGE\b[\s\S]*\bMC_TARGET\b[\s\S]*\bMC_SOURCE\b/i.test(a.sql.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, " ")))
+    fail("ORA-30926: 원본 테이블에서 안정된 행 집합을 가져올 수 없습니다 (가짜 모드 — 우클릭 › 점검 으로 원인 행을 찾아 보세요)", "db");
   if (kind === "query") {
-    const c = query(a.sql);
+    const c = mergeDemo(a.sql) ?? query(a.sql);
     cursors.set(a.id, c);
     const p = page(c, a.page_size ?? 500);
     return { kind, outcome: { type: "rows", ...p }, elapsed_ms: Math.round(performance.now() - t0) + 37, output: [], txn_pending: txn };
@@ -693,7 +727,7 @@ function mockPlan(sql: string): string[] {
 
 function banner(where: string) {
   const b = document.createElement("div");
-  b.textContent = `가짜 DB 모드 (${where}) — 테이블 EMP · DEPT · ORDERS · ORDER_ITEMS · WIDE_LOG(열 150) · PL/SQL 소스 PKG_ORDER 외 3개`;
+  b.textContent = `가짜 DB 모드 (${where}) — 테이블 EMP · DEPT · ORDERS · ORDER_ITEMS · WIDE_LOG(열 150) · MC_TARGET/MC_SOURCE(MERGE 점검) · PL/SQL 소스 PKG_ORDER 외 3개`;
   b.style.cssText = "position:fixed;right:8px;bottom:6px;z-index:99999;padding:2px 8px;border-radius:4px;background:#c0392b;color:#fff;font:600 11px sans-serif;pointer-events:none;opacity:.85";
   const add = () => document.body.append(b);
   if (document.body) add(); else addEventListener("DOMContentLoaded", add);

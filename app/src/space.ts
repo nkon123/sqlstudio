@@ -35,6 +35,7 @@ export function showSpace(id: number, user: string, owner?: string): Promise<unk
       showMenu(e.clientX, e.clientY, [
         { label: n > 1 ? `고른 셀 복사 (${n}행)` : "고른 셀 복사", hint: "Ctrl+C", run: () => navigator.clipboard.writeText(grid.selectionText()).catch(() => {}) },
         { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(grid.selectionText(true)).catch(() => {}) },
+        { label: "머리 포함 복사 (서식)", hint: "Ctrl+Alt+C", run: () => grid.copySelection(true, true) },
         { label: "이름 복사", run: () => navigator.clipboard.writeText(grid.selectedRows().map((r) => r[0] ?? "").join("\n")).catch(() => {}) },
       ]);
     },

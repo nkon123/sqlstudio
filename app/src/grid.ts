@@ -849,7 +849,8 @@ export class ResultGrid {
     // 물리 키(code)로 비교 — Shift 를 누르면 key 가 "C" 가 되고, 한글 입력 상태에서는 "ㅊ" 이 된다
     if ((e.ctrlKey || e.metaKey) && e.code === "KeyC") {
       e.preventDefault();
-      navigator.clipboard.writeText(this.selectionText(e.shiftKey)).catch(() => {});
+      // Ctrl+Alt+C — 머리 포함, 서식 있는 표로
+      this.copySelection(e.shiftKey || e.altKey, e.altKey);
     } else if ((e.ctrlKey || e.metaKey) && e.code === "KeyA") {
       e.preventDefault();
       this.picked.clear();
@@ -980,34 +981,77 @@ export class ResultGrid {
 
   /** 선택 영역을 TSV 로 (엑셀에 바로 붙는다). Ctrl+Shift+C 는 헤더 포함. */
   selectionText(withHeader = false): string {
-    if (this.picked.size) return this.pickedText(withHeader);
-    const s = this.sel;
-    if (!s) return "";
-    const [r0, r1] = [Math.min(s.r0, s.r1), Math.max(s.r0, s.r1)];
-    const [c0, c1] = [Math.min(s.c0, s.c1), Math.max(s.c0, s.c1)];
-    const esc = (v: string | null) => {
-      if (v == null) return "";
-      return /[\t\n"]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
-    };
+    const box = this.selBox();
+    if (!box) return "";
+    const esc = (v: string | null) => (v == null ? "" : /[\t\n"]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
     const lines: string[] = [];
-    const cols: number[] = [];
-    for (let c = c0; c <= c1; c++) if (!this.hiddenCol(c)) cols.push(c);
-    if (withHeader) lines.push(cols.map((c) => this.columns[c].name).join("\t"));
-    for (let r = r0; r <= r1; r++) lines.push(cols.map((c) => esc(this.value(this.view[r], c))).join("\t"));
+    if (withHeader) lines.push(box.cols.map((c) => this.columns[c].name).join("\t"));
+    for (const r of box.rows) lines.push(box.cols.map((c) => (box.has(r, c) ? esc(this.value(this.view[r], c)) : "")).join("\t"));
     return lines.join("\n");
   }
 
-  /** Ctrl+클릭으로 고른 셀(+사각형)을 TSV 로 — 걸친 행·열의 상자에서 고르지 않은 칸은 비워 둔다 */
-  private pickedText(withHeader: boolean): string {
-    const cells = this.selCells();
-    const have = new Set(cells.map((x) => x.r * 10000 + x.c));
-    const rows = [...new Set(cells.map((x) => x.r))].sort((a, b) => a - b);
-    const cols = [...new Set(cells.map((x) => x.c))].sort((a, b) => a - b);
-    const esc = (v: string | null) => (v == null ? "" : /[\t\n"]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
-    const lines: string[] = [];
-    if (withHeader) lines.push(cols.map((c) => this.columns[c].name).join("\t"));
-    for (const r of rows) lines.push(cols.map((c) => (have.has(r * 10000 + c) ? esc(this.value(this.view[r], c)) : "")).join("\t"));
-    return lines.join("\n");
+  /** 복사할 상자 — 끌어 고른 사각형, 또는 Ctrl+클릭으로 고른 셀이 걸친 행·열 (고르지 않은 칸은 has 가 false) */
+  private selBox(): { rows: number[]; cols: number[]; has: (r: number, c: number) => boolean } | null {
+    if (this.picked.size) {
+      const cells = this.selCells();
+      const have = new Set(cells.map((x) => x.r * 10000 + x.c));
+      return {
+        rows: [...new Set(cells.map((x) => x.r))].sort((a, b) => a - b),
+        cols: [...new Set(cells.map((x) => x.c))].sort((a, b) => a - b),
+        has: (r, c) => have.has(r * 10000 + c),
+      };
+    }
+    const s = this.sel;
+    if (!s) return null;
+    const rows: number[] = [];
+    const cols: number[] = [];
+    for (let r = Math.min(s.r0, s.r1); r <= Math.max(s.r0, s.r1); r++) rows.push(r);
+    for (let c = Math.min(s.c0, s.c1); c <= Math.max(s.c0, s.c1); c++) if (!this.hiddenCol(c)) cols.push(c);
+    return { rows, cols, has: () => true };
+  }
+
+  /** 선택 영역을 서식 있는 HTML 표로 — 엑셀·워드·메일에 붙이면 머리 색·테두리·줄무늬·열 폭이 따라간다.
+   *  붙일 곳은 대개 흰 바탕이라 화면 테마와 관계없이 밝은 색으로. 숫자 열은 오른쪽 정렬, 나머지는 엑셀이 텍스트로 받게 (앞의 0 유지) */
+  selectionHtml(withHeader = true): string {
+    const box = this.selBox();
+    if (!box) return "";
+    const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    const line = "border:1px solid #c9d0da;padding:2px 6px;";
+    const num = (c: number) => /^(NUMBER|FLOAT|BINARY_(FLOAT|DOUBLE)|INTEGER|INT|SMALLINT|DECIMAL|NUMERIC|REAL|DOUBLE)/i.test(this.columns[c].type_name);
+    const out: string[] = [`<table style="border-collapse:collapse;font-family:Consolas,'D2Coding',monospace;font-size:9pt;color:#18202c">`];
+    out.push(`<colgroup>${box.cols.map((c) => `<col width="${this.widths[c]}">`).join("")}</colgroup>`);
+    if (withHeader) {
+      out.push(`<tr>${box.cols.map((c) => `<th style="${line}background:#e8edf3;font-weight:bold;text-align:left;white-space:nowrap">${esc(this.columns[c].name)}</th>`).join("")}</tr>`);
+    }
+    box.rows.forEach((r, i) => {
+      const ri = this.view[r];
+      const changed = this.dirty.get(ri);
+      const rowBg = this.added.has(ri) ? "#e3f4e6" : i % 2 ? "#f5f7fa" : "#ffffff";
+      const del = this.deleted.has(ri) ? "text-decoration:line-through;color:#c62828;" : "";
+      out.push(`<tr>${box.cols.map((c) => {
+        const v = box.has(r, c) ? this.value(ri, c) : null;
+        const bg = changed?.has(c) ? "#fff3c4" : rowBg;
+        const fmt = num(c) ? "text-align:right;" : "mso-number-format:'\\@';";
+        const body = v == null ? "" : esc(v).replace(/\r?\n/g, `<br style="mso-data-placement:same-cell">`);
+        return `<td style="${line}${fmt}${del}background:${bg};white-space:pre;vertical-align:top">${body}</td>`;
+      }).join("")}</tr>`);
+    });
+    out.push("</table>");
+    return out.join("");
+  }
+
+  /** 선택 영역 복사 — formatted 면 서식 있는 표(HTML)와 TSV 를 같이 (붙일 곳이 고른다) */
+  copySelection(withHeader = false, formatted = false) {
+    const text = this.selectionText(withHeader);
+    if (!formatted || typeof ClipboardItem === "undefined") {
+      navigator.clipboard.writeText(text).catch(() => {});
+      return;
+    }
+    const html = `<html><head><meta charset="utf-8"></head><body>${this.selectionHtml(withHeader)}</body></html>`;
+    navigator.clipboard.write([new ClipboardItem({
+      "text/html": new Blob([html], { type: "text/html" }),
+      "text/plain": new Blob([text], { type: "text/plain" }),
+    })]).catch(() => navigator.clipboard.writeText(text).catch(() => {}));
   }
 
   /** 열 정의 (화면 열 번호 — 숨긴 열 포함) */

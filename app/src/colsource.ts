@@ -175,6 +175,7 @@ function renderWrites(pane: HTMLElement, key: string, cw: ColumnWrites | undefin
         ...(d ? [{ label: "소스 열기", hint: "더블클릭", run: () => open(i) }, { sep: true as const }] : []),
         { label: "고른 셀 복사", hint: "Ctrl+C", run: () => navigator.clipboard.writeText(grid.selectionText()).catch(() => {}) },
         { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(grid.selectionText(true)).catch(() => {}) },
+        { label: "머리 포함 복사 (서식)", hint: "Ctrl+Alt+C", run: () => grid.copySelection(true, true) },
       ]);
     },
   });

@@ -21,8 +21,10 @@ import { findList, wrapList } from "./listwrap";
 import { vw } from "./sqlfmt";
 import type { GitPanel } from "./git";
 import { condOf, placeAtCursor, placeInClause, TARGET_LABEL, type Placed, type Target } from "./colinsert";
-import { aliasMap, showColumns } from "./colpopup";
+import { showColumns } from "./colpopup";
+import { aliasMap } from "./aliasmap";
 import { showMenu, type MenuItem } from "./ctxmenu";
+import { mergeCheck } from "./mergecheck";
 import { showUsage } from "./usage";
 import { showColumnSource } from "./colsource";
 import type { TraceHooks } from "./valuetrace";
@@ -2203,6 +2205,7 @@ export class App {
       { sep: true },
       { label: n > 1 ? `고른 셀 복사 (${n}행)` : "고른 셀 복사", hint: "Ctrl+C", run: () => navigator.clipboard.writeText(t.grid.selectionText()).catch(() => {}) },
       { label: "머리 포함 복사", hint: "Ctrl+Shift+C", run: () => navigator.clipboard.writeText(t.grid.selectionText(true)).catch(() => {}) },
+      { label: "머리 포함 복사 (서식)", hint: "Ctrl+Alt+C", run: () => t.grid.copySelection(true, true) },
     );
     showMenu(e.clientX, e.clientY, items);
   }
@@ -2393,8 +2396,18 @@ export class App {
     const sel = view.state.selection.main;
     if (pos != null && (sel.empty || pos < sel.from || pos > sel.to)) view.dispatch({ selection: { anchor: pos } });
     const at = { x: e.clientX, y: e.clientY };
+    // 커서 문장이 MERGE 면 '점검' — 문장 나누기는 빠르지만, 늦으면 기다리지 않고 메뉴부터
+    const cur = /\bMERGE\b/i.test(t.editor.text())
+      ? await Promise.race([this.currentStatement(t).catch(() => null), new Promise<null>((r) => setTimeout(() => r(null), 300))])
+      : null;
+    const merge = cur?.a.statement ? mergeCheck(cur.a.statement.text) : null;
+    const check: MenuItem[] = merge ? [{ label: "점검", sub: [
+      { label: "MERGE 중복 매칭 행 찾기 (ORA-30926)", disabled: !t.conn, run: () => void this.runQuery(t, merge.dupMatch) },
+      { label: "MERGE 점검 쿼리 만들기 — 문장 아래에", run: () => this.insertBelow(t, cur!.to, merge.script) },
+    ] }] : [];
     const edit: MenuItem[] = [
       { label: "실행", hint: "Ctrl+Enter", run: () => this.runStatement() },
+      ...check,
       { label: "SQL 포맷", hint: "Ctrl+Shift+F", run: () => this.formatSql() },
       { label: "SELECT 목록을 몇 줄로…", hint: "Ctrl+Alt+L", run: () => void this.wrapSelectList() },
       { label: "대문자로 (구문만)", hint: "Ctrl+Shift+U", run: () => { changeCase("upper")(view); view.focus(); } },
@@ -2422,6 +2435,18 @@ export class App {
       if (o) showMenu(at.x, at.y, [...this.objectMenuItems(t, o, at), { sep: true }, ...edit]);
       else showMenu(at.x, at.y, [{ title: `${raw} — 찾을 수 없는 이름` }, { sep: true }, ...edit]);
     }
+  }
+
+  /** 문장 끝(뒤따르는 ; 나 / 줄까지) 다음에 빈 줄을 두고 글을 넣고, 넣은 곳으로 커서를 옮긴다 */
+  private insertBelow(t: Tab, end: number, text: string) {
+    const v = t.editor.view;
+    const doc = v.state.doc;
+    const after = doc.sliceString(end, Math.min(doc.length, end + 200));
+    const m = /^\s*;|^\s*\n\s*\/[ \t]*(?=\n|$)/.exec(after);
+    const pos = doc.lineAt(end + (m ? m[0].length : 0)).to;
+    const insert = `\n\n${text}\n`;
+    v.dispatch({ changes: { from: pos, insert }, selection: { anchor: pos + 2 }, scrollIntoView: true });
+    v.focus();
   }
 
   /** 문장 하나를 이 탭에서 실행해 결과 그리드로 (건수 세기 등) */

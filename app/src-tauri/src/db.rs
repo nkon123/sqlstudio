@@ -213,8 +213,11 @@ pub fn save_profile(st: State<'_, AppState>, mut profile: Profile, original_name
     };
     {
         let mut cfg = st.cfg.wr();
+        // 새 접속이거나 이름을 바꾸면 같은 이름이 없어야 한다 — 새 접속을 그냥 두면 아래 find 가
+        // 다른 그룹의 같은 이름 접속을 찾아 덮어써 둘이 하나로 합쳐진다
+        let fresh = original_name.as_deref().is_none_or(|k| !k.eq_ignore_ascii_case(&profile.name));
         let key = original_name.unwrap_or_else(|| profile.name.clone());
-        if !key.eq_ignore_ascii_case(&profile.name) && cfg.profile(&profile.name).is_some() {
+        if fresh && cfg.profile(&profile.name).is_some() {
             return Err(ErrView::msg("invalid", format!("같은 이름의 접속이 있습니다: {}", profile.name)));
         }
         // 이름을 바꾸면 그 이름으로 저장된 분석 결과 폴더도 따라 옮긴다 (안 그러면 '분석한 게 없다'로 보인다)

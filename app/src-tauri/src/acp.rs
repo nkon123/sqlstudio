@@ -1060,7 +1060,8 @@ mod tests {
     #[test]
     fn opencode_always_pure() {
         let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let oc = std::path::Path::new(r"C:\npm\opencode.cmd");
+        // 구분자 없는 이름으로 — CI(Linux) 는 \ 를 경로 구분자로 보지 않아 C:\npm\opencode.cmd 의 이름이 opencode 가 아니게 된다
+        let oc = std::path::Path::new("opencode.cmd");
         assert_eq!(launch_args(oc, &args(&["acp"]), true), args(&["acp", "--pure"]));
         assert_eq!(launch_args(oc, &args(&["acp", "--pure", "--log-level", "WARN"]), true), args(&["acp", "--pure", "--log-level", "WARN"]));
         assert_eq!(launch_args(oc, &args(&["--version"]), true), args(&["--version"]));

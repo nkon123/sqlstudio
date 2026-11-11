@@ -4,6 +4,7 @@
 // 스크롤이 끊기지 않는다. 아래 끝에 가까워지면 서버에서 다음 페이지를 가져온다 (Toad 방식).
 
 import type { Column, RowPage } from "./api";
+import { parseTsv, planFillDown, planPaste } from "./gridfill";
 
 const ROW_H = 22;
 const OVERSCAN = 8;
@@ -46,6 +47,9 @@ export interface GridChanges {
 }
 
 const NUMERIC = /^(NUMBER|FLOAT|BINARY_|INTEGER)/i;
+
+/** 되돌리기 한 칸 — rows 인덱스·열, 바꾸기 전 바뀜 표시가 있었는지와 그 값 */
+interface UndoCell { ri: number; c: number; had: boolean; prev: string | null }
 
 /** 필터 식: "값" (아무 열 포함) · "열=값" · "열~포함" · "열>값" / "열<값" · "열 is null" */
 function compileFilter(text: string, cols: Column[]): ((r: (string | null)[]) => boolean) | null {
@@ -130,6 +134,18 @@ export class ResultGrid {
   /** 머리 끝의 빈칸 — 본문의 세로 스크롤바 폭만큼. 없으면 오른쪽 끝에서 머리가 그만큼 덜 스크롤되어 열과 어긋난다 */
   private filler = div("grid-filler");
   private fillerW = -1;
+  /** 편집 모드에서 키보드를 받는 입력칸 — 커서 셀 위에 투명하게 떠 있다가, 글자를 치면(한글 조합 포함) 그대로 고치는 칸이 된다.
+   *  셀 안에 입력칸을 새로 만들면 친 첫 글자·조합 중인 한글이 사라지므로 미리 포커스를 받아 둔다 */
+  private ime = document.createElement("input");
+  /** 고치는 중이면: 끝내기 (save: 값을 넣는다) */
+  private endEdit: ((save: boolean) => void) | null = null;
+  private editKey: ((ev: KeyboardEvent) => void) | null = null;
+  /** 고치는 셀 (화면 행·열) — 입력칸이 스크롤을 따라가게 */
+  private editAt: { r: number; c: number } | null = null;
+  /** 되돌리기 (Ctrl+Z) — 한 번에 바꾼 칸들의 이전 상태 */
+  private undo: UndoCell[][] = [];
+  /** 상태줄에 잠깐 붙이는 말 (여러 칸 바꾼 결과 등) — 셀을 옮기면 지운다 */
+  private flash = "";
 
   constructor(private opts: GridOptions = {}) {
     this.el = document.createElement("div");
@@ -157,10 +173,29 @@ export class ResultGrid {
       this.opts.onContextMenu(this.rows[this.view[at.r]], at.c, e);
     });
     // 더블클릭: 첫 클릭이 셀을 다시 그려 dblclick 이 사라지므로 mousedown 의 두 번째 클릭으로 받는다
+    this.ime.className = "grid-input grid-ime";
+    this.ime.placeholder = "비우면 NULL";
+    this.ime.spellcheck = false;
+    this.ime.autocomplete = "off";
+    this.ime.style.display = "none";
+    this.el.append(this.ime);
+    // 고치는 중이 아닐 때 들어온 글자 = 커서 셀을 그 글자로 고치기 시작
+    this.ime.addEventListener("compositionstart", () => this.typedStart(true));
+    this.ime.addEventListener("input", () => { if (!this.endEdit) this.typedStart(false); });
+    this.ime.addEventListener("keydown", (ev) => {
+      if (!this.editKey) return; // 고치는 중이 아니면 그리드 키로 (위로 올라가 onKey)
+      ev.stopPropagation();
+      this.editKey(ev);
+    });
+    this.ime.addEventListener("blur", () => this.endEdit?.(true));
+    // 편집 모드에서는 그리드에 포커스가 오면 입력칸으로 넘긴다 (밖에서 grid.el.focus() 해도)
+    this.el.addEventListener("focus", () => { if (this.edit) this.ime.focus({ preventScroll: true }); });
+    this.el.addEventListener("paste", (e) => this.onPaste(e));
     this.measureCtx.font = "12px ui-monospace, Consolas, monospace";
   }
 
   clear(message = "") {
+    this.endEdit?.(false);
     this.columns = [];
     this.rows = [];
     this.hasMore = false;
@@ -173,6 +208,8 @@ export class ResultGrid {
     this.dirty.clear();
     this.deleted.clear();
     this.added.clear();
+    this.undo = [];
+    this.syncIme();
     this.header.replaceChildren();
     this.body.replaceChildren();
     this.spacer.style.height = "0px";
@@ -184,6 +221,7 @@ export class ResultGrid {
   }
 
   setPage(page: RowPage) {
+    this.endEdit?.(false);
     this.columns = page.columns;
     this.rows = page.rows.slice();
     this.hasMore = page.has_more;
@@ -196,6 +234,8 @@ export class ResultGrid {
     this.dirty.clear();
     this.deleted.clear();
     this.added.clear();
+    this.undo = [];
+    this.syncIme();
     // 같은 열이 있으면 필터를 이어 쓴다 (다시 실행했을 때)
     this.filter = compileFilter(this.filterText, this.columns);
     this.rebuildView();
@@ -270,7 +310,8 @@ export class ResultGrid {
     const mask = this.rowMask ? (this.rowMask.keep ? " · 고른 행만 보는 중" : ` · 고른 행 ${this.rowMask.ids.size}개 뺀 것을 보는 중`) : "";
     const n = this.selectionCount();
     const pick = n > 1 ? ` · ${n.toLocaleString()}개 선택` : "";
-    this.opts.onStatus?.(`${shown}${this.rows.length.toLocaleString()}행${this.hasMore ? " · 더 있음 (스크롤하면 가져옴)" : ""}${sorted}${edit}${mask}${pick}`);
+    const flash = this.flash ? ` · ${this.flash}` : "";
+    this.opts.onStatus?.(`${shown}${this.rows.length.toLocaleString()}행${this.hasMore ? " · 더 있음 (스크롤하면 가져옴)" : ""}${sorted}${edit}${mask}${pick}${flash}`);
   }
 
   // ── 정렬·필터 ─────────────────────────────────────
@@ -333,10 +374,13 @@ export class ResultGrid {
 
   /** 편집 모드 켜기 (ROWID 를 붙여 다시 조회한 결과에서) */
   setEditable(e: EditSetup | null) {
+    this.endEdit?.(false);
     if (this.added.size) this.dropAdded();
     this.edit = e;
     this.dirty.clear();
     this.deleted.clear();
+    this.undo = [];
+    this.syncIme();
     this.renderHeader();
     this.update();
     this.status();
@@ -396,8 +440,7 @@ export class ResultGrid {
     this.viewport.scrollTop = Math.max(0, (vr + 1) * ROW_H - this.viewport.clientHeight);
     this.update();
     this.notifyDirty();
-    const el = this.cellEl(vr, c);
-    if (el) this.startEdit(vr, c, el);
+    this.startEdit(vr, c);
   }
 
   /** 아직 넣지 않은 새 행을 뺀다 (끝에 붙어 있으니 앞 행의 인덱스는 그대로) */
@@ -425,15 +468,18 @@ export class ResultGrid {
     this.dirty.clear();
     this.deleted.clear();
     this.added.clear();
+    this.undo = [];
     this.rebuildView();
     this.update();
     this.notifyDirty();
   }
 
   discardChanges() {
+    this.endEdit?.(false);
     if (this.added.size) this.dropAdded();
     this.dirty.clear();
     this.deleted.clear();
+    this.undo = [];
     this.update();
     this.notifyDirty();
   }
@@ -455,54 +501,280 @@ export class ResultGrid {
     return m && m.has(c) ? m.get(c)! : this.rows[r][c];
   }
 
-  private startEdit(viewRow: number, c: number, cellEl: HTMLElement) {
+  /** 편집 모드면 입력칸을 보이고(투명), 아니면 숨긴다. 숨길 때 포커스가 거기 있었으면 그리드로 */
+  private syncIme() {
+    const on = this.edit != null;
+    if (!on && document.activeElement === this.ime) this.el.focus({ preventScroll: true });
+    this.ime.style.display = on ? "" : "none";
+    if (on && document.activeElement === this.el) this.ime.focus({ preventScroll: true });
+  }
+
+  /** 키보드를 받을 곳으로 — 편집 모드면 입력칸, 아니면 그리드 */
+  private focusSelf() {
+    if (this.edit) this.ime.focus({ preventScroll: true });
+    else this.el.focus({ preventScroll: true });
+  }
+
+  /** 입력칸을 고치는 셀(없으면 커서 셀) 위에 — 한글 입력기의 후보 창도 거기 뜬다 */
+  private placeIme() {
+    if (!this.edit) return;
+    const at = this.editAt ?? this.cur;
+    const st = this.ime.style;
+    if (!at || at.c >= this.columns.length) {
+      st.clipPath = "inset(50%)";
+      return;
+    }
+    const vp = this.viewport;
+    let left = NUM_W;
+    for (let i = 0; i < at.c; i++) if (!this.hiddenCol(i)) left += this.widths[i];
+    const top = vp.offsetTop + at.r * ROW_H - vp.scrollTop + 1;
+    const x = vp.offsetLeft + left - vp.scrollLeft;
+    st.left = `${x}px`;
+    st.top = `${top}px`;
+    st.width = `${this.widths[at.c]}px`;
+    // 화면 밖으로 스크롤되면 머리 위에 겹치지 않게 감춘다 (visibility·display 는 포커스를 잃게 해 쓰지 않는다)
+    const out = top < vp.offsetTop || top + ROW_H > vp.offsetTop + vp.clientHeight || x < vp.offsetLeft + NUM_W - 1 || x > vp.offsetLeft + vp.clientWidth;
+    st.clipPath = out ? "inset(50%)" : "";
+  }
+
+  /** 고칠 수 있는 칸인가 — 고칠 수 있는 열이고, 지울 행·넣은 뒤 ROWID 를 모르는 행이 아니다 */
+  private canEdit(ri: number, c: number) {
+    return !!this.edit && this.edit.editable.has(c) && !this.deleted.has(ri) && !this.locked(ri);
+  }
+
+  /** 칸 하나 바꾸기 — 이전 상태를 log 에 남긴다. 원래 값과 같아지면 바뀜 표시를 지운다. 달라졌으면 참 */
+  private setCell(ri: number, c: number, nv: string | null, log: UndoCell[]) {
+    const m = this.dirty.get(ri);
+    const had = !!m?.has(c);
+    const now = had ? m!.get(c)! : this.rows[ri][c];
+    if (now === nv) return false;
+    log.push({ ri, c, had, prev: had ? m!.get(c)! : null });
+    const mm = m ?? new Map<number, string | null>();
+    if (nv === this.rows[ri][c]) mm.delete(c);
+    else mm.set(c, nv);
+    if (mm.size) this.dirty.set(ri, mm);
+    else this.dirty.delete(ri);
+    return true;
+  }
+
+  /** 여러 칸을 한 번에 (화면 행·열) — 되돌리기 한 번으로 묶는다. 고칠 수 없는 칸은 건너뛰고 상태줄에 알린다 */
+  private putCells(cells: { r: number; c: number; v: string | null }[], what: string) {
+    const log: UndoCell[] = [];
+    let changed = 0;
+    let skipped = 0;
+    for (const x of cells) {
+      const ri = this.view[x.r];
+      if (ri == null || !this.canEdit(ri, x.c)) {
+        skipped++;
+        continue;
+      }
+      if (this.setCell(ri, x.c, x.v, log)) changed++;
+    }
+    if (log.length) {
+      this.undo.push(log);
+      if (this.undo.length > 200) this.undo.shift();
+    }
+    this.flash = cells.length > 1 || skipped
+      ? `${what}: ${changed.toLocaleString()}칸 바꿈${skipped ? ` · ${skipped.toLocaleString()}칸 건너뜀 (고칠 수 없는 열·지울 행)` : ""}${changed ? " · Ctrl+Z 되돌리기" : ""}`
+      : "";
+    this.update();
+    this.notifyDirty();
+    return changed;
+  }
+
+  /** Ctrl+Z — 마지막으로 바꾼 묶음을 되돌린다 */
+  undoLast() {
+    const log = this.undo.pop();
+    if (!log) {
+      this.flash = "되돌릴 것이 없습니다";
+      this.status();
+      return;
+    }
+    for (const x of [...log].reverse()) {
+      const m = this.dirty.get(x.ri) ?? new Map<number, string | null>();
+      if (x.had) m.set(x.c, x.prev);
+      else m.delete(x.c);
+      if (m.size) this.dirty.set(x.ri, m);
+      else this.dirty.delete(x.ri);
+    }
+    this.flash = `되돌림: ${log.length.toLocaleString()}칸`;
+    this.update();
+    this.notifyDirty();
+  }
+
+  /** 보이는 열 (화면 순서) */
+  private visCols() {
+    return this.columns.map((_, i) => i).filter((i) => !this.hiddenCol(i));
+  }
+
+  /** 붙여넣기 — 값 하나면 고른 칸 전부에, 표면 고른 사각형의 왼쪽 위부터 그 모양대로 (사각형이 배수면 되풀이) */
+  pasteText(text: string) {
+    if (!this.edit) return;
+    const clip = parseTsv(text);
+    const cols = this.visCols();
+    const one = clip.length === 1 && clip[0].length === 1;
+    const nul = (v: string) => (v === "" ? null : v);
+    let cells: { r: number; c: number; v: string | null }[];
+    let cut = "";
+    if (this.picked.size && one) {
+      // Ctrl+클릭으로 떨어진 칸을 골랐으면 그 칸들에
+      cells = this.selCells().map((x) => ({ ...x, v: nul(clip[0][0]) }));
+    } else {
+      const at = this.cur ?? (this.sel ? { r: this.sel.r1, c: this.sel.c1 } : null);
+      const s = this.picked.size || !this.sel ? (at ? { r0: at.r, c0: at.c, r1: at.r, c1: at.c } : null) : this.sel;
+      if (!s) return;
+      const k0 = cols.indexOf(s.c0);
+      const k1 = cols.indexOf(s.c1);
+      if (k0 < 0 || k1 < 0) return;
+      const plan = planPaste(clip, { r0: s.r0, r1: s.r1, k0, k1 }, this.view.length, cols.length);
+      cells = plan.puts.map((p) => ({ r: p.r, c: cols[p.k], v: nul(p.v) }));
+      if (plan.cutRows || plan.cutCols) {
+        const what = [plan.cutRows ? `${plan.cutRows}행` : "", plan.cutCols ? `${plan.cutCols}열` : ""].filter(Boolean).join(" ");
+        cut = ` · 끝을 넘은 ${what}은 못 넣음`;
+      }
+      // 붙인 곳을 고른 상태로 (엑셀처럼)
+      if (plan.puts.length) {
+        const rs = plan.puts.map((p) => p.r);
+        const ks = plan.puts.map((p) => p.k);
+        this.picked.clear();
+        this.sel = { r0: Math.min(...rs), c0: cols[Math.min(...ks)], r1: Math.max(...rs), c1: cols[Math.max(...ks)] };
+      }
+    }
+    this.putCells(cells, "붙여넣기");
+    if (cut) {
+      this.flash += cut;
+      this.status();
+    }
+  }
+
+  private onPaste(e: ClipboardEvent) {
+    // 고치는 중이면 입력칸에 그대로 붙는다
+    if (!this.edit || this.endEdit) return;
+    const text = e.clipboardData?.getData("text/plain");
+    if (text == null) return;
+    e.preventDefault();
+    this.pasteText(text);
+  }
+
+  /** Ctrl+D — 열마다 맨 위 고른 칸 값을 아래 고른 칸에 (한 행만 골랐으면 바로 위 행 값을) */
+  fillDown() {
+    if (!this.edit) return;
+    this.putCells(planFillDown(this.selCells(), (r, c) => this.value(this.view[r], c)), "아래로 채우기");
+  }
+
+  /** 고른 칸 값을 비운다 (NULL) — Backspace */
+  clearSelected() {
+    if (!this.edit) return;
+    this.putCells(this.selCells().map((x) => ({ ...x, v: null })), "값 지우기");
+  }
+
+  /** 커서를 그 셀로 옮기고 그 셀 하나를 고른다 */
+  private moveTo(r: number, c: number) {
+    r = Math.max(0, Math.min(this.view.length - 1, r));
+    this.picked.clear();
+    this.sel = { r0: r, c0: c, r1: r, c1: c };
+    this.cur = { r, c };
+    this.reveal(r, c);
+    this.update();
+    this.status();
+  }
+
+  /** 고치는 중이 아닐 때 친 글자 — 커서 셀을 그 글자로 고치기 시작한다. 고칠 수 없는 칸이면 글자를 버린다 */
+  private typedStart(composing: boolean) {
+    if (this.endEdit || !this.edit) return;
+    const at = this.cur ?? (this.sel ? { r: this.sel.r1, c: this.sel.c1 } : null);
+    if (at && this.startEdit(at.r, at.c, true) && this.endEdit) return;
+    this.ime.value = "";
+    if (composing) {
+      // 조합 중인 한글을 끊는다
+      this.ime.blur();
+      this.ime.focus({ preventScroll: true });
+    }
+    this.flash = at ? "이 칸은 고칠 수 없습니다 (고칠 수 없는 열·지울 행)" : "";
+    this.status();
+  }
+
+  /** 셀 고치기 — 커서 셀 위의 입력칸을 보이게 해 쓴다.
+   *  typed: 글자를 쳐서 시작 — 친 글자로 바꾸고, 방향키는 칸을 옮긴다. 아니면(F2·Enter·더블클릭) 지금 값을 고르고 방향키는 글자 사이를 옮긴다.
+   *  Enter: 넣고 아래 칸 · Shift+Enter: 위 칸 · Ctrl+Enter: 고른 칸 전부에 · Tab/Shift+Tab: 옆 고칠 수 있는 칸 · Esc: 그만 */
+  private startEdit(viewRow: number, c: number, typed = false): boolean {
     const e = this.edit;
     if (!e || !e.editable.has(c)) return false;
     const r = this.view[viewRow];
+    if (r == null) return false;
     if (this.deleted.has(r) || this.locked(r)) return true;
-    const cur = this.value(r, c);
-    const input = document.createElement("input");
-    input.className = "grid-input";
-    input.value = cur ?? "";
-    input.placeholder = "비우면 NULL";
-    input.style.width = cellEl.style.width;
-    cellEl.replaceChildren(input);
-    input.focus();
-    input.select();
+    if (this.endEdit) this.endEdit(true);
+    const input = this.ime;
+    this.flash = "";
+    this.cur = { r: viewRow, c };
+    if (!this.inSel(viewRow, c)) {
+      this.picked.clear();
+      this.sel = { r0: viewRow, c0: c, r1: viewRow, c1: c };
+    }
+    this.editAt = { r: viewRow, c };
+    this.reveal(viewRow, c);
+    // 친 글자(조합 중인 한글 포함)는 입력칸에 이미 들어와 있다
+    if (!typed) input.value = this.value(r, c) ?? "";
+    input.classList.add("on");
+    this.update();
+    input.focus({ preventScroll: true });
+    if (!typed) input.select();
     let done = false;
-    const finish = (save: boolean) => {
+    const finish = (save: boolean, opt: { all?: boolean; move?: [number, number]; refocus?: boolean } = {}) => {
       if (done) return;
       done = true;
+      const nv = input.value === "" ? null : input.value; // Oracle 에서 빈 문자열은 NULL 이다
+      this.endEdit = null;
+      this.editKey = null;
+      this.editAt = null;
+      input.classList.remove("on");
+      input.value = "";
       if (save) {
-        // Oracle 에서 빈 문자열은 NULL 이다
-        const nv = input.value === "" ? null : input.value;
-        const orig = this.rows[r][c];
-        const m = this.dirty.get(r) ?? new Map<number, string | null>();
-        if (nv === orig) m.delete(c);
-        else m.set(c, nv);
-        if (m.size) this.dirty.set(r, m);
-        else this.dirty.delete(r);
-        this.notifyDirty();
+        const cells = opt.all ? this.selCells() : [];
+        if (!cells.some((x) => x.r === viewRow && x.c === c)) cells.push({ r: viewRow, c });
+        this.putCells(cells.map((x) => ({ ...x, v: nv })), "한 번에 넣기");
+      } else {
+        this.update();
       }
-      this.update();
-      this.el.focus();
+      if (opt.move) {
+        const cols = this.visCols();
+        const k = Math.max(0, Math.min(cols.length - 1, cols.indexOf(c) + opt.move[1]));
+        this.moveTo(viewRow + opt.move[0], cols[k]);
+      }
+      if (opt.refocus !== false) this.focusSelf();
     };
-    input.addEventListener("keydown", (ev) => {
-      ev.stopPropagation();
-      if (ev.key === "Enter") finish(true);
-      else if (ev.key === "Escape") finish(false);
-      else if (ev.key === "Tab") {
+    this.editKey = (ev) => {
+      // 한글 조합을 마치는 키는 입력기 몫
+      if (ev.isComposing || ev.keyCode === 229) return;
+      const plain = !ev.ctrlKey && !ev.metaKey && !ev.altKey;
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        if (ev.ctrlKey || ev.metaKey) finish(true, { all: true });
+        else finish(true, { move: [ev.shiftKey ? -1 : 1, 0] });
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        finish(false);
+      } else if (ev.key === "Tab") {
         ev.preventDefault();
         finish(true);
-        // 오른쪽 편집 가능한 칸으로
-        const next = [...e.editable].filter((x) => x > c).sort((a, b) => a - b)[0];
+        // 옆의 고칠 수 있는 칸으로 (Shift+Tab 은 왼쪽)
+        const ed = [...e.editable].filter((x) => !this.hiddenCol(x)).sort((a, b) => a - b);
+        const next = ev.shiftKey ? ed.filter((x) => x < c).pop() : ed.find((x) => x > c);
         if (next != null) {
-          const el = this.cellEl(viewRow, next);
-          if (el) this.startEdit(viewRow, next, el);
+          this.moveTo(viewRow, next);
+          this.startEdit(viewRow, next);
+        }
+      } else if (typed && plain && !ev.shiftKey) {
+        const mv: Record<string, [number, number]> = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
+        const m = mv[ev.key];
+        if (m) {
+          ev.preventDefault();
+          finish(true, { move: m });
         }
       }
-    });
-    input.addEventListener("blur", () => finish(true));
+    };
+    // 다른 셀을 누르거나 포커스가 나가면 넣고 끝낸다
+    this.endEdit = (save) => finish(save, { refocus: false });
     return true;
   }
 
@@ -546,7 +818,7 @@ export class ResultGrid {
       cell.textContent = (this.showNotes && note ? note : c.name) + arrow;
       if (note) cell.classList.add("noted");
       if (this.edit && !this.edit.editable.has(i)) cell.classList.add("ro");
-      cell.title = `${c.name}${note ? ` (${note})` : ""}  ${c.type_name}${c.nullable ? "" : " NOT NULL"} — 눌러서 정렬${this.edit ? (this.edit.editable.has(i) ? " · 더블클릭으로 고치기" : " · 고칠 수 없는 열") : ""}`;
+      cell.title = `${c.name}${note ? ` (${note})` : ""}  ${c.type_name}${c.nullable ? "" : " NOT NULL"} — 눌러서 정렬${this.edit ? (this.edit.editable.has(i) ? " · 글자를 치거나 더블클릭해 고치기" : " · 고칠 수 없는 열") : ""}`;
       cell.addEventListener("click", (e) => {
         if ((e.target as HTMLElement).classList.contains("grid-grip")) return;
         this.toggleSort(i);
@@ -655,6 +927,7 @@ export class ResultGrid {
       frag.append(row);
     }
     this.body.replaceChildren(frag);
+    this.placeIme();
     // 끝에서 두 화면 안쪽이면 다음 페이지
     if (this.hasMore && !this.loading && top + h > n * ROW_H - h * 2) this.loadMore();
   }
@@ -774,11 +1047,14 @@ export class ResultGrid {
     // 기본 동작(포커스 옮기기·글자 드래그 선택)을 막는다 — 아래 update() 가 누른 셀을 다시 그려 문서에서 빠지면
     // 브라우저가 포커스를 그리드에서 빼 방향키가 안 먹고, 드래그하면 글자 선택이 셀 선택과 겹쳐 보였다
     e.preventDefault();
+    // 고치던 칸은 넣고 끝낸다 (기본 동작을 막아 입력칸의 blur 가 오지 않는다)
+    this.endEdit?.(true);
+    this.flash = "";
     if (e.detail >= 2) {
       this.onDblClick(e);
       return;
     }
-    this.el.focus();
+    this.focusSelf();
     // 이미 고른 셀 위의 오른쪽 클릭은 선택을 그대로 둔다 (고른 값으로 메뉴를 열려고)
     if (e.button === 2 && this.inSel(at.r, at.c)) return;
     this.cur = { ...at };
@@ -824,8 +1100,7 @@ export class ResultGrid {
   private onDblClick(e: MouseEvent) {
     const at = this.cellAt(e);
     if (!at) return;
-    const cellEl = (e.target as HTMLElement).closest(".grid-cell") as HTMLElement;
-    if (this.edit && this.startEdit(at.r, at.c, cellEl)) return;
+    if (this.edit && this.startEdit(at.r, at.c)) return;
     if (this.opts.onDoubleClick?.(this.rows[this.view[at.r]], at.c)) return;
     const v = this.value(this.view[at.r], at.c);
     // 긴 값(CLOB 등)은 창으로 본다
@@ -863,11 +1138,22 @@ export class ResultGrid {
     } else if (this.edit && (e.key === "Delete" || (e.ctrlKey && e.key === "Delete"))) {
       e.preventDefault();
       this.toggleDeleteSelected();
-    } else if (this.edit && (e.key === "F2" || e.key === "Enter") && this.sel) {
+    } else if (this.edit && (e.key === "F2" || e.key === "Enter") && !e.ctrlKey && (this.cur || this.sel)) {
       e.preventDefault();
-      const el = this.cellEl(this.sel.r1, this.sel.c1);
-      if (el) this.startEdit(this.sel.r1, this.sel.c1, el);
+      const at = this.cur ?? { r: this.sel!.r1, c: this.sel!.c1 };
+      this.startEdit(at.r, at.c);
+    } else if (this.edit && e.key === "Backspace" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      // 고른 칸 값 비우기 (NULL) — 행 지우기 표시는 Delete
+      e.preventDefault();
+      this.clearSelected();
+    } else if (this.edit && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === "KeyZ") {
+      e.preventDefault();
+      this.undoLast();
+    } else if (this.edit && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === "KeyD") {
+      e.preventDefault();
+      this.fillDown();
     }
+    // Ctrl+V 는 paste 이벤트로 (onPaste) — 클립보드 권한 없이 글을 받는다
   }
 
   // ── 키보드 이동 ─────────────────────────────────────
@@ -910,6 +1196,7 @@ export class ResultGrid {
       default: return false;
     }
     e.preventDefault();
+    this.flash = "";
     // 처음 누른 키는 커서를 첫 셀에 놓기만 한다
     if (!from) { r = 0; ci = 0; }
     const c = cols[ci];
@@ -929,12 +1216,6 @@ export class ResultGrid {
     return true;
   }
 
-  /** 그 셀의 요소 — 화면 밖의 열·행은 그리지 않으므로 먼저 보이게 스크롤하고 바로 다시 그린다 */
-  private cellEl(r: number, c: number): HTMLElement | null {
-    this.reveal(r, c);
-    this.update();
-    return this.body.querySelector(`.grid-cell[data-r="${r}"][data-c="${c}"]`);
-  }
 
   /** 그 셀이 보이게 스크롤 */
   private reveal(r: number, c: number) {

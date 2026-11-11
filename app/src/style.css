@@ -370,7 +370,7 @@ body.row-resizing { cursor: row-resize; user-select: none; }
 .cm-editor .cm-selectionMatch { background: var(--editor-sel-match) !important; }
 
 /* ── 그리드 ── */
-.grid { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; outline: none; font: 12px var(--mono); }
+.grid { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; outline: none; font: 12px var(--mono); position: relative; }
 .grid-header { overflow: hidden; border-bottom: 1px solid var(--line); background: var(--bg); flex: none; }
 /* 끌면 셀 선택만 — 열이 없는 빈 곳에서 끌어도 글자 선택이 생기지 않게 (고치는 칸은 아래 .grid-input 에서 다시 켠다) */
 .grid-viewport { flex: 1; overflow: auto; position: relative; user-select: none; }
@@ -385,7 +385,7 @@ body.row-resizing { cursor: row-resize; user-select: none; }
 .grid-skip { flex: none; }
 .grid-cell.null { color: var(--dim); font-style: italic; }
 .grid-cell.sel { background: var(--sel); }
-.grid:focus .grid-cell.cur { outline: 1px solid var(--accent); outline-offset: -1px; }
+.grid:focus-within .grid-cell.cur { outline: 1px solid var(--accent); outline-offset: -1px; }
 .grid-filler { flex: none; }
 .grid-grip { position: absolute; right: -3px; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 1; }
 .grid-empty { color: var(--dim); padding: 12px; }
@@ -696,6 +696,9 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .grid-row.added .grid-cell { background: color-mix(in srgb, var(--ok) 12%, transparent); }
 .grid-row.added .grid-num { color: var(--ok); font-weight: 600; }
 .grid-input { user-select: text; box-sizing: border-box; height: 20px; font: inherit; padding: 0 3px; border: 1px solid var(--accent); }
+/* 편집 모드의 입력칸 — 커서 셀 위에 투명하게 떠서 키를 받다가, 고치기 시작하면 보인다 */
+.grid-ime { position: absolute; z-index: 3; opacity: 0; pointer-events: none; background: var(--panel); color: var(--text); outline: none; }
+.grid-ime.on { opacity: 1; pointer-events: auto; }
 
 /* ── 데이터 흐름도 ── */
 .an-main.an-wide { grid-template-columns: 0 0 minmax(0, 1fr); }

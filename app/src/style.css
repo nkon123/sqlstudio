@@ -183,6 +183,8 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .tabs { display: flex; align-items: center; gap: 2px; overflow-x: auto; overflow-y: hidden; padding: 6px 6px 0; scrollbar-width: none; }
 .tab { position: relative; display: flex; align-items: center; gap: 6px; height: 30px; max-width: 240px; min-width: 110px; flex-shrink: 1; padding: 0 6px 0 10px; border-radius: 7px;
   cursor: default; white-space: nowrap; color: var(--dim); background: transparent; }
+/* 탭이 많아 줄어들어도 고른 탭은 줄지 않고 넓게 — 이름이 보이게 (다른 탭이 더 줄거나 줄이 밀린다) */
+.tabs:not(.vertical) .tab.active { flex-shrink: 0; max-width: 360px; }
 .tab::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--tab-conn); display: none; }
 .tab[style*="--tab-conn"]::before { display: block; }
 .tab-title { overflow: hidden; text-overflow: ellipsis; }
@@ -779,6 +781,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .dock-tab { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; max-width: 180px; border: 0; border-bottom: 2px solid transparent;
   border-radius: 0; background: none; padding: 3px 8px; font-size: 12px; color: var(--dim); }
 .dock-tab > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
+.dock-tab.on { flex-shrink: 0; max-width: 320px; }
 .dock-tab.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
 .dock-x { opacity: .5; padding: 0 2px; } .dock-x:hover { opacity: 1; color: var(--danger); }
 .dock-menu { flex: none; border: 0; background: none; padding: 0 6px; font-size: 14px; color: var(--dim); }

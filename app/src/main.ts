@@ -43,6 +43,7 @@ import { alertBox, applyTheme, bindBox, confirmBox, h, icon, modal, passwordBox,
 import { Tab } from "./tab";
 import { SideLayout } from "./layout";
 import { SideDock } from "./sidedock";
+import { sqlView } from "./sqlview";
 import { connMenu, fileMenu, palette, runMenu, toolsMenu } from "./menus";
 import { openPalette } from "./palette";
 import { guessTable } from "./export-text";
@@ -1677,7 +1678,7 @@ export class App {
       let el: HTMLElement;
       try {
         if (key === "#columns") el = this.columnsTable(desc!);
-        else if (key === "#source") el = h("pre", { class: "ob-src" }, await api.getDdl(id, type, q));
+        else if (key === "#source") el = sqlView(await api.getDdl(id, type, q), "ob-sql").el;
         else {
           const sec = sections.find((x) => x.key === key)!;
           const page = await invoke<RowPage>("object_section", { id, owner: o.owner, name: o.name, section: key });

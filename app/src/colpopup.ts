@@ -13,6 +13,7 @@ import { errOf, type Column, type DepObj, type ObjectDeps, type TableDesc } from
 import { TARGET_LABEL, type Target } from "./colinsert";
 import { showMenu, type MenuItem } from "./ctxmenu";
 import { ResultGrid } from "./grid";
+import { sqlView } from "./sqlview";
 import { h, toast } from "./ui";
 import { KIND } from "./usage";
 
@@ -109,7 +110,8 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   /** 그리드 행(종류|객체) → 의존 객체 */
   const depOf = new Map<string, DepObj>();
   const depKey = (r: (string | null)[]) => `${r[0]}|${r[1]}`;
-  const scriptEl = h("pre", { class: "cp-script", tabindex: "0" });
+  // 스크립트 탭 — 편집기와 같은 구문 강조 (읽기 전용, 고르기·복사·Ctrl+F)
+  const script = sqlView("", "cp-sql");
 
   const filter = h("input", { placeholder: "컬럼·형식·설명 거르기", class: "cp-filter" });
   const body = h("div", { class: "cp-body" });
@@ -252,13 +254,13 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   function render() {
     if (view === "script") {
       count.textContent = "";
-      body.replaceChildren(scriptEl);
+      body.replaceChildren(script.el);
       if (ddlText === null && o.script) {
         ddlText = "";
         o.script().then((s) => { ddlText = s; }).catch((e) => { ddlText = `-- ${errOf(e).message}`; })
-          .finally(() => { if (view === "script") scriptEl.textContent = ddlText; });
+          .finally(() => script.set(ddlText ?? ""));
       }
-      scriptEl.textContent = ddlText || "읽는 중…";
+      script.set(ddlText || "-- 읽는 중…");
       return;
     }
     if (!grid.el.isConnected) body.replaceChildren(grid.el);
@@ -351,7 +353,8 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   body.append(grid.el);
   win.addEventListener("keydown", (e) => {
     // 오른쪽에 붙인 창은 Esc 로 닫지 않는다 (탭의 × 로)
-    if (e.key === "Escape" && !win.classList.contains("docked")) { e.stopPropagation(); close(); }
+    // 스크립트의 찾기 칸에서 Esc 는 찾기만 닫는다
+    if (e.key === "Escape" && !win.classList.contains("docked") && !(e.target as HTMLElement).closest(".cm-panels")) { e.stopPropagation(); close(); }
   });
 
   // ── 4방향 휠 ── 모디파이어만 0.2초 누르고 있으면 뜬다 (Ctrl+Shift+C 같은 단축키는 그 전에 다른 키가 와서 안 뜬다)

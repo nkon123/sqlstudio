@@ -232,8 +232,11 @@ export const api = {
   harnessOpts: () => invoke<HarnessOpts>("ai_harness_opts"),
   setHarnessOpts: (o: { tablePick?: string; examples?: boolean }) => invoke<void>("set_ai_harness_opts", o),
   clearExamples: () => invoke<void>("ai_examples_clear"),
-  readFile: (path: string) => invoke<{ text: string; encoding: string }>("read_sql_file", { path }),
-  writeFile: (path: string, text: string, encoding: string) => invoke<void>("write_sql_file", { path, text, encoding }),
+  /** stamp: 고친 때·크기 — 밖에서 바뀌었는지 비교한다 (fileStamps) */
+  readFile: (path: string) => invoke<{ text: string; encoding: string; stamp: string | null }>("read_sql_file", { path }),
+  /** 쓴 뒤의 stamp */
+  writeFile: (path: string, text: string, encoding: string) => invoke<string | null>("write_sql_file", { path, text, encoding }),
+  fileStamps: (paths: string[]) => invoke<(string | null)[]>("file_stamps", { paths }),
 };
 
 // ── UTF-8 바이트 위치 ↔ JS(UTF-16) 위치 ─────────────────────

@@ -54,14 +54,40 @@ pub fn encode(text: &str, encoding: &str) -> R<Vec<u8>> {
     }
 }
 
-#[tauri::command]
-pub fn read_sql_file(path: String) -> R<SqlFile> {
-    let bytes = std::fs::read(&path).map_err(|e| ErrView::msg("io", format!("{path}: {e}")))?;
-    Ok(decode(&bytes))
+/// 파일의 '고친 때·크기' 표 — 밖(외부 편집기·AI 에이전트)에서 고쳤는지 알아보는 데 쓴다. 없으면 None
+fn stamp(path: &std::path::Path) -> Option<String> {
+    let m = std::fs::metadata(path).ok()?;
+    let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    Some(format!("{t}:{}", m.len()))
+}
+
+#[derive(Serialize)]
+pub struct ReadFile {
+    #[serde(flatten)]
+    file: SqlFile,
+    stamp: Option<String>,
 }
 
 #[tauri::command]
-pub fn write_sql_file(path: String, text: String, encoding: String) -> R<()> {
+pub fn read_sql_file(path: String) -> R<ReadFile> {
+    // 표를 먼저 — 읽는 사이에 바뀌면 다음 확인에서 다시 읽는다 (내용이 같으면 그대로)
+    let st = stamp(std::path::Path::new(&path));
+    let bytes = std::fs::read(&path).map_err(|e| ErrView::msg("io", format!("{path}: {e}")))?;
+    Ok(ReadFile { file: decode(&bytes), stamp: st })
+}
+
+/// 열어 둔 파일들의 표를 한 번에 (몇 초마다) — 없어진 파일은 None
+#[tauri::command]
+pub async fn file_stamps(paths: Vec<String>) -> Vec<Option<String>> {
+    // 네트워크 드라이브면 느릴 수 있다 — 화면 스레드를 막지 않게
+    tauri::async_runtime::spawn_blocking(move || paths.iter().map(|p| stamp(std::path::Path::new(p))).collect())
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+/// 쓰고 나서 표를 돌려준다 — 내가 쓴 것을 '밖에서 바뀜' 으로 보지 않게
+pub fn write_sql_file(path: String, text: String, encoding: String) -> R<Option<String>> {
     let bytes = encode(&text, &encoding)?;
     // 임시 파일에 쓰고 바꿔치기 — 저장 중에 죽어도 원본이 남는다 (tabs.json 도 여기로)
     let tmp = sqls_core::config::temp_path(std::path::Path::new(&path));
@@ -70,7 +96,7 @@ pub fn write_sql_file(path: String, text: String, encoding: String) -> R<()> {
         let _ = std::fs::remove_file(&tmp);
         ErrView::msg("io", format!("{path}: {e}"))
     })?;
-    Ok(())
+    Ok(stamp(std::path::Path::new(&path)))
 }
 
 /// 탭 자동 저장 (tabs.json + tabs/<key>.sql). 문서 내용은 탭마다 따로 — 바뀐 탭만 다시 쓴다
@@ -211,6 +237,23 @@ pub fn mcp_snippet(st: State<'_, AppState>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stamp_changes_with_content_and_write_returns_it() {
+        let dir = std::env::temp_dir().join(format!("sqls-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.sql");
+        let p = f.to_string_lossy().to_string();
+        let s1 = write_sql_file(p.clone(), "select 1".into(), "utf-8".into()).unwrap();
+        assert!(s1.is_some());
+        assert_eq!(read_sql_file(p.clone()).unwrap().stamp, s1);
+        // 밖에서 고침 (크기가 다르면 같은 때라도 다르다)
+        std::fs::write(&f, "select 1 from dual").unwrap();
+        assert_ne!(stamp(&f), s1);
+        std::fs::remove_file(&f).unwrap();
+        assert_eq!(stamp(&f), None);
+        let _ = std::fs::remove_dir(&dir);
+    }
 
     #[test]
     fn percent_decode_korean_path() {

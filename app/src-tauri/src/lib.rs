@@ -338,6 +338,7 @@ pub fn run() {
             valuetrace::trace_source,
             files::read_sql_file,
             files::write_sql_file,
+            files::file_stamps,
             files::save_tab_session,
             files::load_tab_session,
             files::write_binary_file,

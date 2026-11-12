@@ -67,6 +67,10 @@ export class Tab {
   /** 읽은 파일의 줄 끝 — 저장할 때 되돌린다 (편집기 안은 \n). CRLF 파일을 LF 로 바꿔 Git 에서 모든 줄이 바뀐 것처럼 보이지 않게 */
   eol: "\n" | "\r\n" = "\n";
   dirty = false;
+  /** 디스크 파일의 표(고친 때·크기) — 마지막으로 읽거나 쓴 때. undefined: 모름 (다음 확인 때 그 값을 기준으로) */
+  diskStamp: string | null | undefined = undefined;
+  /** 밖에서 바뀌었다는 알림 줄 (저장 안 한 편집이 있을 때) */
+  fileNotice: HTMLElement | null = null;
   /** 마지막으로 고친 때 — 왼쪽 목록을 날짜로 묶을 때 */
   used = Date.now();
   /** 태그 (한 문서에 하나) — 왼쪽 목록을 태그로 묶을 때 */

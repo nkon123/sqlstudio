@@ -301,6 +301,19 @@ export class SqlEditor {
     this.syncLanguage();
   }
 
+  /** 디스크에서 다시 읽은 글로 — 다른 곳만 바꿔 커서·스크롤이 제자리에 남는다. 편집이 아니다(● 안 붙음), Ctrl+Z 로 되돌릴 수 있다 */
+  reloadText(t: string) {
+    const old = this.view.state.doc.toString();
+    if (old === t) return;
+    let a = 0;
+    const n = Math.min(old.length, t.length);
+    while (a < n && old.charCodeAt(a) === t.charCodeAt(a)) a++;
+    let b = 0;
+    while (b < n - a && old.charCodeAt(old.length - 1 - b) === t.charCodeAt(t.length - 1 - b)) b++;
+    this.view.dispatch({ changes: { from: a, to: old.length - b, insert: t.slice(a, t.length - b) }, annotations: [loaded.of(true)] });
+    this.syncLanguage();
+  }
+
   /** 글을 보고 Oracle SQL ↔ Pro*C */
   syncLanguage() {
     const proc = isProC(this.view.state.doc.toString());

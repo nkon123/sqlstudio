@@ -434,6 +434,7 @@ export class App {
         }
         const t = this.newTab(false, text);
         t.filePath = st.filePath;
+        if (f) t.diskStamp = f.stamp;
         t.encoding = encoding;
         t.eol = eol;
         t.setDirty(dirty);
@@ -579,9 +580,12 @@ export class App {
     await this.ai.load();
     mark("AI 공급자");
     await this.restoreTabs();
+    this.watchFiles();
     // 가짜 DB 모드: PL/SQL 소스를 열어 볼 시험 문서 (배포 빌드에서는 빠진다)
     if (import.meta.env.VITE_MOCK) {
       const { PLSQL_SAMPLE, PROC_SAMPLE } = await import("./mock/plsql");
+      // 화면 시험(CDP)에서 앱을 부를 수 있게
+      (window as unknown as { __app: unknown }).__app = this;
       // 목록에서 찾기 쉽게 이름·꼬리표, 시작하면 PL/SQL 시험 문서를 연다
       const sample = (text: string, name: string) => {
         const t = this.tabs.find((x) => x.editor.text().startsWith(text.slice(0, 20))) ?? this.newTab(true, text);
@@ -2498,7 +2502,7 @@ export class App {
         tabsUnder: (root) => {
           const r = normPath(root) + "/";
           return this.tabs.filter((t) => t.filePath && normPath(t.filePath).startsWith(r)).map((t) => ({
-            path: t.filePath!, dirty: t.dirty, reload: () => this.reloadTab(t),
+            path: t.filePath!, dirty: t.dirty, reload: async () => { await this.reloadTab(t); },
           }));
         },
         onState: (text, title) => { this.gitBadge.textContent = text; this.gitBadge.title = title; },
@@ -2549,6 +2553,7 @@ export class App {
       const t = cur && !cur.dirty && !cur.editor.text().trim() && !cur.filePath ? cur : this.newTab(true);
       t.editor.setText(f.text);
       t.filePath = path;
+      t.diskStamp = f.stamp;
       t.encoding = f.encoding;
       t.eol = f.text.includes("\r\n") ? "\r\n" : "\n";
       t.setDirty(false);
@@ -2559,17 +2564,119 @@ export class App {
     }
   }
 
-  /** 디스크에서 다시 읽는다 (Git 풀·브랜치 전환·되돌리기 뒤) */
-  private async reloadTab(t: Tab) {
-    if (!t.filePath) return;
+  /** 디스크에서 다시 읽는다 (Git 풀·브랜치 전환·되돌리기 뒤, 밖에서 고쳤을 때) — 다른 곳만 바꿔 커서·스크롤은 제자리. Ctrl+Z 로 되돌린다. 바뀌었으면 true */
+  private async reloadTab(t: Tab): Promise<boolean> {
+    if (!t.filePath) return false;
     const f = await api.readFile(t.filePath);
+    t.diskStamp = f.stamp;
+    this.clearFileNotice(t);
     const eol = f.text.includes("\r\n") ? "\r\n" : "\n";
-    if (f.text.replace(/\r\n/g, "\n") === t.editor.text() && eol === t.eol) return;
-    t.editor.setText(f.text);
+    const text = f.text.replace(/\r\n/g, "\n");
+    if (text === t.editor.text() && eol === t.eol && f.encoding === t.encoding && !t.dirty) return false;
+    t.editor.reloadText(text);
     t.encoding = f.encoding;
     t.eol = eol;
     t.setDirty(false);
     t.refreshTitle();
+    return true;
+  }
+
+  // ── 밖에서 고친 파일 ─────────────────────────
+  // 외부 편집기·AI 에이전트(opencode 등)가 열린 파일을 고치면: 저장 안 한 편집이 없으면 바로 다시 읽고,
+  // 있으면 편집기 위에 알림 줄. 몇 초마다 고친 때·크기를 보고, 창으로 돌아올 때도 바로 본다.
+
+  private watchBusy = false;
+  /** 알림 줄을 띄운 변경 (탭 → 그때의 표) */
+  private noticed = new WeakMap<Tab, string>();
+
+  private watchFiles() {
+    const tick = () => { if (!document.hidden) void this.checkFiles(); };
+    window.setInterval(tick, 1500);
+    window.addEventListener("focus", tick);
+    document.addEventListener("visibilitychange", tick);
+  }
+
+  private async checkFiles() {
+    if (this.watchBusy) return;
+    const tabs = this.tabs.filter((t) => t.filePath);
+    if (!tabs.length) return;
+    this.watchBusy = true;
+    try {
+      const stamps = await api.fileStamps(tabs.map((t) => t.filePath!));
+      for (const [i, t] of tabs.entries()) {
+        const now = stamps[i];
+        // 그 사이에 닫았거나 다른 파일로 저장했으면 넘긴다
+        if (!this.tabs.includes(t) || t.filePath !== tabs[i].filePath) continue;
+        if (t.diskStamp === undefined) { t.diskStamp = now; continue; }
+        if (now === t.diskStamp) continue;
+        if (now == null) {
+          // 지워졌거나 옮겨졌다 (에이전트가 지우고 새로 쓰는 중일 수도) — 한 번 알리고, 다시 생기면 그때 읽는다
+          t.diskStamp = null;
+          this.status(`파일이 없어졌습니다: ${t.filePath} — 저장하면 다시 만듭니다`);
+          continue;
+        }
+        if (t.dirty) {
+          // 표는 그대로 둔다 — 저장할 때 덮어쓸지 묻게. 같은 변경으로 알림을 거듭 띄우지 않는다
+          if (this.noticed.get(t) !== now) {
+            this.noticed.set(t, now);
+            this.showFileNotice(t);
+          }
+        } else {
+          try {
+            if (await this.reloadTab(t)) this.status(`밖에서 바뀐 파일을 다시 읽었습니다: ${t.title()} (Ctrl+Z: 되돌리기)`);
+          } catch { /* 쓰는 중이라 못 읽었다 — 다음 차례에 */ t.diskStamp = undefined; }
+        }
+      }
+    } catch { /* 다음 차례에 */ } finally {
+      this.watchBusy = false;
+    }
+  }
+
+  /** 저장 안 한 편집이 있는데 파일이 밖에서 바뀌었다 */
+  private showFileNotice(t: Tab) {
+    this.clearFileNotice(t);
+    const bar = h("div", { class: "file-notice" },
+      h("span", {}, "이 파일이 밖에서 바뀌었습니다 — 저장하지 않은 편집이 있습니다."),
+      h("button", { title: "내 편집을 버리고 디스크의 내용으로 (Ctrl+Z 로 되돌릴 수 있다)", onclick: () => void this.reloadTab(t).then(() => this.status("디스크의 내용으로 다시 읽었습니다 (Ctrl+Z: 내 편집으로)")).catch((e) => toast(errOf(e).message, "error")) }, "다시 읽기"),
+      h("button", { title: "디스크의 내용과 지금 편집기를 나란히", onclick: () => void this.compareDisk(t) }, "비교"),
+      h("button", { title: "알림을 닫는다 — 저장하면 덮어쓸지 다시 묻는다", onclick: () => this.clearFileNotice(t) }, "무시"));
+    t.fileNotice = bar;
+    t.root.prepend(bar);
+  }
+
+  private clearFileNotice(t: Tab) {
+    t.fileNotice?.remove();
+    t.fileNotice = null;
+  }
+
+  /** 디스크(왼쪽) ↔ 편집기(오른쪽) */
+  private async compareDisk(t: Tab) {
+    if (!t.filePath) return;
+    let disk: string;
+    try {
+      disk = (await api.readFile(t.filePath)).text.replace(/\r\n/g, "\n");
+    } catch (e) {
+      return toast(errOf(e).message, "error");
+    }
+    const { MergeView } = await import("@codemirror/merge");
+    const { EditorView, lineNumbers } = await import("@codemirror/view");
+    const { EditorState } = await import("@codemirror/state");
+    const { oracleSql, oracleHighlight } = await import("./oracle-dialect");
+    const { syntaxHighlighting, defaultHighlightStyle } = await import("@codemirror/language");
+    const ext = [lineNumbers(), EditorView.editable.of(false), EditorState.readOnly.of(true), oracleSql(), syntaxHighlighting(oracleHighlight), syntaxHighlighting(defaultHighlightStyle)];
+    const box = h("div", { class: "git-diff" },
+      h("div", { class: "git-diff-head" }, h("span", {}, "디스크 (밖에서 고친 것)"), h("span", {}, "편집기 (저장하지 않은 편집)")));
+    const mv = h("div", { class: "git-merge" });
+    box.append(mv);
+    new MergeView({ parent: mv, a: { doc: disk, extensions: ext }, b: { doc: t.editor.text(), extensions: ext },
+      collapseUnchanged: { margin: 3, minSize: 6 }, highlightChanges: true, gutter: true });
+    const act = await modal(`${t.title()} — 밖에서 바뀜`, box, [
+      { label: "디스크 내용으로 다시 읽기", value: "reload" },
+      { label: "내 편집으로 덮어쓰기 (저장)", value: "save" },
+      { label: "닫기", value: "close", kind: "primary" },
+    ], { wide: true });
+    if (act === "reload") await this.reloadTab(t).catch((e) => toast(errOf(e).message, "error"));
+    if (act === "save" && t.filePath) { t.diskStamp = undefined; await this.writeTab(t, t.filePath); }
   }
 
   async save() {
@@ -2616,8 +2723,23 @@ export class App {
   /** 탭 내용을 파일로. 실패하면 인코딩을 되돌린다 (CP949 로 못 쓰는 글자 등) */
   private async writeTab(t: Tab, path: string, revertEncoding?: string) {
     try {
+      // 열었을 때(마지막으로 읽거나 쓴 때) 뒤로 밖에서 고쳤으면 덮어쓰기 전에 묻는다
+      if (t.filePath === path && t.diskStamp !== undefined) {
+        const [now] = await api.fileStamps([path]);
+        if (now != null && now !== t.diskStamp) {
+          const r = await modal("파일이 밖에서 바뀌었습니다", h("pre", { class: "modal-text" },
+            `${path}\n\n이 파일을 연 뒤에 다른 프로그램(외부 편집기·AI 에이전트 등)이 고쳤습니다.\n저장하면 그 변경이 사라집니다.`), [
+            { label: "취소", value: "cancel" },
+            { label: "비교", value: "diff" },
+            { label: "덮어쓰기", value: "save", kind: "danger" },
+          ]);
+          if (r === "diff") return void this.compareDisk(t);
+          if (r !== "save") return;
+        }
+      }
       const text = t.eol === "\r\n" ? t.editor.text().replace(/\r?\n/g, "\r\n") : t.editor.text();
-      await api.writeFile(path, text, t.encoding);
+      t.diskStamp = await api.writeFile(path, text, t.encoding);
+      this.clearFileNotice(t);
       const renamed = t.filePath !== path;
       t.filePath = path;
       t.setDirty(false);

@@ -647,9 +647,11 @@ const LOCAL: Record<string, (a: Args) => unknown> = {
   // 파일은 브라우저 저장소에 (탭 되살리기·저장을 시험할 수 있게)
   read_sql_file: (a) => {
     const v = localStorage.getItem(`mock.file:${a.path}`);
-    return v == null ? fail(`${a.path}: 파일이 없습니다`, "io") : { text: v, encoding: "utf-8" };
+    return v == null ? fail(`${a.path}: 파일이 없습니다`, "io") : { text: v, encoding: "utf-8", stamp: mockStamp(String(a.path)) };
   },
-  write_sql_file: (a) => { localStorage.setItem(`mock.file:${a.path}`, String(a.text)); return null; },
+  write_sql_file: (a) => { localStorage.setItem(`mock.file:${a.path}`, String(a.text)); return mockStamp(String(a.path)); },
+  // 밖에서 고친 것을 시험하려면 localStorage 의 mock.file:<경로> 를 바꾼다
+  file_stamps: (a) => (a.paths as string[]).map(mockStamp),
   // 분석 화면을 열 수 있게 — 결과는 없다. 중단된 가져오기는 localStorage "mock.pending" 으로 시험한다
   analysis_sets: () => [],
   // 흐름도를 볼 수 있게 — 패키지 하나(서브프로그램 둘)와 테이블 둘
@@ -753,4 +755,13 @@ export function installMock() {
     return /(_list|_search|s)$/.test(cmd) ? [] : null;
   }, { shouldMockEvents: true });
   banner("브라우저");
+}
+
+/** 가짜 파일의 표 — 내용으로 만든다 */
+function mockStamp(path: string): string | null {
+  const v = localStorage.getItem(`mock.file:${path}`);
+  if (v == null) return null;
+  let h = 0;
+  for (let i = 0; i < v.length; i++) h = (h * 31 + v.charCodeAt(i)) | 0;
+  return `${h}:${v.length}`;
 }

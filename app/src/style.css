@@ -770,6 +770,11 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .git-form .row { display: flex; gap: 6px; }
 .git-commits { font-size: 12px; max-height: 40vh; overflow: auto; }
 .git-diff-head { display: grid; grid-template-columns: 1fr 1fr; font-weight: 600; font-size: 12px; color: var(--dim); padding: 0 0 4px; }
+/* 열린 파일이 밖에서 바뀌었는데 저장 안 한 편집이 있다 (main.ts showFileNotice) */
+.file-notice { flex: none; display: flex; align-items: center; gap: 6px; padding: 5px 10px; margin-bottom: 4px; border-radius: 8px; font-size: 12px;
+  background: color-mix(in srgb, var(--warn) 16%, var(--panel)); border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent); }
+.file-notice span { flex: 1; min-width: 0; }
+.file-notice button { padding: 2px 10px; font-size: 12px; }
 .git-merge { max-height: 62vh; overflow: auto; border: 1px solid var(--line); border-radius: 4px; font-size: 12px; }
 .git-merge .cm-editor { font-family: var(--mono); }
 .git-badge { font-family: var(--mono); }

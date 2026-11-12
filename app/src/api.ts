@@ -172,7 +172,8 @@ export const api = {
   describe: (id: number, name: string) => invoke<TableDesc>("describe", { id, name }),
   /** DB 에 묻지 않는 구조 (기억해 둔 것 또는 자동완성 캐시, partial) — 없으면 null */
   describeFast: (id: number, name: string) => invoke<TableDesc | null>("describe_fast", { id, name }),
-  getDdl: (id: number, objectType: string, name: string) => invoke<string>("get_ddl", { id, objectType, name }),
+  /** grants: 그 객체에 준 GRANT 를 뒤에 붙인다 (스크립트 보기·DDL 새 탭) */
+  getDdl: (id: number, objectType: string, name: string, grants = false) => invoke<string>("get_ddl", { id, objectType, name, grants }),
   objectDeps: (id: number, name: string) => invoke<ObjectDeps>("object_deps", { id, name }),
   complete: (id: number, text: string, cursor: number) => invoke<CompletionResultView>("complete", { id, text, cursor }),
   completionStatus: (id: number) => invoke<CompletionStatus>("completion_status", { id }),

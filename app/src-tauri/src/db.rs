@@ -1051,14 +1051,20 @@ pub async fn object_section(st: State<'_, AppState>, id: u64, owner: String, nam
 }
 
 #[tauri::command]
-pub async fn get_ddl(st: State<'_, AppState>, id: u64, object_type: String, name: String) -> R<String> {
+pub async fn get_ddl(st: State<'_, AppState>, id: u64, object_type: String, name: String, grants: Option<bool>) -> R<String> {
     let (s, _, _) = st.session(id)?;
+    // grants: 스크립트 보기·DDL 새 탭 — 그 객체에 준 GRANT 를 뒤에 붙인다 (소스 편집용으로 열 때는 붙이지 않는다)
+    let get = |q: String| {
+        let s = s.clone();
+        let t = object_type.clone();
+        async move { if grants.unwrap_or(false) { meta::get_script(&s, &t, &q).await } else { meta::get_ddl(&s, &t, &q).await } }
+    };
     if let Some(q) = st.qualify(id, &name) {
-        if let Ok(d) = meta::get_ddl(&s, &object_type, &q).await {
+        if let Ok(d) = get(q).await {
             return Ok(d);
         }
     }
-    Ok(meta::get_ddl(&s, &object_type, &name).await?)
+    Ok(get(name).await?)
 }
 
 #[derive(Serialize)]

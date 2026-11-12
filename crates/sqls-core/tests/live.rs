@@ -104,6 +104,20 @@ async fn dml_binds_output_and_dictionary() {
     let ddl = meta::get_ddl(&s, "TABLE", t).await.unwrap();
     assert!(ddl.contains("CREATE TABLE"), "{ddl}");
     assert!(ddl.contains("ENAME"), "{ddl}");
+    // 스크립트 보기: DDL(제약조건 포함) · 인덱스 생성문 · 준 권한(GRANT)
+    exec(&s, &format!("alter table {t} add constraint {t}_ck check (sal >= 0)")).await;
+    exec(&s, &format!("alter table {t} add constraint {t}_uk unique (ename, hired)")).await;
+    exec(&s, &format!("grant select, update on {t} to public")).await;
+    let ddl = meta::get_ddl(&s, "TABLE", t).await.unwrap();
+    let script = meta::get_script(&s, "TABLE", t).await.unwrap();
+    println!("{script}");
+    assert!(script.starts_with(&ddl), "{script}");
+    assert!(script.contains(&format!("{t}_IX1 ON")) && script.contains("(ENAME, SAL)"), "인덱스\n{script}");
+    assert!(script.contains(&format!("{t}_CK")) && script.to_uppercase().contains("SAL >= 0"), "검사 제약\n{script}");
+    assert!(script.contains(&format!("{t}_UK")) && script.contains("UNIQUE"), "유일 제약\n{script}");
+    let grant = format!("GRANT SELECT, UPDATE ON {}.{t} TO PUBLIC;", s.info().user.to_uppercase());
+    assert!(script.ends_with(&grant), "권한은 끝에\n{script}");
+    exec(&s, &format!("revoke select, update on {t} from public")).await;
     exec(&s, "create or replace procedure sqls_ok is begin null; end;").await;
     let pddl = meta::get_ddl(&s, "PROCEDURE", "SQLS_OK").await.unwrap();
     assert!(pddl.to_uppercase().contains("PROCEDURE SQLS_OK"), "{pddl}");

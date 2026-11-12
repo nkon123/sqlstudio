@@ -3,7 +3,7 @@
 // 편집기에서 F4 (커서의 테이블·별칭), 왼쪽 테이블 목록에서 우클릭.
 // 결과 그리드와 같다: 셀 단위 선택(끌기·Shift) · Ctrl+C 고른 셀 복사(컬럼 칸만 고르면 이름만) · 머리 눌러 정렬 · 열 너비
 // 더블클릭: 컬럼 이름 넣기 · 우클릭: 이름 복사·넣기 · Esc: 닫기 · 머리 끌기: 옮기기 · 오른쪽 아래 모서리: 크기
-// 탭: 컬럼 · 인덱스 · 스크립트(DDL) · Used By(이 객체를 쓰는 곳과 그 줄) · Uses(이 객체가 쓰는 것) — 의존 행 더블클릭: 그 객체 열기
+// 탭: 컬럼 · 인덱스 · 스크립트(DDL·GRANT) · Used By(이 객체를 쓰는 곳과 그 줄) · Uses(이 객체가 쓰는 것) — 의존 행 더블클릭: 그 객체 열기
 // 키보드: 방향키로 고르기 (Shift+ 넓히기 · Ctrl+ 커서만 · Space 더하기/빼기) · 글자를 치면 거르기 칸으로
 //   Enter: 커서가 있던 절에 맞춰 넣기 · Shift+Enter: 넣을 절 메뉴
 //   Ctrl+Shift(또는 Alt) 를 누르고 있으면 4방향 휠 — 누른 채 ↑ SELECT · ↓ WHERE · ← ORDER BY · → GROUP BY, 떼면 넣는다
@@ -101,7 +101,7 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   const count = h("span", { class: "cp-count" });
   const tabCols = h("button", { class: "cp-tab on" }, `컬럼 ${d.columns.length}`);
   const tabIdx = h("button", { class: "cp-tab" }, d.partial ? "인덱스 …" : `인덱스 ${d.indexes.length}`);
-  const tabScript = h("button", { class: "cp-tab", title: "DDL (CREATE 문)" }, "스크립트");
+  const tabScript = h("button", { class: "cp-tab", title: "DDL (CREATE 문)과 이 객체에 준 권한(GRANT)" }, "스크립트");
   const tabBy = h("button", { class: "cp-tab", title: "이 객체를 쓰는 곳 — 사전 의존성·외래 키, 소스·뷰에서 이름이 나오는 줄" }, "Used By");
   const tabUses = h("button", { class: "cp-tab", title: "이 객체가 쓰는 것 — 사전 의존성·외래 키(부모 테이블)" }, "Uses");
   const sub = h("span", { class: "cp-dim" });

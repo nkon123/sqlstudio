@@ -1695,7 +1695,7 @@ export class App {
       actions.push(btn("흐름도", () => this.openDfd(`${o.owner}.${o.name}`, type === "TABLE" || type === "VIEW" ? "up" : "both"),
         tableLike ? "이 테이블로 데이터가 어디서 오는지 (쓰는 처리 ← 그 입력 테이블) — 별도 창, 분석 결과 필요" : "이 처리의 입력·출력 테이블 — 별도 창, 분석 결과 필요"));
     if (type === "SEQUENCE") actions.push(btn("NEXTVAL 넣기", () => t.editor.insert(`${o.owner}.${o.name}.NEXTVAL`)));
-    actions.push(btn(code ? "새 탭에서 열기" : "DDL", async () => this.newTab(true, await api.getDdl(id, type, q).catch((e) => `-- ${errOf(e).message}`))));
+    actions.push(btn(code ? "새 탭에서 열기" : "DDL", async () => this.newTab(true, await api.getDdl(id, type, q, !code).catch((e) => `-- ${errOf(e).message}`))));
     if (code) {
       actions.push(btn("컴파일", () => this.compileObject(t, o.owner, o.name, type, () => { cache.delete("errors"); open("errors"); }), "ALTER … COMPILE — 오류는 '컴파일 오류' 탭"));
       actions.push(btn("디버그", () => t.debugger().openUnit(o.owner, o.name, type)));
@@ -1884,11 +1884,11 @@ export class App {
       at, alias,
       insert: (s) => { const t = this.active; if (!t) return; t.editor.insert(s); t.editor.view.focus(); },
       place: (target, cols, from, types) => this.placeColumns(target, cols, from, types),
-      ddl: async () => { const t = this.active; if (t?.conn) this.newTab(true, await api.getDdl(t.conn.id, d.object_type, `"${d.owner}"."${d.name}"`)); },
+      ddl: async () => { const t = this.active; if (t?.conn) this.newTab(true, await api.getDdl(t.conn.id, d.object_type, `"${d.owner}"."${d.name}"`, true)); },
       script: async () => {
         const t = this.active;
         if (!t?.conn) throw new Error("먼저 접속하세요");
-        return api.getDdl(t.conn.id, d.object_type, `"${d.owner}"."${d.name}"`);
+        return api.getDdl(t.conn.id, d.object_type, `"${d.owner}"."${d.name}"`, true);
       },
       deps: async () => {
         const t = this.active;
@@ -2066,7 +2066,7 @@ export class App {
     const withDesc = (f: (d: TableDesc) => void) => () => {
       api.describeFast(id, q).then((d) => d ?? api.describe(id, q)).then(f).catch((e) => toast(errOf(e).message, "error"));
     };
-    const ddl = () => api.getDdl(id, type, q).then((x) => this.newTab(true, x)).catch((e) => toast(errOf(e).message, "error"));
+    const ddl = () => api.getDdl(id, type, q, !CODE_TYPES.includes(type)).then((x) => this.newTab(true, x)).catch((e) => toast(errOf(e).message, "error"));
     const copyName = { label: "이름 복사", hint: shown, run: () => navigator.clipboard.writeText(shown).then(() => toast(`복사: ${shown}`, "ok", 1500)).catch(() => {}) };
     if (["TABLE", "VIEW", "MATERIALIZED VIEW"].includes(type)) {
       // 커서 줄에 글이 있으면 문서 끝에 빈 줄을 두고 넣는다 (쓰던 문장 가운데에 끼어들지 않게)

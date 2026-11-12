@@ -353,17 +353,21 @@ pub async fn get_ddl(s: &Session, object_type: &str, qualified: &str) -> Result<
         )
         .await;
     match r {
-        Ok(page) => Ok(page.rows.first().map(|r| cell(r, 0)).unwrap_or_default().trim().to_string()),
+        Ok(page) => {
+            let ddl = page.rows.first().map(|r| cell(r, 0)).unwrap_or_default();
+            // DBMS_METADATA 의 테이블 DDL 은 탭·들쭉날쭉한 들여쓰기에 저장 옵션이 한 덩어리 — 읽기 좋게 줄을 맞춘다
+            Ok(if otype == "TABLE" { tidy_table_ddl(&ddl) } else { ddl.trim().to_string() })
+        }
         // 31603(객체 없음)은 정말 없을 때도 나지만, 다른 계정의 객체를 SELECT_CATALOG_ROLE 없이 읽을 때도 난다
         // (조회 권한이 있어 ALL_VIEWS·ALL_SOURCE 에는 보이는데). 사전 정보로 만들어 보고, 거기도 없으면 처음 오류를 낸다
         Err(e @ Error::Db { code: 31603, .. }) => {
             tracing::info!("DBMS_METADATA 가 {owner}.{name} 을 못 찾음(ORA-31603) — 다른 계정이면 권한 탓일 수 있어 사전 정보로 만들어 본다");
-            let note = "-- 다른 계정의 객체라 DBMS_METADATA 로 읽지 못해(SELECT_CATALOG_ROLE 필요) 데이터 사전으로 만든 DDL 입니다 (저장 옵션·권한 제외)\n";
+            let note = "-- 다른 계정의 객체라 DBMS_METADATA 로 읽지 못해(SELECT_CATALOG_ROLE 필요) 데이터 사전으로 만든 DDL 입니다 (저장 옵션 제외)\n";
             ddl_fallback(s, &otype, &owner, &name, note).await.map_err(|_| e)
         }
         Err(Error::Db { code, .. }) => {
             tracing::warn!("DBMS_METADATA 실패(ORA-{code:05}) — 사전 정보로 DDL 을 만든다");
-            ddl_fallback(s, &otype, &owner, &name, "-- DBMS_METADATA 를 쓸 수 없어 데이터 사전으로 만든 DDL 입니다 (저장 옵션·권한 제외)\n").await
+            ddl_fallback(s, &otype, &owner, &name, "-- DBMS_METADATA 를 쓸 수 없어 데이터 사전으로 만든 DDL 입니다 (저장 옵션 제외)\n").await
         }
         Err(e) => Err(e),
     }
@@ -458,6 +462,467 @@ pub fn table_ddl(d: &TableDesc) -> String {
             out.push_str(&format!("COMMENT ON COLUMN {}.{}.{} IS '{}';\n", d.owner, d.name, c.name, q(cm)));
         }
     }
+    out
+}
+
+/// 스크립트 보기·DDL 새 탭 — DDL, (테이블이면) 인덱스 생성문·제약조건, 그 객체에 준 권한(GRANT).
+/// 테이블의 제약조건은 DBMS_METADATA 의 CREATE TABLE 안에 들어 있다. 그것을 못 써 사전으로 만든 DDL(기본 키만)이면
+/// 나머지 제약조건을 ALTER TABLE 로 붙인다. 인덱스·제약·권한을 못 읽으면 그 부분만 뺀다
+pub async fn get_script(s: &Session, object_type: &str, qualified: &str) -> Result<String> {
+    let ddl = get_ddl(s, object_type, qualified).await?;
+    let (owner, name) = split_qualified(qualified, &s.info().user);
+    let mut parts = vec![ddl.clone()];
+    let mut add = |what: &str, r: Result<String>| match r {
+        Ok(x) if !x.is_empty() => parts.push(format!("-- {what}\n{x}")),
+        Ok(_) => {}
+        Err(e) => tracing::info!("{owner}.{name} {what}을 읽지 못함: {e}"),
+    };
+    if object_type.trim().eq_ignore_ascii_case("TABLE") {
+        // 사전으로 만든 DDL 은 맨 앞에 '-- …' 설명이 붙고, 인덱스는 이미 들어 있다
+        if ddl.starts_with("--") {
+            add("제약조건", constraint_script(s, &owner, &name).await);
+        } else {
+            add("인덱스", index_script(s, &owner, &name).await);
+        }
+    }
+    add("권한", grant_script(s, &owner, &name).await);
+    Ok(parts.join("\n\n"))
+}
+
+/// 인덱스 하나 — cols 는 이미 SQL 로 쓴 열(이름·식, DESC 포함)
+pub struct IndexDef {
+    pub owner: String,
+    pub name: String,
+    pub unique: bool,
+    pub bitmap: bool,
+    pub cols: Vec<String>,
+    pub tablespace: Option<String>,
+}
+
+/// 테이블의 인덱스 생성문 — 제약조건(기본 키·유일)이 만든 인덱스와 LOB·IOT 인덱스는 뺀다 (CREATE TABLE 이 만든다)
+pub async fn index_script(s: &Session, owner: &str, table: &str) -> Result<String> {
+    let binds = || vec![("O".into(), Some(owner.to_string())), ("N".into(), Some(table.to_string()))];
+    let idx = s
+        .query(
+            "SELECT i.owner, i.index_name, i.uniqueness, i.index_type, i.tablespace_name FROM all_indexes i \
+             WHERE i.table_owner = :o AND i.table_name = :n AND i.index_type NOT IN ('LOB', 'IOT - TOP', 'DOMAIN') \
+             AND NOT EXISTS (SELECT 1 FROM all_constraints c WHERE c.owner = i.table_owner AND c.table_name = i.table_name \
+                             AND c.constraint_type IN ('P', 'U') AND c.index_name = i.index_name) \
+             ORDER BY i.index_name",
+            binds(),
+            1_000,
+        )
+        .await?;
+    if idx.rows.is_empty() {
+        return Ok(String::new());
+    }
+    let cols = s
+        .query(
+            "SELECT index_owner, index_name, column_position, column_name, descend FROM all_ind_columns \
+             WHERE table_owner = :o AND table_name = :n ORDER BY index_owner, index_name, column_position",
+            binds(),
+            10_000,
+        )
+        .await?;
+    // 함수 기반(DESC 포함) 열은 SYS_NC… 이름이고 식은 ALL_IND_EXPRESSIONS 에 (LONG 이라 따로 읽는다)
+    let exprs = s
+        .query(
+            "SELECT index_owner, index_name, column_position, column_expression FROM all_ind_expressions \
+             WHERE table_owner = :o AND table_name = :n",
+            binds(),
+            10_000,
+        )
+        .await
+        .map(|p| p.rows)
+        .unwrap_or_default();
+    let defs: Vec<IndexDef> = idx
+        .rows
+        .iter()
+        .map(|r| {
+            let (io, iname) = (cell(r, 0), cell(r, 1));
+            let cs = cols
+                .rows
+                .iter()
+                .filter(|c| cell(c, 0) == io && cell(c, 1) == iname)
+                .map(|c| {
+                    let pos = cell(c, 2);
+                    let expr = exprs.iter().find(|e| cell(e, 0) == io && cell(e, 1) == iname && cell(e, 2) == pos).map(|e| cell(e, 3).trim().to_string());
+                    let col = expr.filter(|e| !e.is_empty()).unwrap_or_else(|| ident(&cell(c, 3)));
+                    if cell(c, 4) == "DESC" { format!("{col} DESC") } else { col }
+                })
+                .collect();
+            IndexDef {
+                owner: io.clone(),
+                name: iname.clone(),
+                unique: cell(r, 2) == "UNIQUE",
+                bitmap: cell(r, 3).contains("BITMAP"),
+                cols: cs,
+                tablespace: Some(cell(r, 4)).filter(|t| !t.is_empty()),
+            }
+        })
+        .collect();
+    Ok(index_lines(owner, table, &defs))
+}
+
+pub fn index_lines(owner: &str, table: &str, defs: &[IndexDef]) -> String {
+    defs.iter()
+        .map(|d| {
+            let kind = if d.unique { "UNIQUE " } else if d.bitmap { "BITMAP " } else { "" };
+            let ts = d.tablespace.as_deref().map(|t| format!(" TABLESPACE {}", ident(t))).unwrap_or_default();
+            format!("CREATE {kind}INDEX {}.{} ON {}.{} ({}){ts};", ident(&d.owner), ident(&d.name), ident(owner), ident(table), d.cols.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 제약조건 하나 (유일 U · 외래 키 R · 검사 C)
+pub struct ConsDef {
+    pub name: String,
+    pub kind: char,
+    pub cols: Vec<String>,
+    pub ref_owner: String,
+    pub ref_table: String,
+    pub ref_cols: Vec<String>,
+    pub delete_rule: String,
+    pub condition: String,
+    pub generated: bool,
+}
+
+/// 기본 키 밖의 제약조건을 ALTER TABLE 로 (사전으로 만든 CREATE TABLE 에는 기본 키만 있다)
+pub async fn constraint_script(s: &Session, owner: &str, table: &str) -> Result<String> {
+    let binds = || vec![("O".into(), Some(owner.to_string())), ("N".into(), Some(table.to_string()))];
+    let cons = s
+        .query(
+            "SELECT c.constraint_name, c.constraint_type, c.search_condition, c.generated, r.owner, r.table_name, r.constraint_name, c.delete_rule \
+             FROM all_constraints c LEFT JOIN all_constraints r ON r.owner = c.r_owner AND r.constraint_name = c.r_constraint_name \
+             WHERE c.owner = :o AND c.table_name = :n AND c.constraint_type IN ('U', 'R', 'C') \
+             ORDER BY DECODE(c.constraint_type, 'U', 1, 'R', 2, 3), c.constraint_name",
+            binds(),
+            1_000,
+        )
+        .await?;
+    if cons.rows.is_empty() {
+        return Ok(String::new());
+    }
+    // 이 테이블의 제약 열 + 외래 키가 가리키는 제약의 열
+    let pos = s
+        .query(
+            "SELECT owner, constraint_name, column_name, position FROM all_cons_columns WHERE owner = :o AND table_name = :n \
+             UNION ALL \
+             SELECT cc.owner, cc.constraint_name, cc.column_name, cc.position FROM all_cons_columns cc \
+             WHERE (cc.owner, cc.constraint_name) IN (SELECT r_owner, r_constraint_name FROM all_constraints \
+                                                      WHERE owner = :o AND table_name = :n AND constraint_type = 'R')",
+            binds(),
+            10_000,
+        )
+        .await?
+        .rows;
+    let cols_of = |o: &str, n: &str| -> Vec<String> {
+        let mut v: Vec<(u32, String)> = pos
+            .iter()
+            .filter(|r| cell(r, 0) == o && cell(r, 1) == n)
+            .map(|r| (cell(r, 3).parse().unwrap_or(0), ident(&cell(r, 2))))
+            .collect();
+        v.sort();
+        v.into_iter().map(|x| x.1).collect()
+    };
+    let defs: Vec<ConsDef> = cons
+        .rows
+        .iter()
+        .map(|r| {
+            let name = cell(r, 0);
+            ConsDef {
+                cols: cols_of(owner, &name),
+                kind: cell(r, 1).chars().next().unwrap_or('C'),
+                condition: cell(r, 2),
+                generated: cell(r, 3) == "GENERATED NAME",
+                ref_owner: cell(r, 4),
+                ref_table: cell(r, 5),
+                ref_cols: cols_of(&cell(r, 4), &cell(r, 6)),
+                delete_rule: cell(r, 7),
+                name,
+            }
+        })
+        .collect();
+    Ok(constraint_lines(owner, table, &defs))
+}
+
+pub fn constraint_lines(owner: &str, table: &str, defs: &[ConsDef]) -> String {
+    let t = format!("{}.{}", ident(owner), ident(table));
+    defs.iter()
+        .filter_map(|d| {
+            // NOT NULL 은 CREATE TABLE 의 열에 있다
+            let cond = d.condition.trim();
+            if d.kind == 'C' && d.generated && is_not_null_check(cond) {
+                return None;
+            }
+            let name = if d.generated { String::new() } else { format!("CONSTRAINT {} ", ident(&d.name)) };
+            let body = match d.kind {
+                'U' => format!("UNIQUE ({})", d.cols.join(", ")),
+                'R' => {
+                    let del = match d.delete_rule.as_str() {
+                        "CASCADE" => " ON DELETE CASCADE",
+                        "SET NULL" => " ON DELETE SET NULL",
+                        _ => "",
+                    };
+                    format!("FOREIGN KEY ({}) REFERENCES {}.{} ({}){del}", d.cols.join(", "), ident(&d.ref_owner), ident(&d.ref_table), d.ref_cols.join(", "))
+                }
+                _ => format!("CHECK ({cond})"),
+            };
+            Some(format!("ALTER TABLE {t} ADD {name}{body};"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 객체에 준 권한을 GRANT 문으로 (ALL_TAB_PRIVS·ALL_COL_PRIVS — 내가 주었거나 받았거나 내 것인 권한만 보인다). 없으면 빈 글
+pub async fn grant_script(s: &Session, owner: &str, name: &str) -> Result<String> {
+    let binds = || vec![("O".into(), Some(owner.to_string())), ("N".into(), Some(name.to_string()))];
+    let tab = s
+        .query(
+            "SELECT grantee, privilege, grantable FROM all_tab_privs WHERE table_schema = :o AND table_name = :n",
+            binds(),
+            10_000,
+        )
+        .await?;
+    let col = s
+        .query(
+            "SELECT grantee, privilege, column_name, grantable FROM all_col_privs WHERE table_schema = :o AND table_name = :n",
+            binds(),
+            10_000,
+        )
+        .await?;
+    let tab: Vec<TabGrant> = tab.rows.iter().map(|r| TabGrant { grantee: cell(r, 0), privilege: cell(r, 1), grantable: cell(r, 2) == "YES" }).collect();
+    let col: Vec<ColGrant> = col
+        .rows
+        .iter()
+        .map(|r| ColGrant { grantee: cell(r, 0), privilege: cell(r, 1), column: cell(r, 2), grantable: cell(r, 3) == "YES" })
+        .collect();
+    Ok(grant_lines(owner, name, &tab, &col))
+}
+
+pub struct TabGrant {
+    pub grantee: String,
+    pub privilege: String,
+    pub grantable: bool,
+}
+
+pub struct ColGrant {
+    pub grantee: String,
+    pub privilege: String,
+    pub column: String,
+    pub grantable: bool,
+}
+
+/// 이름 — 따옴표 없이 쓸 수 있으면 그대로, 아니면 "…"
+fn ident(s: &str) -> String {
+    let mut ch = s.chars();
+    let plain = ch.next().is_some_and(|c| c.is_ascii_uppercase()) && ch.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || "_$#".contains(c));
+    if plain { s.to_string() } else { format!("\"{}\"", s.replace('"', "\"\"")) }
+}
+
+/// GRANT 문 — 받는 사람·재부여 여부가 같은 권한은 한 줄로. 열 권한은 권한마다 열을 묶는다
+pub fn grant_lines(owner: &str, name: &str, tab: &[TabGrant], col: &[ColGrant]) -> String {
+    use std::collections::BTreeMap;
+    let obj = format!("{}.{}", ident(owner), ident(name));
+    let opt = |g: bool| if g { " WITH GRANT OPTION" } else { "" };
+    let mut out = Vec::new();
+    let mut by: BTreeMap<(String, bool), Vec<String>> = BTreeMap::new();
+    for g in tab {
+        by.entry((g.grantee.clone(), g.grantable)).or_default().push(g.privilege.clone());
+    }
+    for ((grantee, grantable), mut privs) in by {
+        privs.sort();
+        privs.dedup();
+        out.push(format!("GRANT {} ON {obj} TO {}{};", privs.join(", "), ident(&grantee), opt(grantable)));
+    }
+    let mut by: BTreeMap<(String, String, bool), Vec<String>> = BTreeMap::new();
+    for g in col {
+        by.entry((g.grantee.clone(), g.privilege.clone(), g.grantable)).or_default().push(ident(&g.column));
+    }
+    for ((grantee, privilege, grantable), mut cols) in by {
+        cols.sort();
+        cols.dedup();
+        out.push(format!("GRANT {privilege} ({}) ON {obj} TO {}{};", cols.join(", "), ident(&grantee), opt(grantable)));
+    }
+    out.join("\n")
+}
+
+/// `"COL" IS NOT NULL` 처럼 열 하나의 NOT NULL 검사인가
+fn is_not_null_check(cond: &str) -> bool {
+    let up = cond.trim().to_uppercase();
+    let Some(head) = up.strip_suffix(" IS NOT NULL") else { return false };
+    let head = head.trim();
+    if let Some(inner) = head.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
+        !inner.contains('"')
+    } else {
+        !head.is_empty() && !head.contains(|c: char| c.is_whitespace() || "()".contains(c))
+    }
+}
+
+/// DBMS_METADATA 의 CREATE TABLE 을 읽기 좋게 — 컬럼은 한 줄에 하나(이름 폭 맞춤), 제약조건의 USING INDEX·REFERENCES 와
+/// 끝의 저장 옵션(PCTFREE·STORAGE·TABLESPACE …)은 줄을 나눈다. 글자는 바꾸지 않고 공백만 고친다 (따옴표 안은 그대로).
+/// 모양을 모르는 DDL(괄호가 없거나 뒤에 다른 문장이 붙은 것)은 앞뒤 공백만 지운다
+pub fn tidy_table_ddl(ddl: &str) -> String {
+    let t = ddl.trim();
+    let Some(open) = top_char(t, 0, '(') else { return t.to_string() };
+    let head = squash(&t[..open]);
+    if !head.to_uppercase().starts_with("CREATE ") || !head.to_uppercase().contains(" TABLE ") {
+        return t.to_string();
+    }
+    let Some(close) = matching_paren(t, open) else { return t.to_string() };
+    let tail = squash(t[close + 1..].trim_end_matches(|c: char| c == ';' || c.is_whitespace()));
+    let tu = tail.to_uppercase();
+    if tu.contains(" AS SELECT") || tu.starts_with("AS ") || tu.contains("ALTER TABLE") || tu.contains("CREATE ") || tail.contains(';') {
+        return t.to_string();
+    }
+    let items: Vec<String> = split_top(&t[open + 1..close]).into_iter().map(|x| squash(&x)).filter(|x| !x.is_empty()).collect();
+    const CONS: &[&str] = &["CONSTRAINT ", "PRIMARY KEY", "UNIQUE ", "UNIQUE(", "FOREIGN KEY", "CHECK ", "CHECK(", "SUPPLEMENTAL ", "PERIOD "];
+    let is_cons = |x: &str| CONS.iter().any(|k| x.to_uppercase().starts_with(k));
+    // 컬럼: 이름과 나머지
+    let col_split = |x: &str| -> (String, String) {
+        let end = match x.strip_prefix('"') {
+            Some(rest) => rest.find('"').map_or(x.len(), |i| i + 2),
+            None => x.find(' ').unwrap_or(x.len()),
+        };
+        (x[..end].to_string(), x[end..].trim().to_string())
+    };
+    let w = items.iter().filter(|x| !is_cons(x)).map(|x| col_split(x).0.chars().count()).max().unwrap_or(0);
+    let lines: Vec<String> = items
+        .iter()
+        .map(|x| {
+            if is_cons(x) {
+                format!("  {}", break_before(x, &["USING INDEX", "REFERENCES", "STORAGE(", "STORAGE (", "TABLESPACE"], false).join("\n    "))
+            } else {
+                let (n, rest) = col_split(x);
+                let pad = w - n.chars().count();
+                if rest.is_empty() { format!("  {n}") } else { format!("  {n}{} {rest}", " ".repeat(pad)) }
+            }
+        })
+        .collect();
+    let mut out = format!("{head} (\n{}\n)", lines.join(",\n"));
+    if !tail.is_empty() {
+        const TAIL: &[&str] = &[
+            "SEGMENT CREATION", "PCTFREE", "NOCOMPRESS", "COMPRESS", "STORAGE(", "STORAGE (", "TABLESPACE", "LOB (", "LOB(",
+            "PARTITION BY", "ORGANIZATION", "ON COMMIT", "CACHE", "NOCACHE", "PARALLEL", "NOPARALLEL", "ROW MOVEMENT", "ENABLE ROW", "DISABLE ROW",
+        ];
+        for l in break_before(&tail, TAIL, true) {
+            out.push('\n');
+            out.push_str(&l);
+        }
+    }
+    out.push(';');
+    out
+}
+
+/// 따옴표('…' "…") 밖의 공백 덩어리를 빈칸 하나로
+fn squash(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut q: Option<char> = None;
+    let mut sp = false;
+    for c in s.chars() {
+        if let Some(qc) = q {
+            out.push(c);
+            if c == qc {
+                q = None;
+            }
+            continue;
+        }
+        if c.is_whitespace() {
+            sp = true;
+            continue;
+        }
+        if sp && !out.is_empty() {
+            out.push(' ');
+        }
+        sp = false;
+        if c == '\'' || c == '"' {
+            q = Some(c);
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// 따옴표 밖에서 괄호 깊이 `depth` 인 첫 `ch` 의 바이트 위치
+fn top_char(s: &str, depth: i32, ch: char) -> Option<usize> {
+    let mut d = 0;
+    let mut q: Option<char> = None;
+    for (i, c) in s.char_indices() {
+        if let Some(qc) = q {
+            if c == qc {
+                q = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' => q = Some(c),
+            _ if c == ch && d == depth => return Some(i),
+            '(' => d += 1,
+            ')' => d -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `open` 의 여는 괄호에 맞는 닫는 괄호
+fn matching_paren(s: &str, open: usize) -> Option<usize> {
+    top_char(&s[open + 1..], 0, ')').map(|i| i + open + 1)
+}
+
+/// 따옴표·괄호 밖의 쉼표로 나눈다
+fn split_top(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(i) = top_char(rest, 0, ',') {
+        out.push(rest[..i].to_string());
+        rest = &rest[i + 1..];
+    }
+    out.push(rest.to_string());
+    out
+}
+
+/// 낱말 경계에 있는 키워드 앞에서 줄을 나눈다 (따옴표 밖, depth0: 괄호 밖에서만)
+fn break_before(s: &str, kws: &[&str], depth0: bool) -> Vec<String> {
+    let up = s.to_uppercase();
+    // to_uppercase 가 길이를 바꾸면(드문 글자) 나누지 않는다
+    if up.len() != s.len() {
+        return vec![s.to_string()];
+    }
+    let b = s.as_bytes();
+    let mut cuts = Vec::new();
+    let mut d = 0;
+    let mut q: Option<u8> = None;
+    for (i, &c) in b.iter().enumerate() {
+        if let Some(qc) = q {
+            if c == qc {
+                q = None;
+            }
+            continue;
+        }
+        match c {
+            b'\'' | b'"' => q = Some(c),
+            b'(' => d += 1,
+            b')' => d -= 1,
+            b' ' if i > 0 && (!depth0 || d == 0) => {
+                let at = &up[i + 1..];
+                let hit = kws.iter().any(|k| at.starts_with(k) && (k.ends_with('(') || at[k.len()..].chars().next().is_none_or(|n| n == ' ' || n == '(')));
+                if hit {
+                    cuts.push(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    let mut from = 0;
+    for c in cuts {
+        out.push(s[from..c].trim().to_string());
+        from = c + 1;
+    }
+    out.push(s[from..].trim().to_string());
+    out.retain(|x| !x.is_empty());
     out
 }
 
@@ -942,5 +1407,118 @@ mod usage_tests {
         assert_eq!(word_in_line("  v_x := 1; -- status 바꿈", "STATUS"), Some(true), "주석에만");
         assert_eq!(word_in_line("  x.order_status := 1;", "STATUS"), None, "다른 낱말의 일부");
         assert_eq!(word_in_line("WHERE o.STATUS='A'", "STATUS"), Some(false));
+    }
+}
+
+#[cfg(test)]
+mod script_tests {
+    use super::*;
+
+    /// 11g·19c 의 DBMS_METADATA.GET_DDL('TABLE') 이 내는 모양 (탭·들쭉날쭉한 들여쓰기)
+    const EMP: &str = "\n  CREATE TABLE \"SCOTT\".\"EMP\" \n   (\t\"EMPNO\" NUMBER(4,0), \n\t\"ENAME\" VARCHAR2(10), \n\t\"HIREDATE\" DATE DEFAULT SYSDATE, \n\t\"NOTE\" VARCHAR2(20) DEFAULT 'a  b', \n\t\"DEPTNO\" NUMBER(2,0), \n\t CONSTRAINT \"PK_EMP\" PRIMARY KEY (\"EMPNO\")\n  USING INDEX PCTFREE 10 INITRANS 2 MAXTRANS 255 COMPUTE STATISTICS \n  STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645\n  PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1 BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)\n  TABLESPACE \"USERS\"  ENABLE, \n\t CONSTRAINT \"FK_DEPTNO\" FOREIGN KEY (\"DEPTNO\")\n\t  REFERENCES \"SCOTT\".\"DEPT\" (\"DEPTNO\") ENABLE\n   ) SEGMENT CREATION IMMEDIATE \n  PCTFREE 10 PCTUSED 40 INITRANS 1 MAXTRANS 255 NOCOMPRESS LOGGING\n  STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645\n  PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1 BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)\n  TABLESPACE \"USERS\" ";
+
+    #[test]
+    fn tidy_emp() {
+        let got = tidy_table_ddl(EMP);
+        let want = "CREATE TABLE \"SCOTT\".\"EMP\" (
+  \"EMPNO\"    NUMBER(4,0),
+  \"ENAME\"    VARCHAR2(10),
+  \"HIREDATE\" DATE DEFAULT SYSDATE,
+  \"NOTE\"     VARCHAR2(20) DEFAULT 'a  b',
+  \"DEPTNO\"   NUMBER(2,0),
+  CONSTRAINT \"PK_EMP\" PRIMARY KEY (\"EMPNO\")
+    USING INDEX PCTFREE 10 INITRANS 2 MAXTRANS 255 COMPUTE STATISTICS
+    STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645 PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1 BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+    TABLESPACE \"USERS\" ENABLE,
+  CONSTRAINT \"FK_DEPTNO\" FOREIGN KEY (\"DEPTNO\")
+    REFERENCES \"SCOTT\".\"DEPT\" (\"DEPTNO\") ENABLE
+)
+SEGMENT CREATION IMMEDIATE
+PCTFREE 10 PCTUSED 40 INITRANS 1 MAXTRANS 255
+NOCOMPRESS LOGGING
+STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645 PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1 BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+TABLESPACE \"USERS\";";
+        assert_eq!(got, want, "\n{got}");
+        // 공백 말고는 글자가 그대로다
+        let strip = |s: &str| s.chars().filter(|c| !c.is_whitespace() && *c != ';').collect::<String>();
+        assert_eq!(strip(&got).replace("a b", "a  b"), strip(EMP));
+    }
+
+    #[test]
+    fn tidy_leaves_unknown_shapes() {
+        assert_eq!(tidy_table_ddl("  CREATE TABLE T AS SELECT * FROM DUAL "), "CREATE TABLE T AS SELECT * FROM DUAL");
+        let two = "CREATE TABLE \"A\" (\"X\" NUMBER) ;\n ALTER TABLE \"A\" ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;";
+        assert_eq!(tidy_table_ddl(two), two);
+        assert_eq!(tidy_table_ddl("CREATE VIEW V AS SELECT (1) X FROM DUAL"), "CREATE VIEW V AS SELECT (1) X FROM DUAL");
+        // 임시 테이블·괄호 안의 쉼표(NUMBER(7,2))
+        assert_eq!(
+            tidy_table_ddl("CREATE GLOBAL TEMPORARY TABLE \"S\".\"TMP\"\n(\t\"A\" NUMBER(7,2),\t\"BB\" CHAR(1)\n) ON COMMIT DELETE ROWS "),
+            "CREATE GLOBAL TEMPORARY TABLE \"S\".\"TMP\" (\n  \"A\"  NUMBER(7,2),\n  \"BB\" CHAR(1)\n)\nON COMMIT DELETE ROWS;"
+        );
+    }
+
+    #[test]
+    fn grants() {
+        let t = |g: &str, p: &str, o: bool| TabGrant { grantee: g.into(), privilege: p.into(), grantable: o };
+        let c = |g: &str, p: &str, col: &str| ColGrant { grantee: g.into(), privilege: p.into(), column: col.into(), grantable: false };
+        let got = grant_lines(
+            "SCOTT",
+            "EMP",
+            &[t("HR", "UPDATE", false), t("HR", "SELECT", false), t("APP", "SELECT", true), t("my role", "SELECT", false)],
+            &[c("HR", "UPDATE", "SAL"), c("HR", "UPDATE", "COMM"), c("HR", "INSERT", "ENAME")],
+        );
+        assert_eq!(
+            got,
+            "GRANT SELECT ON SCOTT.EMP TO APP WITH GRANT OPTION;\n\
+             GRANT SELECT, UPDATE ON SCOTT.EMP TO HR;\n\
+             GRANT SELECT ON SCOTT.EMP TO \"my role\";\n\
+             GRANT INSERT (ENAME) ON SCOTT.EMP TO HR;\n\
+             GRANT UPDATE (COMM, SAL) ON SCOTT.EMP TO HR;"
+        );
+        assert_eq!(grant_lines("S", "lower t", &[], &[]), "");
+        assert_eq!(grant_lines("S", "lower t", &[t("PUBLIC", "SELECT", false)], &[]), "GRANT SELECT ON S.\"lower t\" TO PUBLIC;");
+    }
+
+    #[test]
+    fn indexes() {
+        let d = |n: &str, u: bool, b: bool, cols: &[&str], ts: Option<&str>| IndexDef {
+            owner: "SCOTT".into(), name: n.into(), unique: u, bitmap: b, cols: cols.iter().map(|x| x.to_string()).collect(), tablespace: ts.map(Into::into),
+        };
+        assert_eq!(
+            index_lines("SCOTT", "EMP", &[
+                d("EMP_NAME_IX", false, false, &["ENAME", "SAL DESC"], Some("USERS")),
+                d("EMP_U", true, false, &["UPPER(\"ENAME\")"], None),
+                d("EMP_B", false, true, &["DEPTNO"], None),
+            ]),
+            "CREATE INDEX SCOTT.EMP_NAME_IX ON SCOTT.EMP (ENAME, SAL DESC) TABLESPACE USERS;\n\
+             CREATE UNIQUE INDEX SCOTT.EMP_U ON SCOTT.EMP (UPPER(\"ENAME\"));\n\
+             CREATE BITMAP INDEX SCOTT.EMP_B ON SCOTT.EMP (DEPTNO);"
+        );
+    }
+
+    #[test]
+    fn constraints() {
+        let c = |n: &str, k: char, cols: &[&str], cond: &str, generated: bool| ConsDef {
+            name: n.into(), kind: k, cols: cols.iter().map(|x| x.to_string()).collect(),
+            ref_owner: "SCOTT".into(), ref_table: "DEPT".into(), ref_cols: vec!["DEPTNO".into()],
+            delete_rule: if k == 'R' { "CASCADE".into() } else { String::new() }, condition: cond.into(), generated,
+        };
+        assert_eq!(
+            constraint_lines("SCOTT", "EMP", &[
+                c("EMP_UK", 'U', &["ENAME", "HIREDATE"], "", false),
+                c("FK_DEPT", 'R', &["DEPTNO"], "", false),
+                c("SYS_C0011", 'C', &[], "\"ENAME\" IS NOT NULL", true),
+                c("SYS_C0012", 'C', &[], "sal > 0", true),
+                c("CK_SAL", 'C', &[], "sal BETWEEN 0 AND 9999", false),
+            ]),
+            "ALTER TABLE SCOTT.EMP ADD CONSTRAINT EMP_UK UNIQUE (ENAME, HIREDATE);\n\
+             ALTER TABLE SCOTT.EMP ADD CONSTRAINT FK_DEPT FOREIGN KEY (DEPTNO) REFERENCES SCOTT.DEPT (DEPTNO) ON DELETE CASCADE;\n\
+             ALTER TABLE SCOTT.EMP ADD CHECK (sal > 0);\n\
+             ALTER TABLE SCOTT.EMP ADD CONSTRAINT CK_SAL CHECK (sal BETWEEN 0 AND 9999);"
+        );
+        assert!(is_not_null_check("\"A B\" IS NOT NULL"));
+        assert!(is_not_null_check("ename is not null"));
+        assert!(!is_not_null_check("a > 0 or b is not null"));
+        assert!(!is_not_null_check("(a) IS NOT NULL"));
     }
 }

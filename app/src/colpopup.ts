@@ -3,6 +3,7 @@
 // 편집기에서 F4 (커서의 테이블·별칭), 왼쪽 테이블 목록에서 우클릭.
 // 결과 그리드와 같다: 셀 단위 선택(끌기·Shift) · Ctrl+C 고른 셀 복사(컬럼 칸만 고르면 이름만) · 머리 눌러 정렬 · 열 너비
 // 더블클릭: 컬럼 이름 넣기 · 우클릭: 이름 복사·넣기 · Esc: 닫기 · 머리 끌기: 옮기기 · 오른쪽 아래 모서리: 크기
+// 오른쪽 패널에 붙이기(⇥)·떼어 내기(⇱) — 넓은 화면이면 처음부터 오른쪽에 (sidedock.ts 의 '여는 곳')
 // 탭: 컬럼 · 인덱스 · 스크립트(DDL·GRANT) · Used By(이 객체를 쓰는 곳과 그 줄) · Uses(이 객체가 쓰는 것) — 의존 행 더블클릭: 그 객체 열기
 // 키보드: 방향키로 고르기 (Shift+ 넓히기 · Ctrl+ 커서만 · Space 더하기/빼기) · 글자를 치면 거르기 칸으로
 //   Enter: 커서가 있던 절에 맞춰 넣기 · Shift+Enter: 넣을 절 메뉴
@@ -65,12 +66,26 @@ const updaters = new WeakMap<HTMLElement, (d: TableDesc) => void>();
 
 export interface ColPopup { update: (d: TableDesc) => void }
 
+/** 오른쪽 패널 — main 이 넣어 준다 (없으면 늘 떠 있는 창) */
+export interface ColDock {
+  add: (item: { key: string; title: string; tip?: string; el: HTMLElement; onClose?: () => void }) => void;
+  remove: (key: string) => void;
+  activate: (key: string) => boolean;
+  /** 이번에 여는 창을 오른쪽에 둘까 */
+  wanted: () => boolean;
+}
+let dock: ColDock | null = null;
+export function setColDock(d: ColDock | null) {
+  dock = d;
+}
+
 export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   // 같은 테이블이 이미 떠 있으면 그 창을 앞으로
   const key = `${d.owner}.${d.name}`;
   const same = open.find((w) => w.dataset.key === key);
   if (same) {
-    same.style.zIndex = String(++zTop);
+    if (same.classList.contains("docked")) dock?.activate(`cp:${key}`);
+    else same.style.zIndex = String(++zTop);
     same.querySelector<HTMLInputElement>("input")?.focus();
     return { update: (x) => updaters.get(same)?.(x) };
   }
@@ -197,11 +212,14 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
       ]);
     },
   });
+  const dockKey = `cp:${key}`;
+  const dockBtn = h("button", { class: "cp-x cp-dock" });
   const win = h("div", { class: "cp-win", tabindex: "-1", "data-key": key },
     h("div", { class: "cp-head", title: "끌어서 옮기기" },
       h("strong", {}, `${d.owner}.${d.name}`),
       sub,
       h("span", { class: "spacer" }),
+      dockBtn,
       h("button", { class: "cp-x", title: "닫기 (Esc)", onclick: () => close() }, "×")),
     h("div", { class: "cp-tools" }, tabCols, tabIdx, o.script ? tabScript : "", o.deps ? tabBy : "", o.deps ? tabUses : "", filter, count, h("span", { class: "spacer" }),
       h("button", { class: "small", title: "고른 행(없으면 보이는 전체)의 컬럼 이름을 줄마다 복사", onclick: copyNames }, "이름 복사"),
@@ -276,8 +294,45 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   function close() {
     closeWheel();
     window.removeEventListener("blur", closeWheel);
+    if (win.classList.contains("docked")) dock?.remove(dockKey);
     win.remove();
     open.splice(open.indexOf(win), 1);
+  }
+
+  /** 오른쪽 패널에 붙인다 — 같은 창을 옮기므로 고른 행·탭·거르기가 그대로다 */
+  function toDock() {
+    if (!dock) return;
+    win.classList.add("docked");
+    for (const k of ["left", "top", "width", "height", "zIndex"] as const) win.style[k] = "";
+    dock.add({ key: dockKey, title: d.name, tip: `${d.owner}.${d.name}${d.comment ? ` — ${d.comment}` : ""}`, el: win, onClose: close });
+    dockLabel();
+  }
+
+  /** 떼어 내 떠 있는 창으로 — 지금 있던 자리 근처에 */
+  function toFloat() {
+    const r = win.getBoundingClientRect();
+    dock?.remove(dockKey);
+    win.classList.remove("docked");
+    place(Math.max(10, r.left - 40), r.top + 30, Math.min(720, window.innerWidth - 40), Math.min(380, window.innerHeight - 80));
+    document.body.append(win);
+    dockLabel();
+    filter.focus();
+  }
+
+  function dockLabel() {
+    const docked = win.classList.contains("docked");
+    dockBtn.hidden = !dock;
+    dockBtn.textContent = docked ? "⇱" : "⇥";
+    dockBtn.title = docked ? "떼어 내 떠 있는 창으로" : "오른쪽 패널에 붙이기";
+  }
+  dockBtn.onclick = () => (win.classList.contains("docked") ? toFloat() : toDock());
+
+  function place(x: number, y: number, w: number, hh: number) {
+    win.style.width = `${w}px`;
+    win.style.height = `${hh}px`;
+    win.style.left = `${Math.max(10, Math.min(window.innerWidth - w - 10, x))}px`;
+    win.style.top = `${Math.max(10, Math.min(window.innerHeight - hh - 10, y))}px`;
+    win.style.zIndex = String(++zTop);
   }
 
   const TABS: [View, HTMLElement][] = [["cols", tabCols], ["idx", tabIdx], ["script", tabScript], ["by", tabBy], ["uses", tabUses]];
@@ -295,7 +350,8 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
   });
   body.append(grid.el);
   win.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { e.stopPropagation(); close(); }
+    // 오른쪽에 붙인 창은 Esc 로 닫지 않는다 (탭의 × 로)
+    if (e.key === "Escape" && !win.classList.contains("docked")) { e.stopPropagation(); close(); }
   });
 
   // ── 4방향 휠 ── 모디파이어만 0.2초 누르고 있으면 뜬다 (Ctrl+Shift+C 같은 단축키는 그 전에 다른 키가 와서 안 뜬다)
@@ -353,12 +409,12 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
     if (t) void placeCols(t);
   }, true);
   window.addEventListener("blur", closeWheel);
-  win.addEventListener("mousedown", () => { win.style.zIndex = String(++zTop); });
+  win.addEventListener("mousedown", () => { if (!win.classList.contains("docked")) win.style.zIndex = String(++zTop); });
 
   // 머리를 끌어 옮기기
   const head = win.querySelector<HTMLElement>(".cp-head")!;
   head.addEventListener("mousedown", (e) => {
-    if ((e.target as HTMLElement).tagName === "BUTTON") return;
+    if ((e.target as HTMLElement).tagName === "BUTTON" || win.classList.contains("docked")) return;
     e.preventDefault();
     const r = win.getBoundingClientRect();
     const dx = e.clientX - r.left, dy = e.clientY - r.top;
@@ -373,15 +429,16 @@ export function showColumns(d: TableDesc, o: ColPopupOpts): ColPopup {
 
   // 자리: 요청한 곳 아래, 화면 밖으로 나가지 않게. 여러 개면 조금씩 비켜서
   const w = Math.min(720, window.innerWidth - 40), hh = Math.min(380, window.innerHeight - 80);
-  const off = open.length * 24;
+  const off = open.filter((x) => !x.classList.contains("docked")).length * 24;
   const x = (o.at?.x ?? window.innerWidth / 2 - w / 2) + off, y = (o.at ? o.at.y + 8 : 120) + off;
-  win.style.width = `${w}px`;
-  win.style.height = `${hh}px`;
-  win.style.left = `${Math.max(10, Math.min(window.innerWidth - w - 10, x))}px`;
-  win.style.top = `${Math.max(10, Math.min(window.innerHeight - hh - 10, y))}px`;
-  win.style.zIndex = String(++zTop);
-  document.body.append(win);
   open.push(win);
+  if (dock?.wanted()) {
+    toDock();
+  } else {
+    place(x, y, w, hh);
+    document.body.append(win);
+    dockLabel();
+  }
   render();
   filter.focus();
   const update = (x: TableDesc) => {

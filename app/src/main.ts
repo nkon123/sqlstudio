@@ -21,7 +21,7 @@ import { findList, wrapList } from "./listwrap";
 import { vw } from "./sqlfmt";
 import type { GitPanel } from "./git";
 import { condOf, placeAtCursor, placeInClause, TARGET_LABEL, type Placed, type Target } from "./colinsert";
-import { showColumns } from "./colpopup";
+import { setColDock, showColumns } from "./colpopup";
 import { aliasMap } from "./aliasmap";
 import { showMenu, type MenuItem } from "./ctxmenu";
 import { mergeCheck } from "./mergecheck";
@@ -42,6 +42,7 @@ import { loadSnippets } from "./snippets";
 import { alertBox, applyTheme, bindBox, confirmBox, h, icon, modal, passwordBox, toast } from "./ui";
 import { Tab } from "./tab";
 import { SideLayout } from "./layout";
+import { SideDock } from "./sidedock";
 import { connMenu, fileMenu, palette, runMenu, toolsMenu } from "./menus";
 import { openPalette } from "./palette";
 import { guessTable } from "./export-text";
@@ -130,6 +131,8 @@ export class App {
   /** 왼쪽 아래 영역 바꾸기 (문서·객체·개요·프로젝트·실행 이력) */
   private showSide!: (k: string) => void;
   layout!: SideLayout;
+  /** 오른쪽 영역 — AI 와 테이블·객체 상세 탭 */
+  dock!: SideDock;
 
   constructor(root: HTMLElement) {
     const b = (key: string, label: string, title: string, onclick: () => void, cls = "") =>
@@ -158,7 +161,7 @@ export class App {
     b("format", "포맷", "SQL 정리 (Ctrl+Shift+F) — 선택 영역, 없으면 커서 위치 문장", () => this.formatSql());
     // 툴바에는 두지 않는다 (왼쪽 패널 아래의 '접기') — 명령 검색이 같은 단추를 쓴다
     b("toggleBrowser", "◧", "왼쪽 패널 접기/펼치기 — 접으면 아이콘 줄만 (Ctrl+Shift+1)", () => this.layout.toggle("left"), "icon");
-    b("toggleAi", "AI", "오른쪽 AI 영역 접기/펼치기 (Ctrl+Shift+3) · AI 입력칸으로 바로: Ctrl+K · 경계선을 끌면 너비 조절", () => this.layout.toggle("right"), "icon");
+    b("toggleAi", "AI", "오른쪽 영역(AI · 테이블 상세) 접기/펼치기 (Ctrl+Shift+3) · AI 입력칸으로 바로: Ctrl+K · 경계선을 끌면 너비 조절", () => this.layout.toggle("right"), "icon");
     b("keys", "?", "단축키 목록 (F1)", () => showShortcuts(), "icon");
     b("settings", "⚙", "설정 — 접속·편집기·AI·MCP·데이터 폴더", () => this.settings(), "icon");
     const drop = (label: string, title: string, items: () => MenuItem[], cls = "") => {
@@ -302,7 +305,15 @@ export class App {
       this.tabStrip.scrollLeft += Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
     }, { passive: false });
     const main = h("main", { class: "layout" });
-    this.layout = new SideLayout(main, browser, center, this.ai.el, (side, open) => {
+    // 상세를 붙이면 표가 보이게 오른쪽을 넓힌다 (기본 폭 360 은 AI 대화용)
+    this.dock = new SideDock(this.ai.el, (detail) => (detail ? this.layout.ensure("right", 560) : this.layout.toggle("right", true)));
+    setColDock({
+      add: (it) => this.dock.add(it),
+      remove: (k) => this.dock.remove(k),
+      activate: (k) => this.dock.activate(k),
+      wanted: () => SideDock.wanted(),
+    });
+    this.layout = new SideLayout(main, browser, center, this.dock.el, (side, open) => {
       if (side === "left" && this.leftOpen !== open) { this.leftOpen = open; this.placeTabs(); }
       this.btn[side === "left" ? "toggleBrowser" : "toggleAi"]?.classList.toggle("active", open);
     });
@@ -346,6 +357,7 @@ export class App {
         e.preventDefault();
         e.stopPropagation();
         this.layout.toggle("right", true);
+        this.dock.showAi();
         this.ai.focus();
       }
     }, true);
@@ -1456,7 +1468,7 @@ export class App {
     const a = document.activeElement;
     const t = this.active;
     if (!a || a === document.body) return null;
-    if (this.ai.el.contains(a)) return "right";
+    if (this.dock.el.contains(a)) return "right";
     if (this.browserEl.contains(a)) return "left";
     if (t?.grid.el.contains(a)) return "grid";
     if (t?.editor.view.dom.contains(a)) return "editor";
@@ -1474,7 +1486,7 @@ export class App {
       el?.focus();
       return;
     }
-    if (a === "right") { this.layout.toggle("right", true); this.ai.focus(); return; }
+    if (a === "right") { this.layout.toggle("right", true); this.dock.showAi(); this.ai.focus(); return; }
     if (!t) return;
     // 분석·디버거 화면이 떠 있으면 편집기 화면으로
     t.showEditor();
@@ -1701,15 +1713,22 @@ export class App {
       actions.push(btn("디버그", () => t.debugger().openUnit(o.owner, o.name, type)));
       if (type !== "TYPE") actions.push(btn("분석", () => this.analyzeActive(o.owner, o.name), "PL/SQL 분석 화면에서 연다"));
     }
-    t.desc.replaceChildren(
+    const parts = [
       h("div", { class: "desc-head" },
         h("strong", {}, `${type} ${o.owner}.${o.name}`),
         o.status === "INVALID" ? h("span", { class: "ob-invalid", title: "컴파일이 필요합니다" }, " INVALID") : "",
         desc?.comment ? h("span", {}, ` — ${desc.comment}`) : "",
         desc?.num_rows ? h("small", {}, ` · 통계 ${Number(desc.num_rows).toLocaleString()}행 (${desc.last_analyzed ?? "?"})`) : ""),
       h("div", { class: "desc-actions" }, ...actions),
-      nav, body);
-    t.show("desc");
+      nav, body];
+    if (SideDock.wanted()) {
+      // 넓은 화면 — 오른쪽 패널 탭으로 (결과 그리드를 가리지 않게)
+      const key = `obj:${id}:${o.owner}.${o.name}:${type}`;
+      this.dock.add({ key, title: o.name, tip: `${type} ${o.owner}.${o.name}`, el: h("div", { class: "dock-desc" }, ...parts) });
+    } else {
+      t.desc.replaceChildren(...parts);
+      t.show("desc");
+    }
     if (tabs.length) open(tabs[0].key);
   }
 

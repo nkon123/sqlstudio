@@ -1,4 +1,4 @@
-// 화면 배치 — 왼쪽(테이블·프로젝트) · 가운데 · 오른쪽(AI) 3단과 경계선 끌기 (main.ts 에서 나눔)
+// 화면 배치 — 왼쪽(테이블·프로젝트) · 가운데 · 오른쪽(AI·상세 — sidedock.ts) 3단과 경계선 끌기 (main.ts 에서 나눔)
 
 import { h } from "./ui";
 
@@ -25,6 +25,15 @@ export class SideLayout {
     this.apply();
   }
 
+  /** 펼치고, 폭이 minPx 보다 좁으면 넓힌다 (화면의 반을 넘지 않게) — 상세를 오른쪽에 붙일 때 */
+  ensure(side: "left" | "right", minPx: number) {
+    const want = Math.min(minPx, Math.floor(window.innerWidth * 0.5));
+    if (this.open[side] && this.w[side] >= want) return;
+    this.open[side] = true;
+    this.w[side] = Math.max(this.w[side], want);
+    this.apply();
+  }
+
   private splitter(side: "left" | "right") {
     const btn = h("button", { class: "vsplit-btn", title: "접기/펼치기 (경계선 더블클릭도 됨)", onclick: (e: Event) => { e.stopPropagation(); this.toggle(side); } });
     const el = h("div", { class: `vsplit ${side}`, title: "끌어서 너비 조절 · 더블클릭: 접기/펼치기" }, btn);
@@ -37,7 +46,8 @@ export class SideLayout {
       document.body.classList.add("col-resizing");
       const move = (ev: MouseEvent) => {
         const dx = side === "left" ? ev.clientX - x0 : x0 - ev.clientX;
-        const max = Math.max(200, Math.min(800, window.innerWidth * 0.5));
+        // 오른쪽(AI·상세)은 와이드 모니터에서 넓게 쓸 수 있게 화면의 60% 까지
+        const max = side === "right" ? Math.max(200, Math.min(1400, window.innerWidth * 0.6)) : Math.max(200, Math.min(800, window.innerWidth * 0.5));
         const nw = w0 + dx;
         if (nw < 80) {
           this.open[side] = false;

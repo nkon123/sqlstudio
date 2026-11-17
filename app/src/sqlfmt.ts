@@ -645,6 +645,24 @@ class Fmt {
     }
   }
 
+  /** 지금 괄호 안(여는 괄호 다음)이 같은 깊이에 AND·OR 가 있고 어딘가에 서브쿼리(SELECT)가 든 조건인지 */
+  private logicalGroup(): boolean {
+    let depth = 0, logic = false, sub = false;
+    for (let k = this.pos; k < this.toks.length; k++) {
+      const t = this.toks[k];
+      if (t.t === "(") depth++;
+      else if (t.t === ")") { if (depth-- === 0) break; }
+      else if (t.t === ";") return false;
+      else if (t.t === "word") {
+        const u = t.v.toUpperCase();
+        if (u === "SELECT") sub = true;
+        else if (depth === 0 && (u === "AND" || u === "OR")) logic = true;
+        else if (depth === 0 && (u === "BETWEEN" || u === "CASE")) return false;
+      }
+    }
+    return logic && sub;
+  }
+
   private paren() {
     const open = this.at()!;
     this.emit("(", this.space(this.prev, open));
@@ -654,6 +672,30 @@ class Fmt {
     const u = this.up();
     if (u === "SELECT" || u === "WITH") {
       this.query(this.col());
+    } else if (this.logicalGroup()) {
+      // AND·OR 로 묶인 조건 안에 서브쿼리가 있으면 한 줄로 이으면 서브쿼리가 오른쪽 끝으로 밀린다 — 괄호 안 조건도 줄을 나눈다
+      const saveCont = this.cont;
+      const base = this.col();
+      this.cont = base;
+      for (;;) {
+        this.expr({ cond: true });
+        const op = this.up();
+        if (op !== "AND" && op !== "OR") break;
+        const text = this.kw(this.at()!.v);
+        if (this.o.logicalBefore) {
+          this.brk(base);
+          this.emit(text, true);
+          this.pos++;
+          this.prev = this.toks[this.pos - 1];
+        } else {
+          this.emit(text, true);
+          this.pos++;
+          this.brk(base);
+          this.prev = null;
+        }
+        this.cont = base;
+      }
+      this.cont = saveCont;
     } else {
       const saveCont = this.cont;
       this.cont = this.col();

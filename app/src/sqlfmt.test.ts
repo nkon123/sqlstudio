@@ -373,4 +373,23 @@ eq("update emp set\n/* 급여 */\nsal = 1,\n-- 날짜\nupd_dt = sysdate\n/* 조�
 // 문장 맨 앞·맨 끝의 제 줄 주석
 eq("-- 머리\nselect a from t\n-- 꼬리", "-- 머리\nSELECT a\n  FROM t\n-- 꼬리");
 
+// 괄호 안에서 OR·AND 로 묶인 조건에 서브쿼리가 있으면 괄호 안도 줄을 나눈다 (한 줄로 이으면 서브쿼리가 오른쪽 끝으로 밀렸다)
+eq("select * from tab1 where 1 = 1 and ((col1 = 'test' and not exists (select 'x' from tab3 where tab3.a = tab1.a)) or (col1 = 'test2' and not exists (select 'y' from tab4 where tab4.a = tab1.a)))",
+`SELECT *
+  FROM tab1
+ WHERE 1 = 1
+   AND ((col1 = 'test'
+         AND NOT EXISTS (SELECT 'x'
+                           FROM tab3
+                          WHERE tab3.a = tab1.a))
+        OR (col1 = 'test2'
+            AND NOT EXISTS (SELECT 'y'
+                              FROM tab4
+                             WHERE tab4.a = tab1.a)))`);
+// 서브쿼리가 없는 괄호 조건은 그대로 한 줄
+eq("select * from t where (a = 1 or b = 2) and c = 3", `SELECT *
+  FROM t
+ WHERE (a = 1 OR b = 2)
+   AND c = 3`);
+
 console.log(`  포맷 ${n}건`);

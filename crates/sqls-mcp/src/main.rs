@@ -65,13 +65,18 @@ async fn main() -> ExitCode {
     if let Err(e) = sqls_core::session::init_client(cfg.oracle.client_dir(), cfg.oracle.tns_dir()) {
         eprintln!("Oracle Client 를 불러올 수 없습니다: {e}\n\
                    Instant Client 19 이상을 설치하고 [oracle] client_lib_dir 을 지정하거나 PATH 에 넣으세요.");
-        return ExitCode::from(1);
+        if check {
+            return ExitCode::from(1);
+        }
+        // 분석·흐름도 툴은 DB 없이 결과 파일만 읽는다 — 그것만이라도 쓰게 띄운다 (DB 툴은 부를 때 오류)
+        eprintln!("경고: DB 툴은 쓸 수 없고 분석·흐름도 툴만 동작합니다.");
     }
 
     eprintln!("config       : {}", config_path().display());
     eprintln!("connections  : {}", cfg.mcp.allowed_connections.join(", "));
-    eprintln!("limits       : timeout={}s · SQL 실행 툴 없음 · explain_plan {}", cfg.mcp.call_timeout_secs,
-        if cfg.mcp.allow_explain { "켜짐" } else { "꺼짐" });
+    eprintln!("limits       : timeout={}s · explain_plan {} · run_check {}", cfg.mcp.call_timeout_secs,
+        if cfg.mcp.allow_explain { "켜짐" } else { "꺼짐" },
+        if cfg.mcp.allow_checks { "켜짐 (운영 프로필 제외)" } else { "꺼짐 (SQL 실행 툴 없음)" });
     if cfg.mcp.allowed_connections.is_empty() {
         eprintln!("경고: [mcp] allowed_connections 가 비어 있어 노출되는 접속이 없습니다.");
     }
@@ -80,7 +85,13 @@ async fn main() -> ExitCode {
         return run_check(&cfg).await;
     }
 
-    let server = SqlStudioMcp::new(&cfg, oracle_connector());
+    let mut server = SqlStudioMcp::new(&cfg, oracle_connector());
+    if cfg.mcp.allow_checks {
+        // 검증 SELECT 기록 — 설정 파일 옆
+        let log = config_path().with_file_name("mcp-checks.jsonl");
+        eprintln!("check log    : {}", log.display());
+        server = server.with_check_log(log);
+    }
     match http {
         None => match server.serve(rmcp::transport::stdio()).await {
             Ok(running) => {

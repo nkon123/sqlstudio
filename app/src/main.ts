@@ -17,7 +17,7 @@ import { enableTabDrag, tabsSidePref } from "./tabdrag";
 import { cellCondition, listCondition, listText, placeCondition, type CondOp, type ListCond, type ListText } from "./cond";
 import { changeCase } from "./editor";
 import { autoFormat, formatSql, loadPrefs, preloadFormatter, startsWithDml } from "./format";
-import { findList, wrapList } from "./listwrap";
+import { findLists, wrapList } from "./listwrap";
 import { vw } from "./sqlfmt";
 import type { GitPanel } from "./git";
 import { condOf, placeAtCursor, placeInClause, TARGET_LABEL, type Placed, type Target } from "./colinsert";
@@ -506,33 +506,57 @@ export class App {
       if (!cur) return toast("나눌 SELECT 목록이 없습니다", "info");
       ({ from, to } = cur);
     }
-    const span = findList(view.state.sliceDoc(from, to));
-    if (typeof span === "string") return toast(span, "error", 6000);
-    if (span.items.length < 2) return toast("나눌 항목이 하나뿐입니다", "info");
-    const a = from + span.from, b = from + span.to;
-    const line = view.state.doc.lineAt(a);
-    const lead = line.text.slice(0, a - line.from);
-    const col = vw(lead);
+    // 커서만 있으면 그 자리의 SELECT 하나, 드래그해 골랐으면 그 안에 걸린 SELECT 목록 모두 (UNION ALL 갈래들 등)
+    const found = findLists(view.state.sliceDoc(from, to), main.empty ? main.head - from : null);
+    if (typeof found === "string") return toast(found, "error", 6000);
+    const usable = found.lists.filter((x) => !x.error && x.items.length >= 2);
+    const skipped = found.lists.length - usable.length;
+    if (!usable.length) {
+      const e = found.lists.find((x) => x.error)?.error;
+      return e ? toast(e, "error", 6000) : toast("나눌 항목이 하나뿐입니다", "info");
+    }
+    const span = found.lists[found.index] && usable.includes(found.lists[found.index]) ? found.lists[found.index] : usable[0];
     const comma = loadPrefs().commaBefore;
-    const n = span.items.length;
+    /** 목록이 놓인 줄의 앞부분과 그 칸 */
+    const place = (s: { from: number }) => {
+      const a = from + s.from;
+      const line = view.state.doc.lineAt(a);
+      const lead = line.text.slice(0, a - line.from);
+      return { a, lead, col: vw(lead) };
+    };
+    const me = place(span);
+    const n = Math.max(...usable.map((x) => x.items.length));
     let saved = 0;
     try { saved = Number(localStorage.getItem("listwrap.rows")) || 0; } catch { /* 없으면 기본 */ }
-    const input = h("input", { type: "number", min: "1", max: String(n), value: String(Math.min(n, saved || Math.ceil(n / 4))) }) as HTMLInputElement;
+    const input = h("input", { type: "number", min: "1", max: String(n), value: String(Math.min(n, saved || Math.ceil(span.items.length / 4))) }) as HTMLInputElement;
     const preview = h("pre", { class: "format-preview" });
     const rows = () => Math.max(1, Math.min(n, Number(input.value) || 1));
-    const show = () => { preview.textContent = lead + wrapList(span.items, rows(), col, comma); };
+    const show = () => { preview.textContent = me.lead + wrapList(span.items, Math.min(rows(), span.items.length), me.col, comma); };
     input.addEventListener("input", show);
     show();
     const body = h("div", { class: "form" },
-      h("label", { class: "field" }, h("span", {}, `몇 줄로 나눌까요? (항목 ${n}개 — 1 ~ ${n})`), input,
+      h("label", { class: "field" }, h("span", {}, `몇 줄로 나눌까요? (항목 ${span.items.length}개 — 1 ~ ${n})`), input,
         h("small", {}, "줄마다 같은 수씩 놓고 칸을 맞춥니다. 쉼표 위치는 포맷 설정을 따릅니다.")),
+      usable.length > 1
+        ? h("p", { class: "hint" }, `고른 영역의 SELECT 목록 ${usable.length}개를 같은 줄 수로 나눕니다 (항목이 적은 목록은 그만큼). 미리 보기는 첫 목록.` +
+          (skipped ? ` 줄 주석(--)이 들었거나 항목이 하나인 목록 ${skipped}개는 그대로 둡니다.` : ""))
+        : "",
       preview);
     setTimeout(() => { input.focus(); input.select(); }, 0);
     if (!(await modal("목록 나누기", body, [{ label: "취소", value: false }, { label: "나누기", value: true, kind: "primary" }], { wide: true }))) return;
     try { localStorage.setItem("listwrap.rows", String(rows())); } catch { /* 기억 못 해도 된다 */ }
-    const text = wrapList(span.items, rows(), col, comma);
+    const targets = usable.map((x) => { const p = place(x); return { ...p, b: from + x.to, text: wrapList(x.items, Math.min(rows(), x.items.length), p.col, comma) }; });
+    // 바뀐 뒤의 자리 (앞의 것들이 늘거나 준 만큼) — 고른 영역·손 배치 표시에
+    let shift = 0;
+    const after = targets.map((x) => { const s = x.a + shift; shift += x.text.length - (x.b - x.a); return { from: s, to: s + x.text.length }; });
     // 자동 포맷(실행할 때·; 칠 때)이 다시 한 줄에 하나로 풀지 않게 표시해 둔다
-    view.dispatch({ changes: { from: a, to: b, insert: text }, selection: { anchor: a, head: a + text.length }, effects: manualLayout(a, a + text.length), userEvent: "input.format", scrollIntoView: true });
+    view.dispatch({
+      changes: targets.map((x) => ({ from: x.a, to: x.b, insert: x.text })),
+      selection: { anchor: after[0].from, head: after[after.length - 1].to },
+      effects: after.map((x) => manualLayout(x.from, x.to)),
+      userEvent: "input.format", scrollIntoView: true,
+    });
+    if (targets.length > 1) this.status(`SELECT 목록 ${targets.length}개를 나눴습니다${skipped ? ` (${skipped}개는 그대로)` : ""}`);
     t.editor.focus();
   }
 

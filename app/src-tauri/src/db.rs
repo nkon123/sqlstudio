@@ -417,47 +417,72 @@ pub async fn connect(
         .profile(&profile)
         .cloned()
         .ok_or_else(|| ErrView::msg("invalid", format!("접속 프로필이 없습니다: {profile}")))?;
-    let key = p.name.to_uppercase();
-    let typed = password.filter(|s| !s.is_empty());
-    let pw = typed
-        .clone()
-        .or_else(|| st.passwords.rd().get(&key).cloned())
-        .or_else(|| p.stored_password())
-        .ok_or_else(|| ErrView::msg("password_required", "비밀번호를 입력하세요"))?;
-    let account = sqls_core::secret::db_account(&p.name);
-    // 네트워크가 죽어 있으면 OCI 가 오래 매달린다 — 화면이 멈춘 것처럼 보이지 않게 상한을 둔다
-    let connecting = tokio::time::timeout(std::time::Duration::from_secs(60), sqls_core::Session::connect(p.to_spec(pw.clone())));
-    let session = match connecting.await.unwrap_or_else(|_| Err(sqls_core::Error::ConnectionLost("60초 안에 서버가 응답하지 않습니다 (주소·포트·방화벽 확인)".into()))) {
-        Ok(s) => s,
-        Err(e) => {
-            // 기억해 둔 비밀번호가 틀렸으면 (ORA-01017) 잊는다 — 저장소의 것도
-            if matches!(e, sqls_core::Error::Db { code: 1017, .. }) {
-                st.passwords.wr().remove(&key);
-                if typed.is_none() {
-                    sqls_core::secret::delete(&account);
+    // 같은 접속(프로필·계정·서버가 같고 살아 있는 세션)이 이미 열려 있으면 새로 붙지 않고 그 세션을 나눠 쓴다 —
+    // 탭마다 서버 세션이 생기지 않게 (Toad 처럼 접속 계정 하나가 세션 하나). 커밋·롤백·ALTER SESSION 은 그 탭들이 함께 겪는다
+    let shared = st
+        .sessions
+        .lk()
+        .values()
+        .find(|o| {
+            let i = o.session.info();
+            o.profile.eq_ignore_ascii_case(&p.name)
+                && !o.session.is_lost()
+                && !o.session.is_abandoned()
+                && i.user.eq_ignore_ascii_case(&p.user)
+                && i.connect_string == p.connect_string
+                && i.read_only == p.read_only
+        })
+        .map(|o| (o.session.clone(), o.txn_pending.clone(), o.schema.clone()));
+    let id = st.next_id();
+    let (base, txn_pending, schema, reused) = match shared {
+        Some((s, t, sc)) => (s, t, sc, true),
+        None => {
+            let key = p.name.to_uppercase();
+            let typed = password.filter(|s| !s.is_empty());
+            let pw = typed
+                .clone()
+                .or_else(|| st.passwords.rd().get(&key).cloned())
+                .or_else(|| p.stored_password())
+                .ok_or_else(|| ErrView::msg("password_required", "비밀번호를 입력하세요"))?;
+            let account = sqls_core::secret::db_account(&p.name);
+            // 네트워크가 죽어 있으면 OCI 가 오래 매달린다 — 화면이 멈춘 것처럼 보이지 않게 상한을 둔다
+            let connecting = tokio::time::timeout(std::time::Duration::from_secs(60), sqls_core::Session::connect(p.to_spec(pw.clone())));
+            let session = match connecting.await.unwrap_or_else(|_| Err(sqls_core::Error::ConnectionLost("60초 안에 서버가 응답하지 않습니다 (주소·포트·방화벽 확인)".into()))) {
+                Ok(s) => s,
+                Err(e) => {
+                    // 기억해 둔 비밀번호가 틀렸으면 (ORA-01017) 잊는다 — 저장소의 것도
+                    if matches!(e, sqls_core::Error::Db { code: 1017, .. }) {
+                        st.passwords.wr().remove(&key);
+                        if typed.is_none() {
+                            sqls_core::secret::delete(&account);
+                        }
+                    }
+                    return Err(e.into());
+                }
+            };
+            st.passwords.wr().insert(key, pw.clone());
+            // 접속에 성공한 비밀번호만 저장한다
+            if typed.is_some() && remember == Some(true) {
+                if let Err(e) = sqls_core::secret::set(&account, &pw) {
+                    tracing::warn!("{}: {e}", p.name);
                 }
             }
-            return Err(e.into());
+            // 자동완성 캐시는 프로필마다 하나 — 처음 접속이면 백그라운드로 읽기 시작한다
+            crate::complete::ensure_hub(&st, &app, &p, &pw);
+            (session, Arc::new(AtomicBool::new(false)), Arc::new(std::sync::Mutex::new(None)), false)
         }
     };
-    st.passwords.wr().insert(key, pw.clone());
-    // 접속에 성공한 비밀번호만 저장한다
-    if typed.is_some() && remember == Some(true) {
-        if let Err(e) = sqls_core::secret::set(&account, &pw) {
-            tracing::warn!("{}: {e}", p.name);
-        }
-    }
-    // 자동완성 캐시는 프로필마다 하나 — 처음 접속이면 백그라운드로 읽기 시작한다
-    crate::complete::ensure_hub(&st, &app, &p, &pw);
-    let id = st.next_id();
+    // 결과 커서는 탭(id)마다 따로 — 한 탭의 새 실행이 다른 탭의 열린 결과를 닫지 않게
+    let session = base.for_slot(id);
     let info = session.info().clone();
-    tracing::info!("탭 접속 #{id} {} ({}@{}) sid={}", p.name, info.user, info.connect_string, info.sid);
+    tracing::info!("탭 접속 #{id} {} ({}@{}) sid={}{}", p.name, info.user, info.connect_string, info.sid, if reused { " (열려 있는 세션을 함께 씀)" } else { "" });
     // 쉬는 동안 끊긴 것을 알면 (keepalive) 화면에 알려 미리 다시 접속하게 한다
     let mut lost = session.lost_signal();
+    let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
         if lost.wait_for(|v| *v).await.is_ok() {
             tracing::warn!("탭 #{id} 접속 끊김 감지 — 화면에 알림");
-            let _ = tauri::Emitter::emit(&app, "session-lost", serde_json::json!({ "id": id }));
+            let _ = tauri::Emitter::emit(&app2, "session-lost", serde_json::json!({ "id": id }));
         }
     });
     st.sessions.lk().insert(
@@ -465,9 +490,9 @@ pub async fn connect(
         OpenSession {
             session,
             profile: p.name.clone(),
-            txn_pending: Arc::new(AtomicBool::new(false)),
+            txn_pending,
             stop_script: Arc::new(AtomicBool::new(false)),
-            schema: Arc::new(std::sync::Mutex::new(None)),
+            schema,
         },
     );
     Ok(Connected {
@@ -556,8 +581,13 @@ pub fn set_tns_admin(st: State<'_, AppState>, dir: Option<String>) -> R<()> {
 
 #[tauri::command]
 pub fn disconnect(st: State<'_, AppState>, id: u64) {
-    if let Some(s) = st.sessions.lk().remove(&id) {
-        s.session.close();
+    let mut map = st.sessions.lk();
+    if let Some(s) = map.remove(&id) {
+        s.session.close_cursor();
+        // 다른 탭이 같은 세션을 쓰고 있으면 서버 세션은 그대로 둔다 — 마지막 탭이 닫힐 때 끊는다
+        if !map.values().any(|o| o.session.same_connection(&s.session)) {
+            s.session.close();
+        }
     }
 }
 
@@ -797,9 +827,16 @@ pub fn cancel(st: State<'_, AppState>, id: u64) -> R<()> {
 
 /// 취소가 서버에 닿지 않을 때: 세션을 버리고 같은 프로필로 새로 붙을 수 있게 한다.
 #[tauri::command]
-pub fn abandon(st: State<'_, AppState>, id: u64) {
-    if let Some(s) = st.sessions.lk().remove(&id) {
+pub fn abandon(st: State<'_, AppState>, app: tauri::AppHandle, id: u64) {
+    let mut map = st.sessions.lk();
+    if let Some(s) = map.remove(&id) {
         s.session.abandon();
+        // 같은 세션을 쓰던 다른 탭도 함께 죽는다 — 화면이 각자 다시 접속하게 알린다 (먼저 붙은 탭이 새 세션을 만들고 나머지는 그것을 나눠 쓴다)
+        let siblings: Vec<u64> = map.iter().filter(|(_, o)| o.session.same_connection(&s.session)).map(|(k, _)| *k).collect();
+        for k in siblings {
+            map.remove(&k);
+            let _ = tauri::Emitter::emit(&app, "session-lost", serde_json::json!({ "id": k }));
+        }
     }
 }
 

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "validator",
+  "instructions": ["AGENTS.md"],
+  "mcp": {
+    "sqlstudio": {
+      "type": "local",
+      "command": [
+        "C:/Program Files/SQLStudio/sqlstudio-mcp.exe",
+        "--config",
+        "{env:APPDATA}/sqlstudio/config.toml"
+      ],
+      "enabled": true,
+      "timeout": 120000
+    }
+  },
+  "permission": {
+    "bash": "deny",
+    "webfetch": "deny",
+    "edit": "allow",
+    "sqlstudio_run_check": "ask"
+  }
+}

@@ -338,4 +338,39 @@ USING (SELECT A
       INSERT (A, B, C, D)
       VALUES (SRC.A, SRC.B, SRC.C, SRC.D)`);
 
+// 제 줄 주석(/*****/ 띠)은 뒤따르는 절에 붙어 그 절 키워드와 같은 칸 — 예전에는 앞 절의 들여쓰기를 따라 오른쪽으로 밀렸다
+eq("MERGE INTO emp t\n/*********/\n/* 대상 */\n/*********/\nUSING emp_new s\nON (t.empno = s.empno)\n/*********/\n/* 갱신 */\n/*********/\nWHEN MATCHED THEN\nUPDATE SET t.sal = s.sal\n/*********/\n/* 입력 */\n/*********/\nWHEN NOT MATCHED THEN\nINSERT (empno, sal) VALUES (s.empno, s.sal)",
+`MERGE INTO emp t
+/*********/
+/* 대상 */
+/*********/
+USING emp_new s
+   ON (t.empno = s.empno)
+ /*********/
+ /* 갱신 */
+ /*********/
+ WHEN MATCHED THEN
+      UPDATE
+         SET t.sal = s.sal
+ /*********/
+ /* 입력 */
+ /*********/
+ WHEN NOT MATCHED THEN
+      INSERT (empno, sal)
+      VALUES (s.empno, s.sal)`);
+// 항목 앞의 제 줄 주석 — 주석은 항목 칸에, 항목은 그 아래 줄에서 (예전에는 마지막 주석 줄 뒤에 붙었다)
+eq("update emp set\n/* 급여 */\nsal = 1,\n-- 날짜\nupd_dt = sysdate\n/* 조건 */\nwhere empno = 1\n-- 부서\nand deptno = 10",
+`UPDATE emp
+   SET
+       /* 급여 */
+       sal = 1
+     -- 날짜
+     , upd_dt = SYSDATE
+ /* 조건 */
+ WHERE empno = 1
+   -- 부서
+   AND deptno = 10`);
+// 문장 맨 앞·맨 끝의 제 줄 주석
+eq("-- 머리\nselect a from t\n-- 꼬리", "-- 머리\nSELECT a\n  FROM t\n-- 꼬리");
+
 console.log(`  포맷 ${n}건`);

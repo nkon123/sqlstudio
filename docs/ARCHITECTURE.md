@@ -38,6 +38,7 @@
 | PL/SQL 분석 | **아니다.** 모델에는 소스 텍스트가 가고 답(JSON)은 파일로만 저장된다. DB 로 가는 것은 단위 목록·소스 사전 조회뿐 (읽기 전용 세션) |
 | MCP 분석 툴 | **아니다.** DB 에 붙지 않고 저장된 분석 결과(JSON)만 읽는다 |
 | MCP `explain_plan` | 기본 꺼짐. 켜면 AI 가 쓴 SQL 을 `EXPLAIN PLAN FOR` 로 파서에 넘긴다 — 실행·행 반환은 없다. 그래도 서버로 가는 것이라 관리자가 명시적으로 켜야 한다 |
+| MCP `run_check` | **켜면 그렇다 (기본 꺼짐, `allow_checks`).** 데이터 검증 하네스용 — AI 가 쓴 SELECT 한 문장을 돌려 위반 행 수와 표본(`check_max_rows`)을 돌려준다. 운영 프로필은 늘 거절, `split_script` 로 한 문장·`is_read_only` 로 SELECT 만, 세션은 READ ONLY, 시간 상한, 호출마다 `mcp-checks.jsonl`. 자율 트랜잭션 함수 안의 쓰기는 READ ONLY 로 못 막으므로 검증 계정은 SELECT 권한만 주는 것을 권한다 |
 
 `crates/sqls-mcp/src/tests.rs` 의 `no_tool_executes_sql` 이 기본 설정의 툴 목록과
 입력 스키마(“sql” 인자가 없음)를 고정한다. 툴을 추가하다 이 규칙을 깨면 테스트가 실패한다.

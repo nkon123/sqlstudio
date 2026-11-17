@@ -94,6 +94,78 @@ export function findList(text: string): ListSpan | string {
   return { from, to, items };
 }
 
+const SETOP = ["UNION", "MINUS", "INTERSECT", "EXCEPT"];
+
+/** 글 안의 SELECT 목록.
+ *  cursor 가 있으면 그 자리의 SELECT 하나 (가장 안쪽 — 서브쿼리 안이면 그 서브쿼리, UNION ALL 이면 그 갈래).
+ *  null 이면 글 안의 SELECT 모두 (고른 영역) — 다른 목록의 항목 안에 든 것(스칼라 서브쿼리)은 빼고.
+ *  lists 는 글 순서, index 는 미리 보기로 보일 것. 줄 주석이 든 목록은 error. SELECT 가 없으면 글 전체가 목록 하나 */
+export function findLists(text: string, cursor: number | null): { lists: (ListSpan & { error?: string })[]; index: number } | string {
+  // SELECT 마다 괄호 깊이
+  const sels: { at: number; depth: number }[] = [];
+  {
+    let depth = 0;
+    for (let i = 0; i < text.length; i++) {
+      // 주석·문자열은 scan 과 같은 규칙으로 건너 — 괄호만 따로 센다
+      const two = text.slice(i, i + 2);
+      if (two === "--") { const e = text.indexOf("\n", i); i = e < 0 ? text.length : e; continue; }
+      if (two === "/*") { const e = text.indexOf("*/", i + 2); i = e < 0 ? text.length : e + 1; continue; }
+      if (/^[qQ]'/.test(two) && !(i > 0 && /[\w$#]/.test(text[i - 1]))) {
+        const open = text[i + 2];
+        const close = ({ "[": "]", "(": ")", "{": "}", "<": ">" } as Record<string, string>)[open] ?? open;
+        const e = text.indexOf(`${close}'`, i + 3);
+        i = e < 0 ? text.length : e + 1;
+        continue;
+      }
+      const ch = text[i];
+      if (ch === "'") {
+        let j = i + 1;
+        while (j < text.length && !(text[j] === "'" && text[j + 1] !== "'")) j += text[j] === "'" ? 2 : 1;
+        i = j;
+        continue;
+      }
+      if (ch === '"') { const e = text.indexOf('"', i + 1); i = e < 0 ? text.length : e; continue; }
+      if (ch === "(") { depth++; continue; }
+      if (ch === ")") { depth--; continue; }
+      if (wordAt(text, i, "SELECT")) sels.push({ at: i, depth });
+    }
+  }
+  if (!sels.length) {
+    const one = findList(text);
+    return typeof one === "string" ? one : { lists: [one], index: 0 };
+  }
+  // SELECT 마다 갈래의 끝 — 같은 자리의 UNION 등, 감싼 괄호가 닫히는 곳, 글 끝
+  const branchEnd = (at: number) => {
+    let end = text.length;
+    scan(text.slice(at), (i, d) => {
+      if (d < 0) { end = text.lastIndexOf(")", at + i); return true; }
+      if (d === 0 && SETOP.some((w) => wordAt(text, at + i, w))) { end = at + i; return true; }
+    });
+    return end;
+  };
+  const ends = sels.map((s) => branchEnd(s.at));
+  const spanOf = (k: number): ListSpan & { error?: string } => {
+    const at = sels[k].at;
+    const span = findList(text.slice(at, ends[k]));
+    if (typeof span === "string") return { from: at, to: at, items: [], error: span };
+    return { from: at + span.from, to: at + span.to, items: span.items };
+  };
+  if (cursor == null) {
+    const all = sels.map((_, k) => spanOf(k));
+    // 다른 목록의 항목 안에 든 SELECT 는 그 목록과 함께 바뀌므로 뺀다
+    const lists = all.filter((_, k) => !all.some((y, j) => j !== k && !y.error && y.from <= sels[k].at && sels[k].at < y.to));
+    return { lists, index: Math.max(0, lists.findIndex((x) => !x.error)) };
+  }
+  // 커서가 든 갈래 중 가장 안쪽(늦게 시작한 것). 없으면 맨 바깥의 첫 SELECT
+  let pick = -1;
+  sels.forEach((s, k) => { if (s.at <= cursor && cursor <= ends[k]) pick = k; });
+  if (pick < 0) {
+    const minDepth = Math.min(...sels.map((s) => s.depth));
+    pick = sels.findIndex((s) => s.depth === minDepth);
+  }
+  return { lists: [spanOf(pick)], index: 0 };
+}
+
 /** 항목들을 rows 줄로 — 줄마다 같은 수씩, 칸을 맞춘다. startCol 은 첫 항목이 놓인 칸, 둘째 줄부터 그 칸에 맞춘다 */
 export function wrapList(items: string[], rows: number, startCol: number, commaBefore: boolean): string {
   const n = items.length;

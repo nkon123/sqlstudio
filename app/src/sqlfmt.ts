@@ -140,7 +140,7 @@ const VALUE_WORDS = new Set("NULL LEVEL ROWNUM ROWID SYSDATE SYSTIMESTAMP CURREN
 
 type Kind = "list" | "cond" | "join" | "flat" | "setop" | "with" | "insert" | "update" | "delete" | "pivot" | "merge" | "multi" | "tail";
 interface Clause { kw: string; n: number; kind: Kind }
-interface Snap { l: number; cur: string; pos: number; prev: Tok | null; mb: boolean; un: boolean }
+interface Snap { l: number; cur: string; pos: number; prev: Tok | null; mb: boolean; un: boolean; pend: string[] }
 
 class Fmt {
   private lines: string[] = [];
@@ -151,6 +151,8 @@ class Fmt {
   private unary = false;
   private cont = 0;
   private allowWith = true;
+  /** 제 줄에 있던 주석 — 다음 줄이 시작하는 칸에 맞춰 그 앞에 쓴다 (절 앞의 주석은 그 절 키워드와 같은 칸) */
+  private pend: string[] = [];
 
   constructor(private toks: Tok[], private o: RiverOptions) {}
 
@@ -159,12 +161,23 @@ class Fmt {
   private blank() { return this.cur.trim() === ""; }
   private nl(col: number) {
     if (!this.blank()) this.lines.push(this.cur.replace(/\s+$/, ""));
+    this.flush(col);
     this.cur = " ".repeat(Math.max(0, col));
     this.prev = null;
     this.mustBreak = false;
   }
+  /** 모아 둔 제 줄 주석을 col 칸에 한 줄씩 */
+  private flush(col: number) {
+    for (const c of this.pend) this.lines.push(" ".repeat(Math.max(0, col)) + c);
+    this.pend = [];
+  }
   private emit(text: string, space: boolean) {
     if (this.mustBreak) this.nl(this.cont);
+    if (this.pend.length) {
+      // 줄 첫머리면 그 칸에. 줄 중간(목록 항목·괄호 안)이면 주석을 이어지는 칸(cont)에 쓰고 이 낱말도 다음 줄의 그 칸에서
+      if (this.blank()) this.flush(this.col());
+      else this.nl(this.cont);
+    }
     if (space && !this.blank() && !this.cur.endsWith(" ") && !this.cur.endsWith("(")) this.cur += " ";
     this.cur += text;
   }
@@ -173,9 +186,9 @@ class Fmt {
     while (this.isComment(this.at()) && !this.at()!.nl) this.comment();
     this.nl(col);
   }
-  private snap(): Snap { return { l: this.lines.length, cur: this.cur, pos: this.pos, prev: this.prev, mb: this.mustBreak, un: this.unary }; }
+  private snap(): Snap { return { l: this.lines.length, cur: this.cur, pos: this.pos, prev: this.prev, mb: this.mustBreak, un: this.unary, pend: [...this.pend] }; }
   private restore(s: Snap) {
-    this.lines.length = s.l; this.cur = s.cur; this.pos = s.pos; this.prev = s.prev; this.mustBreak = s.mb; this.unary = s.un;
+    this.lines.length = s.l; this.cur = s.cur; this.pos = s.pos; this.prev = s.prev; this.mustBreak = s.mb; this.unary = s.un; this.pend = s.pend;
   }
 
   // ── 토큰 ─────────────────────────────────────────
@@ -228,7 +241,12 @@ class Fmt {
 
   private comment() {
     const t = this.at()!;
-    if (t.nl && !this.blank()) this.nl(this.cont);
+    if (t.nl) {
+      // 제 줄 주석(/*****/ 띠 등)은 뒤따르는 것에 붙는다 — 다음 줄이 어느 칸에서 시작할지 알 때 쓴다
+      this.pend.push(t.v);
+      this.pos++;
+      return;
+    }
     this.emit(t.v, true);
     this.prev = t;
     this.unary = false;
@@ -309,9 +327,9 @@ class Fmt {
       const t = this.at();
       if (!t || t.t === ")" || t.t === ";") break;
       if (this.isComment(t)) {
-        if (!first || !this.blank()) { if (t.nl && !this.blank()) this.nl(base); }
         this.comment();
-        if (this.at() && !this.isComment(this.at())) this.nl(base);
+        // 같은 줄 주석 뒤는 줄을 바꾼다 (제 줄 주석은 다음 절 앞에 그 절의 칸으로)
+        if (!t.nl && this.at() && !this.isComment(this.at())) this.nl(base);
         continue;
       }
       const c = this.clauseAt();
@@ -353,7 +371,10 @@ class Fmt {
     this.expr({ clauses: true, list: true, stops });
     while (this.at()?.t === ",") {
       this.pos++;
-      if (this.o.fill) {
+      // 쉼표 뒤 제 줄 주석은 다음 항목의 머리 — 쉼표 줄 앞에 (쉼표만 남은 줄이 생기지 않게)
+      while (this.isComment(this.at()) && this.at()!.nl) this.comment();
+      // 다음 항목 앞에 주석이 있으면 이어 붙이지 않는다 (채우기여도 줄을 바꾼다)
+      if (this.o.fill && !this.pend.length) {
         const s = this.snap();
         const before = this.lines.length;
         this.emit(",", false);
@@ -366,7 +387,11 @@ class Fmt {
         this.brk(commaCol);
         this.emit(",", false);
       } else {
+        // 쉼표는 앞 항목 끝에 — 모아 둔 주석은 다음 줄(다음 항목 앞)에
+        const pend = this.pend;
+        this.pend = [];
         this.emit(",", false);
+        this.pend = pend;
         this.brk(itemCol);
       }
       this.prev = { t: ",", v: ",", nl: false, sp: false };

@@ -1079,9 +1079,11 @@ export class ResultGrid {
     this.update();
     this.status();
     if (e.button === 0 && !e.shiftKey) this.opts.onCellClick?.(this.rows[this.view[at.r]], at.c, e);
-    const move = (ev: MouseEvent) => {
-      const p = this.cellAt(ev);
-      if (p && this.sel && (p.r !== this.sel.r1 || p.c !== this.sel.c1)) {
+    // 끌기: 창 전체에서 마우스를 따라간다 — 그리드 밖(위·아래)으로 나가도 계속 고르고, 가장자리 밖이면 스크롤한다
+    let last = { x: e.clientX, y: e.clientY };
+    const extend = () => {
+      const p = this.posAt(last.x, last.y);
+      if (this.sel && (p.r !== this.sel.r1 || p.c !== this.sel.c1)) {
         this.sel.r1 = p.r;
         this.sel.c1 = p.c;
         this.cur = { ...p };
@@ -1089,12 +1091,46 @@ export class ResultGrid {
         this.status();
       }
     };
+    const move = (ev: MouseEvent) => {
+      last = { x: ev.clientX, y: ev.clientY };
+      extend();
+    };
+    const tick = window.setInterval(() => {
+      const vr = this.viewport.getBoundingClientRect();
+      const dy = last.y < vr.top ? last.y - vr.top : last.y > vr.bottom ? last.y - vr.bottom : 0;
+      const dx = last.x < vr.left + NUM_W ? last.x - (vr.left + NUM_W) : last.x > vr.right ? last.x - vr.right : 0;
+      if (!dx && !dy) return;
+      // 멀리 나갈수록 빨리 (최대 한 번에 ROW_H*3)
+      const cap = ROW_H * 3;
+      this.viewport.scrollTop += Math.max(-cap, Math.min(cap, dy / 2));
+      this.viewport.scrollLeft += Math.max(-cap, Math.min(cap, dx / 2));
+      extend();
+    }, 40);
     const up = () => {
-      this.body.removeEventListener("mousemove", move);
+      window.clearInterval(tick);
+      window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
     };
-    this.body.addEventListener("mousemove", move);
+    window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
+  }
+
+  /** 화면 좌표 → 가장 가까운 셀 (그리드 밖이면 가장자리 셀) */
+  private posAt(clientX: number, clientY: number): { r: number; c: number } {
+    const vr = this.viewport.getBoundingClientRect();
+    const y = clientY - vr.top + this.viewport.scrollTop;
+    const r = Math.max(0, Math.min(this.view.length - 1, Math.floor(y / ROW_H)));
+    const x = clientX - vr.left + this.viewport.scrollLeft;
+    let acc = NUM_W;
+    let c = -1;
+    for (let i = 0; i < this.columns.length; i++) {
+      if (this.hiddenCol(i)) continue;
+      if (c < 0) c = i;
+      if (x < acc + this.widths[i]) return { r, c: i };
+      acc += this.widths[i];
+      c = i;
+    }
+    return { r, c: Math.max(0, c) };
   }
 
   private onDblClick(e: MouseEvent) {

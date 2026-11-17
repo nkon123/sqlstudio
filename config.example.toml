@@ -61,3 +61,5 @@ fallbacks = true                      # Claude API 직통일 때만. 사내 게�
 allowed_connections = ["ERP-DEV"]     # 비어 있으면 아무것도 노출하지 않는다
 call_timeout_secs = 60
 allow_explain = false                 # true: explain_plan 툴 허용 (AI 가 쓴 SQL 을 파서에만 넘김)
+allow_checks = false                  # true: run_check 툴 허용 — 데이터 검증용 SELECT 를 실제로 돌린다 (운영 프로필은 늘 거절)
+check_max_rows = 20                   # run_check 가 돌려주는 위반 행 표본 수

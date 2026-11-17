@@ -60,6 +60,9 @@ AI 는 로컬 LLM(Ollama, LM Studio, vLLM)과 프론티어 모델(Claude, OpenAI
   사전 조회뿐이고, 테이블 데이터를 돌려주지 않는다. (`tests.rs` 의 `no_tool_executes_sql` 이 보장한다.)
 - `explain_plan` 툴은 AI 가 쓴 SQL 을 파서에 넘긴다(실행은 안 함). 그래서 기본으로 꺼져 있고
   `[mcp] allow_explain = true` 로만 켠다.
+- 예외 하나: **데이터 검증 하네스의 `run_check`.** 관리자가 `[mcp] allow_checks = true` 로 켜야 생기고, AI 가 쓴 SELECT 한 문장을
+  운영이 아닌 접속에서 돌려 위반 행 수와 표본(`check_max_rows`)을 돌려준다. 운영 프로필은 늘 거절하고, 호출마다 기록한다.
+  ([harness/validation](harness/validation/README.md))
 - AI 에 보내는 것: 에디터의 SQL, 관련 테이블 구조(컬럼·주석·인덱스), 실행계획, 오류 메시지.
   **조회 결과 데이터와 비밀번호는 보내지 않는다.** 외부 공급자는 처음 쓸 때 이것을 확인받는다.
 
@@ -393,6 +396,11 @@ JSON 함수 같은 12c+ 문법을 쓰지 말라고 지시한다.
 | `table_usage` | 테이블을 누가 읽고·쓰는지, 커서로 어느 테이블 데이터가 들어오는지(계보), 바꾸면 영향 받는 시작점 |
 | `subprogram_relations` | 서브프로그램의 부르는 곳·부르는 것·테이블·커서 흐름·닿는 COMMIT |
 | `analysis_findings` | 예외 삼킴·동적 SQL·순환 호출·모델 지적 |
+| `flow_reports` · `flow_report` | 흐름도 보고서(분석 > 흐름도에서 저장한 것): 상자·선·메모·선 설명, Mermaid 그림 — **DB 에 붙지 않는다** |
+| `data_lineage` | 테이블에서 위(어디서 오나)·아래(어디로 가나)로 테이블 → 처리 → 테이블 단계, 커서 흐름과 줄 |
+| `subprogram_sql` | 서브프로그램·패키지의 SQL 문을 소스 순서대로: 읽기·쓰기, INTO, 데이터를 대는 커서 |
+| `column_writers` | 열 하나에 값을 넣는 문장과 그 행을 대는 커서 쿼리 |
+| `run_check` | (기본 꺼짐, `allow_checks`) 검증 SELECT 한 문장을 돌려 위반 행 수·표본 — 운영 프로필은 늘 거절, 호출마다 `mcp-checks.jsonl` 에 기록. [데이터 검증 하네스](harness/validation/README.md) |
 
 분석 툴은 앱의 분석 화면이나 `sqlstudio-analyze` 가 쓴 결과 폴더(`analysis/<접속>`)만 읽는다. 예) Claude Desktop 에서
 "ORDERS 테이블 컬럼을 바꾸면 어떤 배치가 영향 받아?" → `table_usage` 로 쓰는 곳과 영향 시작점을 답한다.

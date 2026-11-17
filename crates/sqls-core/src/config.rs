@@ -278,6 +278,17 @@ pub struct McpConfig {
     /// explain_plan 툴을 켤지. AI 가 쓴 SQL 을 파서에 넘기므로(실행은 하지 않음) 기본은 끈다.
     #[serde(default)]
     pub allow_explain: bool,
+    /// run_check 툴(검증용 SELECT 실행)을 켤지. AI 가 쓴 SELECT 를 실제로 돌리고 행을 돌려주므로 기본은 끈다.
+    /// 켜도 운영(production) 프로필에서는 돌리지 않는다.
+    #[serde(default)]
+    pub allow_checks: bool,
+    /// run_check 가 돌려주는 행 수 상한 (위반 행 표본)
+    #[serde(default = "default_check_rows")]
+    pub check_max_rows: usize,
+}
+
+fn default_check_rows() -> usize {
+    20
 }
 
 fn default_mcp_timeout() -> u64 {
@@ -290,6 +301,8 @@ impl Default for McpConfig {
             allowed_connections: Vec::new(),
             call_timeout_secs: default_mcp_timeout(),
             allow_explain: false,
+            allow_checks: false,
+            check_max_rows: default_check_rows(),
         }
     }
 }
@@ -667,6 +680,8 @@ allowed_connections = ["erp-dev"]
         assert_eq!(c.connections.len(), 2);
         assert!(c.profile("erp-dev").unwrap().read_only);
         assert!(!c.mcp.allow_explain);
+        assert!(!c.mcp.allow_checks);
+        assert_eq!(c.mcp.check_max_rows, 20);
         assert_eq!(c.mcp.allowed_connections, vec!["erp-dev"]);
     }
 

@@ -69,8 +69,9 @@ async fn no_tool_executes_sql() {
     assert_eq!(
         tool_names(&c).await,
         [
-            "analysis_findings", "analysis_overview", "analysis_unit", "describe_table", "get_ddl", "list_connections",
-            "list_objects", "subprogram_relations", "table_usage",
+            "analysis_findings", "analysis_overview", "analysis_unit", "column_writers", "data_lineage", "describe_table",
+            "flow_report", "flow_reports", "get_ddl", "list_connections", "list_objects", "subprogram_relations", "subprogram_sql",
+            "table_usage",
         ]
     );
     // 기본 설정에서는 SQL 문장을 인자로 받는 툴이 하나도 없다
@@ -90,6 +91,53 @@ async fn explain_only_when_enabled() {
     let cfg = Config::parse(&text).unwrap();
     let c = client(SqlStudioMcp::new(&cfg, no_db())).await;
     assert!(tool_names(&c).await.contains(&"explain_plan".to_string()));
+}
+
+/// run_check 는 allow_checks 일 때만 — 그리고 운영 프로필·SELECT 아닌 것은 DB 에 가기 전에 거절
+#[tokio::test]
+async fn run_check_only_when_enabled_and_guarded() {
+    let cfg = Config::parse(CFG).unwrap();
+    let c = client(SqlStudioMcp::new(&cfg, no_db())).await;
+    assert!(!tool_names(&c).await.contains(&"run_check".to_string()));
+    let (err, _) = call(&c, "run_check", json!({"connection": "XE", "sql": "select 1 from dual", "purpose": "x"})).await;
+    assert!(err);
+
+    let text = CFG
+        .replace("connect_string = \"PRODTNS\"", "connect_string = \"PRODTNS\"\nproduction = true")
+        .replace("allowed_connections = [\"xe\"]", "allowed_connections = [\"xe\", \"prod\"]\nallow_checks = true");
+    let cfg = Config::parse(&text).unwrap();
+    let log = std::env::temp_dir().join(format!("sqls-mcp-checks-{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let c = client(SqlStudioMcp::new(&cfg, no_db()).with_check_log(&log)).await;
+    assert!(tool_names(&c).await.contains(&"run_check".to_string()));
+
+    let (_, t) = call(&c, "list_connections", json!({})).await;
+    let v: Value = serde_json::from_str(&t).unwrap();
+    let flags: Vec<_> = v["connections"].as_array().unwrap().iter().map(|c| (c["name"].as_str().unwrap().to_string(), c["run_check"].as_bool().unwrap())).collect();
+    assert_eq!(flags, [("XE".to_string(), true), ("PROD".to_string(), false)]);
+
+    let (err, t) = call(&c, "run_check", json!({"connection": "PROD", "sql": "select 1 from dual", "purpose": "x"})).await;
+    assert!(err && t.contains("production"), "{t}");
+    for bad in [
+        "delete from orders",
+        "update orders set amount = 0",
+        "select * from orders for update",
+        "begin null; end;",
+        "select 1 from dual; delete from orders",
+        "drop table orders",
+    ] {
+        let (err, t) = call(&c, "run_check", json!({"connection": "XE", "sql": bad, "purpose": "x"})).await;
+        assert!(err, "{bad}: {t}");
+        assert!(!t.contains("DB 없음"), "{bad} 가 DB 까지 갔다: {t}");
+    }
+    // SELECT 는 접속까지 간다 (여기서는 DB 가 없어 실패)
+    let (err, t) = call(&c, "run_check", json!({"connection": "XE", "sql": "with x as (select 1 n from dual) select * from x where n <> 1;", "purpose": "x"})).await;
+    assert!(err && t.contains("DB 없음"), "{t}");
+
+    let lines = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(lines.lines().count(), 8, "{lines}");
+    assert!(lines.lines().all(|l| serde_json::from_str::<Value>(l).is_ok()));
+    std::fs::remove_file(&log).unwrap();
 }
 
 #[tokio::test]
@@ -203,6 +251,76 @@ async fn analysis_tools_read_stored_results() {
     let (err, text) = call(&c, "analysis_findings", json!({"connection": "XE", "kind": "예외 삼킴"})).await;
     assert!(!err, "{text}");
     assert!(text.contains("WHEN"), "{text}");
+
+    // 흐름도 — 계보 (ORDER_LOG 는 ORDERS 의 커서로 채워진다)
+    let (err, text) = call(&c, "data_lineage", json!({"connection": "XE", "table": "order_log", "direction": "up"})).await;
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["table"], "APP.ORDER_LOG");
+    let steps = v["steps"].as_array().unwrap();
+    let s0 = steps.iter().find(|s| s["cursor_flows"].as_array().is_some_and(|f| !f.is_empty())).expect("커서 흐름이 있는 단계");
+    assert!(s0["reads_from"].as_array().unwrap().iter().any(|t| t == "APP.ORDERS"), "{s0}");
+    assert!(v["mermaid"].as_str().unwrap().starts_with("flowchart LR"));
+    let (err, text) = call(&c, "data_lineage", json!({"connection": "XE", "table": "orders", "direction": "down"})).await;
+    assert!(!err, "{text}");
+    assert!(text.contains("APP.ORDER_LOG"), "{text}");
+    let (err, _) = call(&c, "data_lineage", json!({"connection": "XE", "table": "orders", "direction": "sideways"})).await;
+    assert!(err);
+
+    // 문장 — 서브프로그램, 패키지 전체
+    let (err, text) = call(&c, "subprogram_sql", json!({"connection": "XE", "name": "close_order"})).await;
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert!(v["statements"].as_array().unwrap().iter().any(|s| s["kind"] == "UPDATE" && s["writes"][0].as_str().unwrap().contains("ORDERS")), "{text}");
+    let (err, text) = call(&c, "subprogram_sql", json!({"connection": "XE", "name": "app.order_pkg"})).await;
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert!(v["total"].as_u64().unwrap() > 1);
+
+    // 열에 값을 넣는 문장 — 데이터를 대는 커서 쿼리까지
+    let (err, text) = call(&c, "column_writers", json!({"connection": "XE", "table": "app.order_log", "column": "amt"})).await;
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    let w = &v["writers"][0];
+    assert_eq!(w["kind"], "INSERT", "{text}");
+    assert!(w["fed_by"].as_array().unwrap().iter().any(|f| f["cursor"] == "C_OPEN" && f["query"].as_str().is_some_and(|q| q.contains("ORDERS"))), "{text}");
+
+    // 흐름도 보고서 — 숨긴 선·상자는 빼고, 메모·선 설명은 붙여서
+    let (err, text) = call(&c, "flow_reports", json!({"connection": "XE"})).await;
+    assert!(!err && text.contains("\"reports\":[]"), "{text}");
+    let rdir = root.join("XE").join("integrated").join("reports");
+    std::fs::create_dir_all(&rdir).unwrap();
+    std::fs::write(rdir.join("r1.json"), serde_json::to_string(&json!({
+        "format": 1, "id": "r1", "name": "마감", "title": "주문 마감 흐름", "description": "야간 마감", "created_at": 1, "updated_at": 2, "profile": "XE",
+        "basis": {"center": "APP.ORDER_LOG", "dir": "up", "depth": 2, "unit": "proc", "calls": false, "flows": false, "hidden": []},
+        "nodes": [
+            {"id": "a", "ref": "APP.ORDERS", "type": "table", "label": "ORDERS", "x": 0, "y": 0, "w": 1, "h": 1, "lane": 0},
+            {"id": "b", "ref": "APP.FLOW_PKG.RUN", "type": "proc", "label": "NIGHTLY", "text": "야간 배치", "x": 0, "y": 0, "w": 1, "h": 1, "lane": 1},
+            {"id": "c", "ref": "APP.ORDER_LOG", "type": "table", "label": "ORDER_LOG", "x": 0, "y": 0, "w": 1, "h": 1, "lane": 2},
+            {"id": "h", "ref": "APP.SECRET", "type": "table", "label": "HIDDEN_BOX", "hidden": true, "x": 0, "y": 0, "w": 1, "h": 1, "lane": 2},
+            {"id": "m", "ref": "", "type": "note", "label": "", "text": "닫힌 주문만 로그로", "attach": "b", "x": 0, "y": 0, "w": 1, "h": 1, "lane": 1}
+        ],
+        "edges": [
+            {"id": "e1", "source": "a", "target": "b", "kind": "read", "label": "R"},
+            {"id": "e2", "source": "b", "target": "c", "kind": "write", "label": "C", "text": "주문마다 한 줄"},
+            {"id": "e3", "source": "b", "target": "h", "kind": "write", "label": "U", "hidden": true}
+        ]
+    })).unwrap()).unwrap();
+    let (err, text) = call(&c, "flow_reports", json!({"connection": "XE"})).await;
+    assert!(!err && text.contains("주문 마감 흐름"), "{text}");
+    let (err, text) = call(&c, "flow_report", json!({"connection": "XE", "id": "마감"})).await;
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert!(!text.contains("HIDDEN_BOX"), "{text}");
+    assert_eq!(v["boxes"].as_array().unwrap().len(), 3);
+    let batch = v["boxes"].as_array().unwrap().iter().find(|b| b["id"] == "b").unwrap();
+    assert_eq!(batch["label"], "야간 배치");
+    assert!(batch["tables"].as_array().unwrap().iter().any(|t| t.as_str().unwrap().starts_with("APP.ORDER_LOG")), "{batch}");
+    assert_eq!(v["notes"][0]["about"], "야간 배치");
+    assert!(v["edges"].as_array().unwrap().iter().any(|e| e["note"] == "주문마다 한 줄" && e["from"] == "야간 배치"));
+    assert!(v["mermaid"].as_str().unwrap().contains("주문마다 한 줄"));
+    let (err, _) = call(&c, "flow_report", json!({"connection": "XE", "id": "nope"})).await;
+    assert!(err);
 
     // 허용하지 않은 프로필, 분석이 없는 경우
     let (err, text) = call(&c, "analysis_overview", json!({"connection": "PROD"})).await;

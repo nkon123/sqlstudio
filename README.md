@@ -59,7 +59,7 @@ It combines three things that today come from separate tools or don't exist yet:
 ### 1. Human in control: AI proposes, you review and run
 
 - In the app, AI **only proposes** SQL. A human moves it into the editor, reads it and runs it. No code path executes an AI answer.
-- The MCP server has **no tool that takes arbitrary SQL**. It serves dictionary metadata (objects, table structure, DDL) and analysis results, never table data. The test `no_tool_executes_sql` locks the tool list in place.
+- The MCP server has **no tool that takes arbitrary SQL**. It serves dictionary metadata (objects, table structure, DDL) and analysis results, never table data. The test `no_tool_executes_sql` locks the tool list in place. The one opt-in exception is `run_check` for the [data validation harness](harness/validation/README.md): it exists only with `[mcp] allow_checks = true`, runs a single SELECT on a non-production connection, returns a small sample of violating rows and logs every call.
 - Query results and passwords are never sent to a model. External providers require explicit opt-in on first use, and the CLI requires `--allow-remote`.
 - Read-only profiles are enforced twice: by the app's own statement classifier and by the server's `SET TRANSACTION READ ONLY`.
 - Credentials never touch config files. They live in the OS credential store (Windows Credential Manager or macOS Keychain), which the app, the MCP server and the CLI all share.
@@ -111,6 +111,9 @@ The hardest part of any Oracle modernization is understanding what is already th
 | `analysis_overview`, `analysis_unit` | Package purpose, business rules, CRUD by subprogram, cursor flows |
 | `table_usage` | Who reads and writes a table, data lineage, affected entry points |
 | `subprogram_relations`, `analysis_findings` | Callers and callees, reachable COMMITs, swallowed exceptions, cycles |
+| `flow_reports`, `flow_report`, `data_lineage` | Saved data-flow diagrams with the person's notes, table lineage up/down (with Mermaid) |
+| `subprogram_sql`, `column_writers` | A subprogram's statements in order, the statements and cursor queries that set a column |
+| `run_check` | Off by default. Runs one validation SELECT on a non-production connection and returns violating rows ([harness](harness/validation/README.md)) |
 
 For example, ask Claude Desktop *"If we change a column in ORDERS, which batch jobs are affected?"* It answers from `table_usage` without opening a database session.
 

@@ -218,13 +218,13 @@ pub fn init_client(lib_dir: Option<PathBuf>, tns_admin: Option<PathBuf>) -> Resu
 type Reply<T> = oneshot::Sender<Result<T>>;
 
 enum Cmd {
-    Exec { sql: String, opts: ExecOptions, reply: Reply<ExecResult> },
-    FetchMore { rows: usize, reply: Reply<RowPage> },
-    CloseCursor,
+    Exec { slot: u64, sql: String, opts: ExecOptions, reply: Reply<ExecResult> },
+    FetchMore { slot: u64, rows: usize, reply: Reply<RowPage> },
+    CloseCursor { slot: u64 },
     /// 사전 조회 — 열린 커서를 건드리지 않는다
     Query { sql: String, binds: Vec<(String, Option<String>)>, max_rows: usize, reply: Reply<RowPage> },
     /// 실행계획 — EXPLAIN PLAN + DBMS_XPLAN.DISPLAY (11g 호환)
-    Explain { sql: String, reply: Reply<Vec<String>> },
+    Explain { slot: u64, sql: String, reply: Reply<Vec<String>> },
     /// 파싱만 — DBMS_SQL.PARSE. 실행하지 않고, 열린 커서와 트랜잭션을 건드리지 않는다
     Parse { sql: String, reply: Reply<()> },
     Commit { reply: Reply<()> },
@@ -233,7 +233,7 @@ enum Cmd {
     /// ALTER SESSION SET CURRENT_SCHEMA — 읽기 전용 세션에서도 (데이터를 바꾸지 않는다)
     SetSchema { schema: String, reply: Reply<()> },
     /// 여러 행을 한 번에 (array DML) — 데이터 가져오기
-    Batch { sql: String, rows: Vec<Vec<Option<String>>>, skip_errors: bool, reply: Reply<BatchResult> },
+    Batch { slot: u64, sql: String, rows: Vec<Vec<Option<String>>>, skip_errors: bool, reply: Reply<BatchResult> },
     /// 따로 읽는 커서 — 결과 커서와 별개로 (접속 간 데이터 복사). 열기 / 다음 행들 / 닫기
     SideOpen { sql: String, binds: Vec<(String, Option<String>)>, reply: Reply<Vec<Column>> },
     SideFetch { rows: usize, reply: Reply<(Vec<Vec<Option<String>>>, bool)> },
@@ -262,6 +262,8 @@ pub struct Session {
     txn: Arc<std::sync::atomic::AtomicI8>,
     /// 다시 접속할 때 쓴다 ([`Session::reopen`]). 비밀번호는 메모리에만
     spec: Arc<ConnectSpec>,
+    /// 결과 커서 자리 — 같은 세션을 여러 탭이 나눠 쓸 때 탭마다 자기 결과를 따로 들고 있게 ([`Session::for_slot`])
+    slot: u64,
 }
 
 impl Session {
@@ -305,6 +307,7 @@ impl Session {
                             last_done: Arc::new(std::sync::atomic::AtomicU64::new(connlog::now())),
                             txn: txn.clone(),
                             spec: keep,
+                            slot: 0,
                         };
                         let sid = session.info.sid;
                         if tx.send(Ok(session)).is_err() {
@@ -320,6 +323,17 @@ impl Session {
             })
             .map_err(|e| Error::Driver(format!("세션 스레드를 만들 수 없습니다: {e}")))?;
         rx.await.map_err(|_| Error::SessionClosed)?
+    }
+
+    /// 같은 접속(같은 서버 세션·트랜잭션)을 쓰되 결과 커서는 `slot` 에 따로 두는 핸들.
+    /// 탭마다 자기 번호로 만들어 쓴다 — 한 탭의 새 실행이 다른 탭의 열린 결과를 닫지 않는다
+    pub fn for_slot(&self, slot: u64) -> Session {
+        Session { slot, ..self.clone() }
+    }
+
+    /// 같은 서버 세션을 가리키는 핸들인지
+    pub fn same_connection(&self, other: &Session) -> bool {
+        Arc::ptr_eq(&self.conn, &other.conn)
     }
 
     pub fn info(&self) -> &SessionInfo {
@@ -435,22 +449,25 @@ impl Session {
     /// 여러 행 넣기 (array DML). `rows` 는 바인드 순서(:1, :2 …)대로의 문자열 값. 커밋하지 않는다.
     pub async fn batch(&self, sql: &str, rows: Vec<Vec<Option<String>>>, skip_errors: bool) -> Result<BatchResult> {
         let sql = sql.to_string();
-        self.call(|reply| Cmd::Batch { sql, rows, skip_errors, reply }).await
+        let slot = self.slot;
+        self.call(|reply| Cmd::Batch { slot, sql, rows, skip_errors, reply }).await
     }
 
     /// 문장 하나를 실행한다. 쿼리면 첫 페이지를 돌려주고 커서를 열어 둔다.
     pub async fn execute(&self, sql: &str, opts: ExecOptions) -> Result<ExecResult> {
         let sql = sql.to_string();
-        self.call(|reply| Cmd::Exec { sql, opts, reply }).await
+        let slot = self.slot;
+        self.call(|reply| Cmd::Exec { slot, sql, opts, reply }).await
     }
 
     /// 열린 커서에서 다음 행들을 가져온다.
     pub async fn fetch_more(&self, rows: usize) -> Result<RowPage> {
-        self.call(|reply| Cmd::FetchMore { rows, reply }).await
+        let slot = self.slot;
+        self.call(|reply| Cmd::FetchMore { slot, rows, reply }).await
     }
 
     pub fn close_cursor(&self) {
-        let _ = self.tx.send(Cmd::CloseCursor);
+        let _ = self.tx.send(Cmd::CloseCursor { slot: self.slot });
     }
 
     /// 내부용 조회 (사전 조회 등). 열린 결과 커서를 건드리지 않는다.
@@ -482,7 +499,8 @@ impl Session {
     /// 실행계획 (DBMS_XPLAN 텍스트 줄)
     pub async fn explain(&self, sql: &str) -> Result<Vec<String>> {
         let sql = sql.to_string();
-        self.call(|reply| Cmd::Explain { sql, reply }).await
+        let slot = self.slot;
+        self.call(|reply| Cmd::Explain { slot, sql, reply }).await
     }
 
     /// 문장이 서버에서 파싱되는지만 본다 (없는 테이블·컬럼, 문법 오류). 실행하지 않는다.
@@ -601,7 +619,8 @@ struct Worker {
     txn: Arc<std::sync::atomic::AtomicI8>,
     /// 마지막으로 명령을 받은 때 — keepalive 로 끊김을 알았을 때 얼마나 쉬었는지
     last_cmd: Instant,
-    cursor: Option<OpenCursor>,
+    /// 결과 커서 — 탭(slot)마다 하나
+    cursors: std::collections::HashMap<u64, OpenCursor>,
     /// 따로 읽는 커서 (open_side)
     side: Option<OpenCursor>,
 }
@@ -617,7 +636,7 @@ impl Worker {
         sid: i64,
         txn: Arc<std::sync::atomic::AtomicI8>,
     ) -> Self {
-        Self { conn, spec, busy, abandoned, lost, pings, sid, txn, last_cmd: Instant::now(), cursor: None, side: None }
+        Self { conn, spec, busy, abandoned, lost, pings, sid, txn, last_cmd: Instant::now(), cursors: Default::default(), side: None }
     }
 
     /// 쉬는 동안 ping — 작업 스레드 안에서 하므로 사용자의 호출과 겹치지 않는다.
@@ -686,7 +705,7 @@ impl Worker {
                 break;
             }
         }
-        self.cursor = None;
+        self.cursors.clear();
         self.side = None;
         let _ = self.conn.close();
     }
@@ -710,20 +729,22 @@ impl Worker {
 
     fn handle(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Exec { sql, opts, reply } => {
-                let r = self.exec(&sql, &opts);
+            Cmd::Exec { slot, sql, opts, reply } => {
+                let r = self.exec(slot, &sql, &opts);
                 self.note_txn();
                 let _ = reply.send(r);
             }
-            Cmd::FetchMore { rows, reply } => {
-                let _ = reply.send(self.fetch_more(rows));
+            Cmd::FetchMore { slot, rows, reply } => {
+                let _ = reply.send(self.fetch_more(slot, rows));
             }
-            Cmd::CloseCursor => self.cursor = None,
+            Cmd::CloseCursor { slot } => {
+                self.cursors.remove(&slot);
+            }
             Cmd::Query { sql, binds, max_rows, reply } => {
                 let _ = reply.send(self.side_query(&sql, &binds, max_rows));
             }
-            Cmd::Explain { sql, reply } => {
-                let r = self.explain(&sql);
+            Cmd::Explain { slot, sql, reply } => {
+                let r = self.explain(slot, &sql);
                 self.note_txn();
                 let _ = reply.send(r);
             }
@@ -769,8 +790,8 @@ impl Worker {
                 self.note_txn();
                 let _ = reply.send(r);
             }
-            Cmd::Batch { sql, rows, skip_errors, reply } => {
-                let r = self.batch(&sql, &rows, skip_errors);
+            Cmd::Batch { slot, sql, rows, skip_errors, reply } => {
+                let r = self.batch(slot, &sql, &rows, skip_errors);
                 self.note_txn();
                 let _ = reply.send(r);
             }
@@ -780,8 +801,8 @@ impl Worker {
 
     /// 같은 문장에 여러 행을 묶어 보낸다 (array DML). 값은 모두 문자열로 바인드한다 — 형 변환은 SQL 쪽(TO_DATE 등)에서.
     /// skip_errors 면 실패한 행만 빼고 나머지를 넣는다 (batch errors). 커밋은 하지 않는다.
-    fn batch(&mut self, sql_text: &str, rows: &[Vec<Option<String>>], skip_errors: bool) -> Result<BatchResult> {
-        self.cursor = None;
+    fn batch(&mut self, slot: u64, sql_text: &str, rows: &[Vec<Option<String>>], skip_errors: bool) -> Result<BatchResult> {
+        self.cursors.remove(&slot);
         if self.spec.read_only {
             return Err(Error::ReadOnly(sql::classify(sql_text).label().to_string()));
         }
@@ -827,9 +848,9 @@ impl Worker {
         Ok(())
     }
 
-    fn exec(&mut self, sql_text: &str, opts: &ExecOptions) -> Result<ExecResult> {
-        // 새 실행은 이전 커서를 닫는다 (열린 커서가 쌓이면 ORA-01000)
-        self.cursor = None;
+    fn exec(&mut self, slot: u64, sql_text: &str, opts: &ExecOptions) -> Result<ExecResult> {
+        // 새 실행은 이 탭의 이전 커서를 닫는다 (열린 커서가 쌓이면 ORA-01000)
+        self.cursors.remove(&slot);
         let started = Instant::now();
         let kind = sql::classify(sql_text);
 
@@ -867,7 +888,7 @@ impl Worker {
                 fetched_total: fetched,
             };
             if has_more {
-                self.cursor = Some(OpenCursor {
+                self.cursors.insert(slot, OpenCursor {
                     rs,
                     columns,
                     fetched,
@@ -931,10 +952,10 @@ impl Worker {
         })
     }
 
-    fn fetch_more(&mut self, n: usize) -> Result<RowPage> {
+    fn fetch_more(&mut self, slot: u64, n: usize) -> Result<RowPage> {
         let cur = self
-            .cursor
-            .as_mut()
+            .cursors
+            .get_mut(&slot)
             .ok_or_else(|| Error::Invalid("열린 결과가 없습니다".into()))?;
         let (rows, has_more) = take_rows(&mut cur.rs, n, cur.max_cell_chars)?;
         cur.fetched += rows.len() as u64;
@@ -945,7 +966,7 @@ impl Worker {
             fetched_total: cur.fetched,
         };
         if !has_more {
-            self.cursor = None;
+            self.cursors.remove(&slot);
         }
         Ok(page)
     }
@@ -999,13 +1020,13 @@ impl Worker {
         Ok(RowPage { columns, rows, has_more, fetched_total })
     }
 
-    fn explain(&mut self, sql_text: &str) -> Result<Vec<String>> {
+    fn explain(&mut self, slot: u64, sql_text: &str) -> Result<Vec<String>> {
         let kind = sql::classify(sql_text);
         if !matches!(kind, StmtKind::Query | StmtKind::Dml) {
             return Err(Error::Invalid(format!("실행계획을 볼 수 없는 문장입니다 ({kind:?})")));
         }
-        // 결과 커서를 열어 둔 채로 트랜잭션을 끝내면 안 된다 — 보던 결과는 닫는다
-        self.cursor = None;
+        // 결과 커서를 열어 둔 채로 트랜잭션을 끝내면 안 된다 — 이 탭이 보던 결과는 닫는다
+        self.cursors.remove(&slot);
         let id = format!(
             "SQLS{}_{}",
             std::process::id(),

@@ -13,6 +13,11 @@
 //! - 결과 행 수에 상한이 있다 (토큰 = 시간·비용).
 //! - stdout 은 프로토콜 전용이다. 로그는 stderr 로만 쓴다.
 //! - `analysis_*` / `table_usage` / `subprogram_relations` 툴은 DB 에 붙지 않는다 — PL/SQL 분석 결과(JSON)만 읽는다.
+//!   흐름도 툴(`flow_reports` / `flow_report` / `data_lineage` / `subprogram_sql` / `column_writers`)도 같다.
+//! - **예외 하나: `run_check`** (데이터 검증 하네스). AI 가 쓴 SELECT 하나를 실제로 돌리고 위반 행 표본을 돌려준다.
+//!   `[mcp] allow_checks = true` 일 때만 생기고, 운영(production) 프로필은 늘 거절한다.
+//!   SELECT/WITH 한 문장(FOR UPDATE 없음)만 받고, 세션은 그대로 읽기 전용이며, 모든 호출을 기록한다.
+//!   읽기 전용 트랜잭션도 자율 트랜잭션(PRAGMA AUTONOMOUS_TRANSACTION) 함수 안의 쓰기는 막지 못한다 — 그래서 운영은 늘 뺀다.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -67,6 +72,8 @@ pub struct SqlStudioMcp {
     /// PL/SQL 분석 결과 폴더의 부모 (None 이면 설정 파일 옆 analysis/<프로필>)
     analysis_root: Option<PathBuf>,
     analysis_cache: analysis::Cache,
+    /// run_check 기록 (JSON 한 줄씩). None 이면 stderr 에만
+    check_log: Option<PathBuf>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -146,6 +153,49 @@ pub struct FindingsArgs {
     pub kind: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReportArgs {
+    /// Connection profile name
+    pub connection: String,
+    /// Report id (from flow_reports), or its exact name/title
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LineageArgs {
+    /// Connection profile name
+    pub connection: String,
+    /// Table name, optionally OWNER.TABLE
+    pub table: String,
+    /// "up" = where the table's data comes from (writers and what they read), "down" = where it goes. Default up.
+    #[serde(default)]
+    pub direction: Option<String>,
+    /// Table steps to follow (one subprogram + one table = 1). Default 2, max 10.
+    #[serde(default)]
+    pub depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ColumnArgs {
+    /// Connection profile name
+    pub connection: String,
+    /// Table name, optionally OWNER.TABLE
+    pub table: String,
+    /// Column name
+    pub column: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CheckArgs {
+    /// Connection profile name (never a production profile)
+    pub connection: String,
+    /// One SELECT (or WITH … SELECT) that returns the rows VIOLATING the rule — 0 rows means the check passes.
+    /// No FOR UPDATE, no DML/DDL/PL-SQL, no trailing semicolon needed.
+    pub sql: String,
+    /// What the check verifies, e.g. "ORDER_LOG.AMOUNT = sum of ORDER_ITEMS for closed orders (ORDER_PKG.CLOSE_ORDER line 120)"
+    pub purpose: String,
+}
+
 // ─────────────────────────────────────────────────────────────
 // 서버
 // ─────────────────────────────────────────────────────────────
@@ -170,10 +220,14 @@ impl SqlStudioMcp {
             connector,
             analysis_root: None,
             analysis_cache: analysis::Cache::default(),
+            check_log: None,
             tool_router: {
                 let mut r = Self::tool_router();
                 if !cfg.mcp.allow_explain {
                     r.remove_route("explain_plan");
+                }
+                if !cfg.mcp.allow_checks {
+                    r.remove_route("run_check");
                 }
                 r
             },
@@ -184,6 +238,22 @@ impl SqlStudioMcp {
     pub fn with_analysis_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.analysis_root = Some(root.into());
         self
+    }
+
+    /// run_check 마다 한 줄씩 남길 파일 (보낸 SQL·목적·결과 수·오류)
+    pub fn with_check_log(mut self, path: impl Into<PathBuf>) -> Self {
+        self.check_log = Some(path.into());
+        self
+    }
+
+    fn log_check(&self, rec: serde_json::Value) {
+        tracing::info!("run_check {rec}");
+        let Some(p) = &self.check_log else { return };
+        use std::io::Write;
+        let r = std::fs::OpenOptions::new().create(true).append(true).open(p).and_then(|mut f| writeln!(f, "{rec}"));
+        if let Err(e) = r {
+            tracing::warn!("run_check 기록을 쓸 수 없습니다 ({}): {e}", p.display());
+        }
     }
 
     fn analysis_dir(&self, conn: &str) -> Result<PathBuf, String> {
@@ -297,6 +367,8 @@ impl SqlStudioMcp {
                     "user": p.user.to_uppercase(),
                     "connect_string": p.connect_string,
                     "connected": s.is_some(),
+                    "production": p.production,
+                    "run_check": self.limits.allow_checks && !p.production,
                     "server_version": s.map(|s| s.info().server_version.clone()),
                 })
             })
@@ -304,7 +376,7 @@ impl SqlStudioMcp {
         to_json(json!({
             "connections": list,
             "read_only": true,
-            "executes_sql": false,
+            "executes_sql": self.limits.allow_checks,
             "call_timeout_secs": self.limits.call_timeout_secs,
         }))
     }
@@ -414,6 +486,104 @@ impl SqlStudioMcp {
         let (_, g) = self.integrated(&a.connection)?;
         Ok(to_json(analysis::findings(&g, a.kind.as_deref())))
     }
+
+    #[tool(
+        description = "List flow diagrams (data flow reports) a person saved in SQLStudio for this connection (no database access). They outline a business flow: which programs read/write which tables, with the person's notes. Start data validation here.",
+        annotations(read_only_hint = true)
+    )]
+    async fn flow_reports(&self, Parameters(a): Parameters<ConnArg>) -> Result<String, String> {
+        let (dir, _) = self.integrated(&a.connection)?;
+        Ok(to_json(analysis::reports(&dir)))
+    }
+
+    #[tool(
+        description = "One saved flow diagram (no database access): boxes (tables, programs with their table CRUD and line ranges, XML screens), edges (read/write/call/cursor flow) with the person's edge notes, sticky notes, and a Mermaid rendering. Follow it to walk the code in order.",
+        annotations(read_only_hint = true)
+    )]
+    async fn flow_report(&self, Parameters(a): Parameters<ReportArgs>) -> Result<String, String> {
+        let (dir, g) = self.integrated(&a.connection)?;
+        Ok(to_json(analysis::report(&dir, &g, &a.id)?))
+    }
+
+    #[tool(
+        description = "Data lineage of a table, step by step (no database access): direction up = which subprograms write it and which tables they read (with proven cursor→DML flows and lines); down = who reads it and what they write. Includes a Mermaid flowchart.",
+        annotations(read_only_hint = true)
+    )]
+    async fn data_lineage(&self, Parameters(a): Parameters<LineageArgs>) -> Result<String, String> {
+        let (_, g) = self.integrated(&a.connection)?;
+        Ok(to_json(analysis::lineage(&g, &a.table, a.direction.as_deref().unwrap_or("up"), a.depth.unwrap_or(2))?))
+    }
+
+    #[tool(
+        description = "Every SQL statement of a subprogram or package in source order (no database access): line range, kind, tables read/written, INTO variables, the cursor that feeds each DML, and the SQL text. Use it to follow the code flow statement by statement.",
+        annotations(read_only_hint = true)
+    )]
+    async fn subprogram_sql(&self, Parameters(a): Parameters<NameArgs>) -> Result<String, String> {
+        let dir = self.analysis_dir(&a.connection)?;
+        let stmts = self.analysis_cache.statements(&dir)?;
+        Ok(to_json(analysis::sql_of(&stmts, &a.name)?))
+    }
+
+    #[tool(
+        description = "Statements that put a value into one column (INSERT column lists, UPDATE SET, MERGE), with the cursor query that supplies the row (no database access). Use it to derive how a column's value should be computed.",
+        annotations(read_only_hint = true)
+    )]
+    async fn column_writers(&self, Parameters(a): Parameters<ColumnArgs>) -> Result<String, String> {
+        let dir = self.analysis_dir(&a.connection)?;
+        let stmts = self.analysis_cache.statements(&dir)?;
+        Ok(to_json(analysis::column_writers(&stmts, &a.table, &a.column)?))
+    }
+
+    #[tool(
+        description = "Run ONE data-validation SELECT on a non-production connection and return how many rows it found plus a small sample. Write the query so it returns the rows that VIOLATE the rule (0 rows = pass). Read-only session; DML, DDL, PL/SQL, FOR UPDATE and multiple statements are refused; production profiles are refused. Every call is logged.",
+        annotations(read_only_hint = true)
+    )]
+    async fn run_check(&self, Parameters(a): Parameters<CheckArgs>) -> Result<String, String> {
+        let p = self.profile(&a.connection)?;
+        let sql = a.sql.trim().to_string();
+        let refuse = |why: String| {
+            self.log_check(json!({"at": sqls_analyze::store::now(), "connection": p.name, "purpose": a.purpose, "sql": sql, "refused": why}));
+            Err(why)
+        };
+        if p.production {
+            return refuse(format!("'{}' is a production profile — run_check never runs there. Give the SQL to the user instead.", p.name));
+        }
+        let stmts = sqls_core::sql::split_script(&sql);
+        if stmts.len() != 1 {
+            return refuse(format!("Send exactly one statement (got {}).", stmts.len()));
+        }
+        let text = stmts[0].text.clone();
+        if !sqls_core::sql::is_read_only(&text) {
+            return refuse(format!("Only SELECT / WITH … SELECT without FOR UPDATE can run (this is {:?}).", stmts[0].kind));
+        }
+        let max = self.limits.check_max_rows.clamp(1, 500);
+        let t0 = std::time::Instant::now();
+        let r = self
+            .run(&a.connection, |s| {
+                let text = text.clone();
+                async move { s.query(&text, Vec::new(), max).await }
+            })
+            .await;
+        let ms = t0.elapsed().as_millis() as u64;
+        match r {
+            Ok(page) => {
+                let n = page.rows.len();
+                self.log_check(json!({"at": sqls_analyze::store::now(), "connection": p.name, "purpose": a.purpose, "sql": text, "rows": n, "more": page.has_more, "ms": ms}));
+                Ok(to_json(json!({
+                    "passed": n == 0,
+                    "violations": if page.has_more { format!("{n}+") } else { n.to_string() },
+                    "columns": page.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+                    "sample": page.rows,
+                    "ms": ms,
+                    "note": if page.has_more { format!("Only the first {n} rows are shown. Use COUNT(*) in a separate check for the total.") } else { String::new() },
+                })))
+            }
+            Err(e) => {
+                self.log_check(json!({"at": sqls_analyze::store::now(), "connection": p.name, "purpose": a.purpose, "sql": text, "error": e, "ms": ms}));
+                Err(e)
+            }
+        }
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -428,7 +598,7 @@ impl ServerHandler for SqlStudioMcp {
                  then write SQL and give it to the user, who reviews and runs it in SQLStudio. \
                  Always respect the server version: Oracle 11g lacks FETCH FIRST, IDENTITY, LATERAL and JSON functions. \
                  For questions about existing PL/SQL (what a package does, who writes a table, impact of a change), \
-                 use analysis_overview, analysis_unit, table_usage and subprogram_relations — they read a stored analysis, not the database.",
+                 use analysis_overview, analysis_unit, table_usage and subprogram_relations — they read a stored analysis, not the database.                  To follow a data flow for validation: flow_reports / flow_report (diagrams a person saved), data_lineage (table up/down),                  subprogram_sql (statements in order) and column_writers (how a column gets its value).                  run_check exists only when the administrator enabled it: one SELECT returning violating rows, never on production.",
             )
     }
 }

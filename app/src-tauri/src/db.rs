@@ -588,6 +588,12 @@ pub fn disconnect(st: State<'_, AppState>, id: u64) {
         if !map.values().any(|o| o.session.same_connection(&s.session)) {
             s.session.close();
         }
+        // 이 프로필의 마지막 탭이면 자동완성용 메타 세션(SQLStudio-Meta)도 닫는다 — 읽어 둔 사전은 메모리에 남는다
+        if !map.values().any(|o| o.profile.eq_ignore_ascii_case(&s.profile)) {
+            if let Some(h) = st.hubs.lk().get(&s.profile.to_uppercase()) {
+                h.park();
+            }
+        }
     }
 }
 

@@ -120,6 +120,9 @@ impl AppState {
         for (_, s) in map.drain() {
             s.session.close();
         }
+        for h in self.hubs.lk().values() {
+            h.park();
+        }
     }
 
     pub fn save_config(&self) -> Result<(), ErrView> {

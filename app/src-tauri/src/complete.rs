@@ -51,6 +51,8 @@ pub struct MetaHub {
     status: Mutex<HubStatus>,
     inflight: Mutex<HashSet<Missing>>,
     reload_pending: AtomicBool,
+    /// 이 프로필의 탭이 모두 끊겨 메타 세션을 닫아 둔 상태 — 캐시는 메모리에 두고, 다시 접속할 때 세션만 다시 연다
+    parked: AtomicBool,
     app: AppHandle,
     /// 테이블 구조 조회 결과 (이름 → 언제, 결과). DDL 뒤 다시 읽을 때 비운다. 컬럼 팝업·우클릭·상세를 다시 열 때 바로
     pub describes: Mutex<std::collections::HashMap<String, (std::time::Instant, sqls_core::meta::TableDesc)>>,
@@ -95,16 +97,36 @@ impl MetaHub {
         *self.session.wr() = Some(s);
         let hub = self.clone();
         tauri::async_runtime::spawn(async move {
-            if lost.wait_for(|v| *v).await.is_ok() {
+            if lost.wait_for(|v| *v).await.is_ok() && !hub.parked.load(Ordering::SeqCst) {
                 tracing::warn!("{}: 메타 세션이 끊겼습니다 — 다시 접속합니다", hub.profile);
                 hub.reconnect().await;
             }
         });
     }
 
+    /// 탭이 모두 끊겼을 때 — 서버 세션만 닫는다 (V$SESSION 에 SQLStudio-Meta 가 남지 않게).
+    /// 읽어 둔 사전(캐시)은 그대로 두어 다시 접속하면 처음부터 읽지 않는다
+    pub fn park(&self) {
+        self.parked.store(true, Ordering::SeqCst);
+        if let Some(s) = self.session.wr().take() {
+            s.close();
+        }
+    }
+
+    /// 닫아 둔 메타 세션을 뒤에서 다시 연다 (같은 프로필의 탭이 다시 접속했을 때)
+    fn unpark(self: &Arc<Self>) {
+        if self.parked.swap(false, Ordering::SeqCst) {
+            *self.last_try.lk() = None;
+            self.kick();
+        }
+    }
+
     /// 끊긴 메타 세션을 새로 연다. 이미 누가 열었으면 그것을 돌려준다. 몇 번 해 보고 안 되면 None
     pub async fn reconnect(self: &Arc<Self>) -> Option<Session> {
         let _g = self.reconnecting.lock().await;
+        if self.parked.load(Ordering::SeqCst) {
+            return None;
+        }
         if let Some(s) = self.session.rd().clone().filter(|s| !s.is_lost()) {
             return Some(s);
         }
@@ -119,6 +141,11 @@ impl MetaHub {
             *self.last_try.lk() = Some(std::time::Instant::now());
             match tokio::time::timeout(Duration::from_secs(45), Session::connect(self.spec.clone())).await {
                 Ok(Ok(s)) => {
+                    // 여는 사이에 탭이 모두 끊겼으면 바로 닫는다
+                    if self.parked.load(Ordering::SeqCst) {
+                        s.close();
+                        return None;
+                    }
                     tracing::info!("{}: 메타 세션 다시 접속", self.profile);
                     sqls_core::connlog::record(sqls_core::connlog::Ev { kind: "meta_ok".into(), who: "사전 조회".into(), ..Default::default() });
                     self.install(s.clone());
@@ -241,6 +268,7 @@ pub fn ensure_hub(st: &AppState, app: &AppHandle, profile: &Profile, password: &
     let mut hubs = st.hubs.lk();
     if let Some(h) = hubs.get(&key) {
         if h.status().phase != "error" {
+            h.unpark();
             return h.clone();
         }
     }
@@ -265,10 +293,14 @@ pub fn ensure_hub(st: &AppState, app: &AppHandle, profile: &Profile, password: &
         }),
         inflight: Mutex::new(HashSet::new()),
         reload_pending: AtomicBool::new(false),
+        parked: AtomicBool::new(false),
         app: app.clone(),
         describes: Mutex::new(std::collections::HashMap::new()),
     });
-    hubs.insert(key, hub.clone());
+    // 다시 접속하지 못해 새로 만드는 허브 — 앞의 것이 쥔 세션이 있으면 닫는다
+    if let Some(old) = hubs.insert(key, hub.clone()) {
+        old.park();
+    }
     let h = hub.clone();
     tauri::async_runtime::spawn(async move {
         *h.last_try.lk() = Some(std::time::Instant::now());

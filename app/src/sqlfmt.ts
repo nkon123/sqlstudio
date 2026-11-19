@@ -140,7 +140,7 @@ const VALUE_WORDS = new Set("NULL LEVEL ROWNUM ROWID SYSDATE SYSTIMESTAMP CURREN
 
 type Kind = "list" | "cond" | "join" | "flat" | "setop" | "with" | "insert" | "update" | "delete" | "pivot" | "merge" | "multi" | "tail";
 interface Clause { kw: string; n: number; kind: Kind }
-interface Snap { l: number; cur: string; pos: number; prev: Tok | null; mb: boolean; un: boolean; pend: string[] }
+interface Snap { l: number; cur: string; pos: number; prev: Tok | null; mb: boolean; un: boolean; pend: string[]; ca: number }
 
 class Fmt {
   private lines: string[] = [];
@@ -153,6 +153,8 @@ class Fmt {
   private allowWith = true;
   /** 제 줄에 있던 주석 — 다음 줄이 시작하는 칸에 맞춰 그 앞에 쓴다 (절 앞의 주석은 그 절 키워드와 같은 칸) */
   private pend: string[] = [];
+  /** 이 줄 끝에 붙인 주석이 시작하는 자리 (cur 안) — 없으면 -1 */
+  private cmtAt = -1;
 
   constructor(private toks: Tok[], private o: RiverOptions) {}
 
@@ -165,6 +167,7 @@ class Fmt {
     this.cur = " ".repeat(Math.max(0, col));
     this.prev = null;
     this.mustBreak = false;
+    this.cmtAt = -1;
   }
   /** 모아 둔 제 줄 주석을 col 칸에 한 줄씩 */
   private flush(col: number) {
@@ -180,15 +183,30 @@ class Fmt {
     }
     if (space && !this.blank() && !this.cur.endsWith(" ") && !this.cur.endsWith("(")) this.cur += " ";
     this.cur += text;
+    this.cmtAt = -1;
+  }
+  /** 줄 끝에 쓰는 쉼표·AND·OR — 줄 끝 -- 주석 뒤라면 주석 앞에 넣는다 (쉼표·AND 만 다음 줄에 남지 않게) */
+  private trail(text: string, space: boolean) {
+    // 모아 둔 제 줄 주석은 다음 줄 앞에 그대로 둔다
+    if (this.mustBreak && this.cmtAt >= 0) {
+      const head = this.cur.slice(0, this.cmtAt).replace(/\s+$/, "") + (space ? " " : "") + text + " ";
+      this.cur = head + this.cur.slice(this.cmtAt);
+      this.cmtAt = head.length;
+    } else if (!this.mustBreak && !this.blank()) {
+      this.cur += (space && !this.cur.endsWith(" ") ? " " : "") + text;
+      this.cmtAt = -1;
+    } else {
+      this.emit(text, space);
+    }
   }
   /** 줄을 바꾸기 전에 같은 줄에 붙어 있던 주석은 이 줄 끝에 둔다 */
   private brk(col: number) {
     while (this.isComment(this.at()) && !this.at()!.nl) this.comment();
     this.nl(col);
   }
-  private snap(): Snap { return { l: this.lines.length, cur: this.cur, pos: this.pos, prev: this.prev, mb: this.mustBreak, un: this.unary, pend: [...this.pend] }; }
+  private snap(): Snap { return { l: this.lines.length, cur: this.cur, pos: this.pos, prev: this.prev, mb: this.mustBreak, un: this.unary, pend: [...this.pend], ca: this.cmtAt }; }
   private restore(s: Snap) {
-    this.lines.length = s.l; this.cur = s.cur; this.pos = s.pos; this.prev = s.prev; this.mustBreak = s.mb; this.unary = s.un; this.pend = s.pend;
+    this.lines.length = s.l; this.cur = s.cur; this.pos = s.pos; this.prev = s.prev; this.mustBreak = s.mb; this.unary = s.un; this.pend = s.pend; this.cmtAt = s.ca;
   }
 
   // ── 토큰 ─────────────────────────────────────────
@@ -247,7 +265,11 @@ class Fmt {
       this.pos++;
       return;
     }
+    // 줄 끝 주석이 이어지면(/* a */ -- b) 처음 것의 자리
+    const keep = this.isComment(this.prev ?? undefined) ? this.cmtAt : -1;
+    const ln = this.lines.length;
     this.emit(t.v, true);
+    this.cmtAt = keep >= 0 && this.lines.length === ln ? keep : this.cur.length - t.v.length;
     this.prev = t;
     this.unary = false;
     if (t.t === "lc") this.mustBreak = true;
@@ -272,8 +294,12 @@ class Fmt {
       case "ORDER": return w(1) === "BY" ? c(2, "list") : w(1) === "SIBLINGS" && w(2) === "BY" ? c(3, "list") : null;
       case "CONNECT": return w(1) === "BY" ? c(2, "cond") : null;
       case "START": return w(1) === "WITH" ? c(2, "cond") : null;
-      case "UNION": return c(w(1) === "ALL" ? 2 : 1, "setop");
-      case "MINUS": case "INTERSECT": case "EXCEPT": return c(w(1) === "ALL" ? 2 : 1, "setop");
+      case "UNION": case "MINUS": case "INTERSECT": case "EXCEPT": {
+        // UNION -- 메모 ALL 처럼 사이에 -- 주석·제 줄 주석이 있어도 한 키워드 (주석은 query 가 키워드 뒤로 옮긴다)
+        let k = 1;
+        while (this.isComment(this.at(k))) k++;
+        return this.up(k) === "ALL" ? { kw: this.kw(this.at()!.v) + " " + this.kw(this.at(k)!.v), n: k + 1, kind: "setop" } : c(1, "setop");
+      }
       case "JOIN": return c(1, "join");
       case "INNER": case "LEFT": case "RIGHT": case "FULL": case "CROSS": case "NATURAL": case "OUTER": {
         if (this.at(1)?.t === "(") return null;
@@ -341,9 +367,30 @@ class Fmt {
         continue;
       }
       const start = this.kwStart(c, base);
-      if (this.blank()) this.cur = " ".repeat(start);
+      if (c.kind === "setop") {
+        // UNION ALL 앞의 제 줄 주석(다음 묶음의 머리글 등)은 SELECT 와 같은 칸 — UNION 의 칸으로 한 칸 들이지 않는다
+        if (!this.blank()) this.brk(base);
+        this.flush(base);
+        this.cur = " ".repeat(start);
+      } else if (this.blank()) this.cur = " ".repeat(start);
       else if (!(first && this.col() === base && start === base && !this.mustBreak)) this.brk(start);
       this.emit(c.kw, true);
+      if (c.kind === "setop") {
+        // UNION 과 ALL 사이의 주석은 키워드 뒤에 (같은 줄 주석은 이 줄 끝, 제 줄 주석은 다음 SELECT 앞)
+        const end = this.pos + c.n;
+        this.prev = null;
+        for (let k = this.pos; k < end; k++) {
+          if (!this.isComment(this.toks[k])) continue;
+          this.pos = k;
+          this.comment();
+        }
+        this.pos = end;
+        this.mustBreak = false;
+        this.prev = null;
+        this.allowWith = false;
+        first = false;
+        continue;
+      }
       this.pos += c.n;
       this.prev = null;
       this.allowWith = c.kind === "insert" || c.kind === "multi";
@@ -351,7 +398,6 @@ class Fmt {
       switch (c.kind) {
         case "list": case "with": this.list(this.col() + 1); break;
         case "cond": this.cond(R); break;
-        case "setop": break;
         case "pivot": this.pivot(); break;
         case "merge": this.merge(base); break;
         case "multi": this.insertMulti(base); break;
@@ -388,10 +434,7 @@ class Fmt {
         this.emit(",", false);
       } else {
         // 쉼표는 앞 항목 끝에 — 모아 둔 주석은 다음 줄(다음 항목 앞)에
-        const pend = this.pend;
-        this.pend = [];
-        this.emit(",", false);
-        this.pend = pend;
+        this.trail(",", false);
         this.brk(itemCol);
       }
       this.prev = { t: ",", v: ",", nl: false, sp: false };
@@ -603,7 +646,7 @@ class Fmt {
         this.brk(R - op.length);
         this.emit(text, true);
       } else {
-        this.emit(text, true);
+        this.trail(text, true);
         this.pos++;
         this.brk(R + 1);
         this.prev = null;
@@ -688,7 +731,7 @@ class Fmt {
           this.pos++;
           this.prev = this.toks[this.pos - 1];
         } else {
-          this.emit(text, true);
+          this.trail(text, true);
           this.pos++;
           this.brk(base);
           this.prev = null;

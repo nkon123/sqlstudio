@@ -392,4 +392,94 @@ eq("select * from t where (a = 1 or b = 2) and c = 3", `SELECT *
  WHERE (a = 1 OR b = 2)
    AND c = 3`);
 
+// UNION ALL 사이의 주석 — 앞의 제 줄 주석(머리글 띠)은 SELECT 와 같은 칸 (예전에는 UNION 칸으로 한 칸 들여져 어긋났다),
+// 뒤의 제 줄 주석은 다음 SELECT 앞, 같은 줄 주석은 그 줄 끝
+eq(`/* 매출 */
+SELECT '1' AS GB, A.CUST_ID, SUM(A.AMT) AS AMT -- 금액
+  FROM TB_SALE A
+ WHERE A.SALE_DT >= :FR_DT -- 시작
+   AND A.SALE_DT <= :TO_DT
+ GROUP BY A.CUST_ID
+/*****************************/
+/* 2. 반품                   */
+/*****************************/
+UNION ALL
+SELECT '2' AS GB -- 구분
+     , B.CUST_ID
+  FROM TB_RTN B
+   -- AND B.STAT = 'Y'
+ GROUP BY B.CUST_ID
+-- 3. 조정
+UNION ALL -- 조정분
+/* 조정 테이블 */
+SELECT '3', C.CUST_ID FROM TB_ADJ C
+WHERE C.USE_YN = 'Y' /* 사용 */
+-- ORDER BY 2`,
+`/* 매출 */
+SELECT '1' AS GB
+     , A.CUST_ID
+     , SUM(A.AMT) AS AMT -- 금액
+  FROM TB_SALE A
+ WHERE A.SALE_DT >= :FR_DT -- 시작
+   AND A.SALE_DT <= :TO_DT
+ GROUP BY A.CUST_ID
+/*****************************/
+/* 2. 반품                   */
+/*****************************/
+ UNION ALL
+SELECT '2' AS GB -- 구분
+     , B.CUST_ID
+  FROM TB_RTN B
+ -- AND B.STAT = 'Y'
+ GROUP BY B.CUST_ID
+-- 3. 조정
+ UNION ALL -- 조정분
+/* 조정 테이블 */
+SELECT '3'
+     , C.CUST_ID
+  FROM TB_ADJ C
+ WHERE C.USE_YN = 'Y' /* 사용 */
+-- ORDER BY 2`);
+// 같은 줄·제 줄 주석이 섞여 여럿 — 모두 제자리, 괄호 안 서브쿼리도 같은 규칙
+eq("select a from t1 -- x1\n-- x2\n/* x3 */\nunion all -- y1\n-- y2\n/* y3 */ select b from t2",
+  "SELECT a\n  FROM t1 -- x1\n-- x2\n/* x3 */\n UNION ALL -- y1\n-- y2\n/* y3 */\nSELECT b\n  FROM t2");
+eq("select * from (select a from t1\n-- 중간\nunion all\n-- 중간2\nselect b from t2) v",
+  "SELECT *\n  FROM (SELECT a\n          FROM t1\n        -- 중간\n         UNION ALL\n        -- 중간2\n        SELECT b\n          FROM t2) v");
+// UNION 과 ALL 사이의 주석 — ALL 이 줄 첫머리에 홀로 남지 않고, 주석은 키워드 뒤로
+eq("select a from t1\nunion -- u\nall\nselect b from t2", "SELECT a\n  FROM t1\n UNION ALL -- u\nSELECT b\n  FROM t2");
+eq("select a from t1\nunion\n-- 주석\nall\nselect b from t2", "SELECT a\n  FROM t1\n UNION ALL\n-- 주석\nSELECT b\n  FROM t2");
+// 쉼표·AND 를 줄 끝에 둘 때 — 줄 끝 -- 주석 앞에 넣는다 (예전에는 쉼표·AND 만 다음 줄에 홀로 남았다)
+const trailing: FormatPrefs = { ...river, commaBefore: false, logicalBefore: false };
+eq("select a, b -- b\n, c from t where x = 1 -- x\nand y = 2\n-- 따로\nand z = 3 union all select 1, 2, 3 from dual",
+`SELECT a,
+       b, -- b
+       c
+  FROM t
+ WHERE x = 1 AND -- x
+       y = 2 AND
+       -- 따로
+       z = 3
+ UNION ALL
+SELECT 1,
+       2,
+       3
+  FROM dual`, trailing);
+// 왼쪽 정렬도 — 쉼표만 남은 줄, UNION 앞 주석의 들여쓰기, UNION -- 주석 / ALL
+const left: FormatPrefs = { ...river, style: "left" };
+eq("select '2' as gb -- 구분\n, b from t group by b\n/* 묶음 */\nunion -- u\nall\nselect 1, 2 from dual",
+`SELECT
+  '2' AS gb, -- 구분
+  b
+FROM
+  t
+GROUP BY
+  b
+/* 묶음 */
+UNION ALL -- u
+SELECT
+  1,
+  2
+FROM
+  dual`, left);
+
 console.log(`  포맷 ${n}건`);

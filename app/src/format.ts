@@ -212,7 +212,53 @@ function formatLeft(sql: string, prefs: FormatPrefs): string {
     void preloadFormatter();
     throw new Error("포맷 기능을 불러오는 중입니다 — 잠시 뒤 다시 하세요");
   }
-  return sqlFormatter.format(sql, opts);
+  return tidyLeftComments(sqlFormatter.format(sql, opts));
+}
+
+/** 줄에서 -- 주석이 시작하는 자리 (문자열·따옴표 이름 밖). 없으면 -1 */
+function lineCommentAt(line: string): number {
+  let q = "";
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) { if (ch === q) q = ""; continue; }
+    if (ch === "'" || ch === '"') q = ch;
+    else if (ch === "-" && line[i + 1] === "-") return i;
+    else if (ch === "/" && line[i + 1] === "*") { const e = line.indexOf("*/", i + 2); if (e < 0) return -1; i = e + 1; }
+  }
+  return -1;
+}
+
+/** 왼쪽 정렬(sql-formatter) 결과의 주석 자리 손질:
+ *  - 줄 끝 -- 주석 뒤에 쉼표만 남은 줄 → 쉼표를 앞 줄의 주석 앞으로
+ *  - UNION ALL · MINUS 앞의 제 줄 주석 → 그 키워드와 같은 칸 (앞 절의 들여쓰기를 따르지 않게) */
+export function tidyLeftComments(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  for (const line of lines) {
+    if (/^\s*,\s*$/.test(line) && out.length) {
+      const prev = out[out.length - 1];
+      const at = lineCommentAt(prev);
+      out[out.length - 1] = at < 0 ? prev.replace(/\s+$/, "") + "," : prev.slice(0, at).replace(/\s+$/, "") + ", " + prev.slice(at);
+      continue;
+    }
+    const m = /^(\s*)(UNION|MINUS|INTERSECT|EXCEPT)\b/i.exec(line);
+    if (m) {
+      for (let k = out.length - 1; k >= 0 && /^\s*(--|\/\*.*\*\/\s*$)/.test(out[k]); k--) out[k] = m[1] + out[k].trimStart();
+    }
+    // UNION -- 메모 / ALL 처럼 주석 때문에 ALL 만 따로 남은 줄 → UNION ALL -- 메모 (사이의 제 줄 주석은 그 뒤에)
+    if (/^\s*ALL\s*$/i.test(line)) {
+      let k = out.length - 1;
+      while (k >= 0 && /^\s*(--|\/\*.*\*\/\s*$)/.test(out[k])) k--;
+      const op = k >= 0 ? /^(\s*(?:UNION|MINUS|INTERSECT|EXCEPT))(\s+(?:--|\/\*).*)?$/i.exec(out[k]) : null;
+      if (op) {
+        out[k] = op[1] + " " + line.trim() + (op[2] ?? "");
+        for (let j = k + 1; j < out.length; j++) out[j] = /^\s*/.exec(out[k])![0] + out[j].trimStart();
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  return out.join("\n");
 }
 
 export function formatSql(sql: string, prefs: FormatPrefs = loadPrefs()): FormatResult {

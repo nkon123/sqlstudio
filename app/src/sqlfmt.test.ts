@@ -361,9 +361,8 @@ USING emp_new s
 // 항목 앞의 제 줄 주석 — 주석은 항목 칸에, 항목은 그 아래 줄에서 (예전에는 마지막 주석 줄 뒤에 붙었다)
 eq("update emp set\n/* 급여 */\nsal = 1,\n-- 날짜\nupd_dt = sysdate\n/* 조건 */\nwhere empno = 1\n-- 부서\nand deptno = 10",
 `UPDATE emp
-   SET
-       /* 급여 */
-       sal = 1
+   /* 급여 */
+   SET sal = 1
      -- 날짜
      , upd_dt = SYSDATE
  /* 조건 */
@@ -448,6 +447,47 @@ eq("select * from (select a from t1\n-- 중간\nunion all\n-- 중간2\nselect b 
 // UNION 과 ALL 사이의 주석 — ALL 이 줄 첫머리에 홀로 남지 않고, 주석은 키워드 뒤로
 eq("select a from t1\nunion -- u\nall\nselect b from t2", "SELECT a\n  FROM t1\n UNION ALL -- u\nSELECT b\n  FROM t2");
 eq("select a from t1\nunion\n-- 주석\nall\nselect b from t2", "SELECT a\n  FROM t1\n UNION ALL\n-- 주석\nSELECT b\n  FROM t2");
+// UNION -- 메모 ⏎ ALL /* 다음 */ — -- 주석 뒤에 이어 쓰면 뒤의 것이 주석이 되어 왼쪽 정렬로 넘어갔다. 뒤의 것은 다음 SELECT 앞에
+eq("select a from t1 where a = 1 union -- c\nall /* d */\nselect b from t2",
+  "SELECT a\n  FROM t1\n WHERE a = 1\n UNION ALL -- c\n/* d */\nSELECT b\n  FROM t2");
+eq("select * from (select a from t1\n-- 메모\nunion\n    -- 사이\n/* 사이2 */\nall /* 뒤 */\nselect b from t2) v",
+  "SELECT *\n  FROM (SELECT a\n          FROM t1\n        -- 메모\n         UNION ALL /* 뒤 */\n        -- 사이\n        /* 사이2 */\n        SELECT b\n          FROM t2) v");
+// 여는 괄호 바로 뒤에 주석이 있는 서브쿼리 — 예전에는 서브쿼리인 줄 모르고 한 줄로 이어 붙였다.
+// 여러 줄 블록 주석(주석 처리한 SQL)은 옮겨 간 만큼 안쪽 줄도 옮긴다
+eq("select * from (/* test*/\n/* 2026 test\nSELECT EMPNO\n     , ENAME\n  FROM EMP\n UNION ALL*/\n/* test */\nselect empno, ename from emp union all select empno, ename from emp)",
+`SELECT *
+  FROM (/* test*/
+        /* 2026 test
+        SELECT EMPNO
+             , ENAME
+          FROM EMP
+         UNION ALL*/
+        /* test */
+        SELECT empno
+             , ename
+          FROM emp
+         UNION ALL
+        SELECT empno
+             , ename
+          FROM emp)`);
+eq("select * from t where a in (-- 목록\nselect b from u)", "SELECT *\n  FROM t\n WHERE a IN (-- 목록\n             SELECT b\n               FROM u)");
+// 쉼표·AND 바로 뒤의 주석 — 쉼표·AND 만 홀로 남지 않게
+eq("select a, -- 첫째\n-- 둘째\nb from t1 where x = 1 and\n-- 조건\ny = 2 union all select c, d from t2",
+`SELECT a -- 첫째
+     -- 둘째
+     , b
+  FROM t1
+ WHERE x = 1
+   -- 조건
+   AND y = 2
+ UNION ALL
+SELECT c
+     , d
+  FROM t2`);
+// 절 키워드 바로 뒤·낱말 사이의 주석 — 키워드만 홀로 남지 않게, 다른 포맷으로 넘어가지 않게
+eq("select\n-- 열\na from t1 order\n-- 정렬\nby a", "-- 열\nSELECT a\n  FROM t1\n -- 정렬\n ORDER BY a");
+eq("select a from t order -- 정렬\nby a, b", "SELECT a\n  FROM t\n ORDER BY -- 정렬\n          a\n        , b");
+eq("insert -- 넣기\ninto t (a) select a from s", "INSERT INTO -- 넣기\n            t (a)\nSELECT a\n  FROM s");
 // 쉼표·AND 를 줄 끝에 둘 때 — 줄 끝 -- 주석 앞에 넣는다 (예전에는 쉼표·AND 만 다음 줄에 홀로 남았다)
 const trailing: FormatPrefs = { ...river, commaBefore: false, logicalBefore: false };
 eq("select a, b -- b\n, c from t where x = 1 -- x\nand y = 2\n-- 따로\nand z = 3 union all select 1, 2, 3 from dual",

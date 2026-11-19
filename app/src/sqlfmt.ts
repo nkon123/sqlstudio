@@ -30,7 +30,7 @@ export interface RiverOptions {
 }
 
 type TT = "word" | "qid" | "str" | "num" | "bind" | "op" | "(" | ")" | "," | "." | ";" | "lc" | "bc";
-interface Tok { t: TT; v: string; /** 앞에 줄바꿈이 있었나 */ nl: boolean; /** 앞에 공백이 있었나 */ sp: boolean }
+interface Tok { t: TT; v: string; /** 앞에 줄바꿈이 있었나 */ nl: boolean; /** 앞에 공백이 있었나 */ sp: boolean; /** 블록 주석이 원문에서 시작한 칸 */ c?: number }
 
 /** 화면 너비 — 한글·한자 등은 두 칸 */
 export function vw(s: string): number {
@@ -41,12 +41,12 @@ export function vw(s: string): number {
 
 export function tokenize(sql: string): Tok[] {
   const out: Tok[] = [];
-  let i = 0, nl = false, sp = false;
+  let i = 0, nl = false, sp = false, ls = 0;
   const n = sql.length;
   const push = (t: TT, v: string) => { out.push({ t, v, nl, sp }); nl = false; sp = false; };
   while (i < n) {
     const ch = sql[i];
-    if (/\s/.test(ch)) { if (ch === "\n") nl = true; sp = true; i++; continue; }
+    if (/\s/.test(ch)) { if (ch === "\n") { nl = true; ls = i + 1; } sp = true; i++; continue; }
     if (ch === "-" && sql[i + 1] === "-") {
       const e = sql.indexOf("\n", i);
       const end = e < 0 ? n : e;
@@ -58,6 +58,10 @@ export function tokenize(sql: string): Tok[] {
       const e = sql.indexOf("*/", i + 2);
       if (e < 0) throw new Error("닫히지 않은 주석");
       push("bc", sql.slice(i, e + 2));
+      // 여러 줄 블록 주석 — 시작 칸을 적어 두었다가 옮겨 쓸 때 안쪽 줄도 같은 만큼 옮긴다 (주석 처리한 SQL 이 어긋나지 않게)
+      out[out.length - 1].c = vw(sql.slice(ls, i));
+      const inner = sql.lastIndexOf("\n", e);
+      if (inner > i) ls = inner + 1;
       i = e + 2;
       continue;
     }
@@ -140,7 +144,7 @@ const VALUE_WORDS = new Set("NULL LEVEL ROWNUM ROWID SYSDATE SYSTIMESTAMP CURREN
 
 type Kind = "list" | "cond" | "join" | "flat" | "setop" | "with" | "insert" | "update" | "delete" | "pivot" | "merge" | "multi" | "tail";
 interface Clause { kw: string; n: number; kind: Kind }
-interface Snap { l: number; cur: string; pos: number; prev: Tok | null; mb: boolean; un: boolean; pend: string[]; ca: number }
+interface Snap { l: number; cur: string; pos: number; prev: Tok | null; mb: boolean; un: boolean; pend: Tok[]; ca: number }
 
 class Fmt {
   private lines: string[] = [];
@@ -152,7 +156,9 @@ class Fmt {
   private cont = 0;
   private allowWith = true;
   /** 제 줄에 있던 주석 — 다음 줄이 시작하는 칸에 맞춰 그 앞에 쓴다 (절 앞의 주석은 그 절 키워드와 같은 칸) */
-  private pend: string[] = [];
+  private pend: Tok[] = [];
+  /** 절 키워드 앞으로 옮겨 쓴 주석 토큰 — 차례가 오면 건너뛴다 */
+  private skip = new Set<number>();
   /** 이 줄 끝에 붙인 주석이 시작하는 자리 (cur 안) — 없으면 -1 */
   private cmtAt = -1;
 
@@ -169,9 +175,18 @@ class Fmt {
     this.mustBreak = false;
     this.cmtAt = -1;
   }
+  /** 여러 줄 블록 주석을 col 칸에 쓸 때 — 둘째 줄부터도 첫 줄이 옮겨 간 만큼 옮긴다 (왼쪽으로는 공백이 있는 만큼만) */
+  private reindent(t: Tok, col: number): string {
+    if (t.t !== "bc" || t.c == null || !t.v.includes("\n")) return t.v;
+    const ls = t.v.split("\n");
+    let d = col - t.c;
+    if (d < 0) d = Math.max(d, -Math.min(...ls.slice(1).filter((l) => l.trim()).map((l) => /^ */.exec(l)![0].length)));
+    if (!d) return t.v;
+    return ls.map((l, i) => (i === 0 || !l.trim() ? l : d > 0 ? " ".repeat(d) + l : l.slice(-d))).join("\n");
+  }
   /** 모아 둔 제 줄 주석을 col 칸에 한 줄씩 */
   private flush(col: number) {
-    for (const c of this.pend) this.lines.push(" ".repeat(Math.max(0, col)) + c);
+    for (const c of this.pend) this.lines.push(" ".repeat(Math.max(0, col)) + this.reindent(c, Math.max(0, col)));
     this.pend = [];
   }
   private emit(text: string, space: boolean) {
@@ -212,12 +227,20 @@ class Fmt {
   // ── 토큰 ─────────────────────────────────────────
   private at(k = 0): Tok | undefined { return this.toks[this.pos + k]; }
   private up(k = 0) { const t = this.at(k); return t?.t === "word" ? t.v.toUpperCase() : ""; }
+  /** 주석을 건너뛴 다음 낱말 (대문자) — 괄호 바로 뒤에 주석이 있어도 서브쿼리를 알아보게 */
+  private upNext() {
+    let k = 0;
+    while (this.isComment(this.at(k))) k++;
+    return this.up(k);
+  }
   private isComment(t?: Tok) { return t?.t === "lc" || t?.t === "bc"; }
   private kw(s: string) { return this.o.keywordCase === "lower" ? s.toLowerCase() : this.o.keywordCase === "upper" ? s.toUpperCase() : s; }
   /** 레이아웃이 쓰는 키워드 — 원래 글자를 이어서 대소문자만 맞춘다 */
   private kwFrom(n: number) {
-    return this.toks.slice(this.pos, this.pos + n).map((t) => (t.t === "word" ? this.kw(t.v) : t.v)).join(" ");
+    return this.toks.slice(this.pos, this.pos + n).filter((t) => !this.isComment(t) || this.inKw(t)).map((t) => (t.t === "word" ? this.kw(t.v) : t.v)).join(" ");
   }
+  // 키워드 글에 그대로 남기는 주석 — 같은 줄의 블록 주석·힌트 (MERGE /*+ APPEND */ INTO). -- 주석·제 줄 주석은 키워드 뒤로 옮긴다
+  private inKw(t: Tok) { return t.t === "bc" && !t.nl; }
 
   private text(i: number): string {
     const t = this.toks[i];
@@ -261,15 +284,17 @@ class Fmt {
     const t = this.at()!;
     if (t.nl) {
       // 제 줄 주석(/*****/ 띠 등)은 뒤따르는 것에 붙는다 — 다음 줄이 어느 칸에서 시작할지 알 때 쓴다
-      this.pend.push(t.v);
+      this.pend.push(t);
       this.pos++;
       return;
     }
     // 줄 끝 주석이 이어지면(/* a */ -- b) 처음 것의 자리
     const keep = this.isComment(this.prev ?? undefined) ? this.cmtAt : -1;
     const ln = this.lines.length;
-    this.emit(t.v, true);
-    this.cmtAt = keep >= 0 && this.lines.length === ln ? keep : this.cur.length - t.v.length;
+    const sp = !this.blank() && !this.cur.endsWith(" ") && !this.cur.endsWith("(") ? 1 : 0;
+    const text = this.reindent(t, this.mustBreak || (this.pend.length && !this.blank()) ? this.cont : this.col() + sp);
+    this.emit(text, true);
+    this.cmtAt = keep >= 0 && this.lines.length === ln ? keep : this.cur.length - text.length;
     this.prev = t;
     this.unary = false;
     if (t.t === "lc") this.mustBreak = true;
@@ -278,9 +303,10 @@ class Fmt {
 
   // ── 절 ───────────────────────────────────────────
   private clauseAt(): Clause | null {
-    // 낱말 사이의 /* 힌트 */ 는 건너 본다 (MERGE /*+ APPEND */ INTO …) — 키워드 글에는 그대로 남는다
+    // 낱말 사이의 주석은 건너 본다 — 같은 줄 /* 힌트 */ 는 키워드 글에 그대로 (MERGE /*+ APPEND */ INTO …),
+    // -- 주석·제 줄 주석(INSERT -- 메모 ⏎ INTO)은 query 가 키워드 뒤로 옮긴다
     const idx: number[] = [];
-    for (let k = 0; idx.length < 6 && this.at(k); k++) if (this.at(k)!.t !== "bc") idx.push(k);
+    for (let k = 0; idx.length < 6 && this.at(k); k++) if (!this.isComment(this.at(k))) idx.push(k);
     const w = (k: number) => (idx[k] == null ? "" : this.up(idx[k]));
     const c = (kw: number, kind: Kind): Clause => {
       const n = idx[kw - 1] + 1;
@@ -294,12 +320,7 @@ class Fmt {
       case "ORDER": return w(1) === "BY" ? c(2, "list") : w(1) === "SIBLINGS" && w(2) === "BY" ? c(3, "list") : null;
       case "CONNECT": return w(1) === "BY" ? c(2, "cond") : null;
       case "START": return w(1) === "WITH" ? c(2, "cond") : null;
-      case "UNION": case "MINUS": case "INTERSECT": case "EXCEPT": {
-        // UNION -- 메모 ALL 처럼 사이에 -- 주석·제 줄 주석이 있어도 한 키워드 (주석은 query 가 키워드 뒤로 옮긴다)
-        let k = 1;
-        while (this.isComment(this.at(k))) k++;
-        return this.up(k) === "ALL" ? { kw: this.kw(this.at()!.v) + " " + this.kw(this.at(k)!.v), n: k + 1, kind: "setop" } : c(1, "setop");
-      }
+      case "UNION": case "MINUS": case "INTERSECT": case "EXCEPT": return c(w(1) === "ALL" ? 2 : 1, "setop");
       case "JOIN": return c(1, "join");
       case "INNER": case "LEFT": case "RIGHT": case "FULL": case "CROSS": case "NATURAL": case "OUTER": {
         if (this.at(1)?.t === "(") return null;
@@ -372,38 +393,66 @@ class Fmt {
         if (!this.blank()) this.brk(base);
         this.flush(base);
         this.cur = " ".repeat(start);
-      } else if (this.blank()) this.cur = " ".repeat(start);
-      else if (!(first && this.col() === base && start === base && !this.mustBreak)) this.brk(start);
-      this.emit(c.kw, true);
-      if (c.kind === "setop") {
-        // UNION 과 ALL 사이의 주석은 키워드 뒤에 (같은 줄 주석은 이 줄 끝, 제 줄 주석은 다음 SELECT 앞)
-        const end = this.pos + c.n;
-        this.prev = null;
-        for (let k = this.pos; k < end; k++) {
-          if (!this.isComment(this.toks[k])) continue;
-          this.pos = k;
-          this.comment();
+      } else {
+        const fresh = this.blank() || !(first && this.col() === base && start === base && !this.mustBreak);
+        // 줄 첫머리의 절 키워드 바로 뒤 제 줄 주석(SELECT ⏎ -- 메모 ⏎ a)은 키워드 줄 앞에 — 키워드만 홀로 남지 않게
+        // 키워드 낱말 사이의 제 줄 주석(ORDER ⏎ -- 메모 ⏎ BY)도 그 줄 앞에
+        if (fresh) {
+          for (let k = this.pos; k < this.pos + c.n; k++) {
+            if (!this.isComment(this.toks[k]) || !this.toks[k].nl) continue;
+            this.pend.push(this.toks[k]);
+            this.skip.add(k);
+          }
         }
-        this.pos = end;
-        this.mustBreak = false;
+        if (fresh && ["list", "cond", "join", "flat"].includes(c.kind)) {
+          for (let k = this.pos + c.n; this.isComment(this.toks[k]) && this.toks[k].nl; k++) {
+            this.pend.push(this.toks[k]);
+            this.skip.add(k);
+          }
+        }
+        if (this.blank()) this.cur = " ".repeat(start);
+        else if (fresh) this.brk(start);
+      }
+      this.emit(c.kw, true);
+      // 키워드 낱말 사이의 -- 주석·제 줄 주석(UNION -- 메모 ⏎ ALL · INSERT -- 메모 ⏎ INTO)은 키워드 뒤에 —
+      // 같은 줄 주석은 이 줄 끝, 제 줄 주석은 다음 줄 앞. -- 주석 뒤에는 아무것도 이을 수 없으니 그다음 것은 제 줄 주석으로
+      const end = this.pos + c.n;
+      const own: Tok[] = [];
+      const take = (k: number) => {
+        const ct = this.toks[k];
+        if (!ct.nl && !this.mustBreak) { this.pos = k; this.comment(); }
+        else own.push(ct);
+      };
+      // 목록·식은 키워드 바로 뒤 칸에서 (옮겨 쓴 주석 뒤가 아니라)
+      const kwEnd = this.col();
+      for (let k = this.pos; k < end; k++) if (this.isComment(this.toks[k]) && !this.inKw(this.toks[k]) && !this.skip.has(k)) take(k);
+      this.pos = end;
+      if (c.kind === "setop") {
+        // ALL 뒤의 같은 줄 주석도 이 줄 끝에, 제 줄 주석은 다음 SELECT 앞 (SELECT 칸)
+        let k = end;
+        for (; this.isComment(this.toks[k]) && !this.toks[k].nl; k++) take(k);
+        this.pos = k;
+        this.pend.push(...own);
+        this.cont = base;
         this.prev = null;
         this.allowWith = false;
         first = false;
         continue;
       }
-      this.pos += c.n;
+      this.pend.push(...own);
+      while (this.skip.has(this.pos)) this.pos++;
       this.prev = null;
       this.allowWith = c.kind === "insert" || c.kind === "multi";
       const R = base + 6;
       switch (c.kind) {
-        case "list": case "with": this.list(this.col() + 1); break;
+        case "list": case "with": this.list(kwEnd + 1); break;
         case "cond": this.cond(R); break;
         case "pivot": this.pivot(); break;
         case "merge": this.merge(base); break;
         case "multi": this.insertMulti(base); break;
         // LOG ERRORS INTO … REJECT LIMIT … — 끝까지 한 줄
-        case "tail": this.cont = this.col() + 1; this.expr({}); break;
-        default: this.cont = this.col() + 1; this.expr({ clauses: true }); break;
+        case "tail": this.cont = kwEnd + 1; this.expr({}); break;
+        default: this.cont = kwEnd + 1; this.expr({ clauses: true }); break;
       }
       first = false;
     }
@@ -417,8 +466,12 @@ class Fmt {
     this.expr({ clauses: true, list: true, stops });
     while (this.at()?.t === ",") {
       this.pos++;
-      // 쉼표 뒤 제 줄 주석은 다음 항목의 머리 — 쉼표 줄 앞에 (쉼표만 남은 줄이 생기지 않게)
-      while (this.isComment(this.at()) && this.at()!.nl) this.comment();
+      // 쉼표 뒤 같은 줄 주석은 앞 항목 줄 끝에, 제 줄 주석은 다음 항목의 머리 — 쉼표 줄 앞에 (쉼표만 남은 줄이 생기지 않게)
+      while (this.isComment(this.at())) {
+        const t = this.at()!;
+        if (t.nl || !this.mustBreak) this.comment();
+        else { this.pend.push(t); this.pos++; }
+      }
       // 다음 항목 앞에 주석이 있으면 이어 붙이지 않는다 (채우기여도 줄을 바꾼다)
       if (this.o.fill && !this.pend.length) {
         const s = this.snap();
@@ -626,13 +679,30 @@ class Fmt {
     this.tok();
     this.open();
     // PIVOT XML 의 IN (ANY) · IN (SELECT …)
-    if (this.up() === "SELECT" || this.up() === "WITH") this.query(this.col());
+    if (this.upNext() === "SELECT" || this.upNext() === "WITH") this.query(this.col());
     else this.list(this.col());
     this.close();
     this.close();
     // 별칭
     const a = this.at();
     if ((a?.t === "word" || a?.t === "qid") && !this.clauseAt() && !KEYWORDS.has(this.up())) this.tok();
+  }
+
+  /** 줄 앞의 AND·OR 를 col 칸에. 바로 뒤의 주석은 AND 만 홀로 남지 않게 — 같은 줄 주석은 앞 줄 끝에, 제 줄 주석은 AND 줄 앞에 */
+  private opAt(col: number, text: string) {
+    const op = this.pos;
+    this.pos++;
+    while (this.isComment(this.at())) {
+      const t = this.at()!;
+      if (!t.nl && !this.mustBreak) this.comment();
+      else { this.pend.push(t); this.pos++; }
+    }
+    const after = this.pos;
+    this.pos = op;
+    this.brk(col);
+    this.emit(text, true);
+    this.pos = after;
+    this.prev = this.toks[op];
   }
 
   private cond(R: number, stops?: Set<string>) {
@@ -643,18 +713,13 @@ class Fmt {
       if (op !== "AND" && op !== "OR") break;
       const text = this.kw(this.at()!.v);
       if (this.o.logicalBefore) {
-        this.brk(R - op.length);
-        this.emit(text, true);
+        this.opAt(R - op.length, text);
       } else {
         this.trail(text, true);
         this.pos++;
         this.brk(R + 1);
         this.prev = null;
-        this.cont = R + 1;
-        continue;
       }
-      this.pos++;
-      this.prev = this.toks[this.pos - 1];
       this.cont = R + 1;
     }
   }
@@ -712,7 +777,8 @@ class Fmt {
     this.prev = open;
     this.unary = false;
     this.pos++;
-    const u = this.up();
+    // ( /* 메모 */ SELECT … — 여는 괄호 뒤의 주석을 건너보고 서브쿼리인지 (예전에는 한 줄로 이어 붙였다)
+    const u = this.upNext();
     if (u === "SELECT" || u === "WITH") {
       this.query(this.col());
     } else if (this.logicalGroup()) {
@@ -726,10 +792,7 @@ class Fmt {
         if (op !== "AND" && op !== "OR") break;
         const text = this.kw(this.at()!.v);
         if (this.o.logicalBefore) {
-          this.brk(base);
-          this.emit(text, true);
-          this.pos++;
-          this.prev = this.toks[this.pos - 1];
+          this.opAt(base, text);
         } else {
           this.trail(text, true);
           this.pos++;
